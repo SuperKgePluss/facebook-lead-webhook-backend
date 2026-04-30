@@ -32,6 +32,7 @@ async function appendLeadToSheet(lead) {
             spreadsheetId,
             range: "LEADS_MAIN!B:J",
             valueInputOption: "USER_ENTERED",
+            insertDataOption: "OVERWRITE",
             requestBody: {
                 values,
             },
