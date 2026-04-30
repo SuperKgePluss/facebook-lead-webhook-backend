@@ -51,10 +51,29 @@ app.post("/webhook/facebook", async (req, res) => {
             console.log("Leadgen ID:", leadgenId);
 
             if (leadgenId) {
-                const leadData = await fetchLeadDetail(leadgenId);
+                let lead = null;
 
-                console.log("=== LEAD DETAIL ===");
-                console.log(JSON.stringify(leadData, null, 2));
+                try {
+                    const leadData = await fetchLeadDetail(leadgenId);
+
+                    console.log("=== LEAD DETAIL ===");
+                    console.log(JSON.stringify(leadData, null, 2));
+
+                    lead = {
+                        name: "Facebook Lead",
+                        phone: "",
+                    };
+                } catch (err) {
+                    console.warn("Fetch lead detail failed, using mock lead:", err.message);
+
+                    lead = {
+                        name: "Mock Facebook Lead",
+                        phone: "0899999999",
+                    };
+                }
+
+                const { appendLeadToSheet } = require("./services/googleSheets");
+                await appendLeadToSheet(lead);
             }
         }
 
