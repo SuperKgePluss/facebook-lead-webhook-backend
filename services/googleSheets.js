@@ -11,34 +11,36 @@ async function appendLeadToSheet(lead) {
         });
 
         const sheets = google.sheets({ version: "v4", auth });
-
         const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
-        const values = [
-            [
-                lead.phone || "",
-                lead.name || "", // map ไป customer_name
-                "Facebook",
-                "New",
-                "", // sales_owner
-                "", // latest_audio_link
-                "", // last_contact_date
-                "", // next_follow_up
-                "", // note
-            ],
-        ];
-
-        await sheets.spreadsheets.values.append({
+        const readResult = await sheets.spreadsheets.values.get({
             spreadsheetId,
-            range: "LEADS_MAIN!B:J",
-            valueInputOption: "USER_ENTERED",
-            insertDataOption: "OVERWRITE",
-            requestBody: {
-                values,
-            },
+            range: "LEADS_MAIN!B:B",
         });
 
-        console.log("✅ Lead appended to Google Sheet");
+        const rows = readResult.data.values || [];
+        const nextRow = rows.length + 1;
+
+        const values = [[
+            lead.phone || "",
+            lead.name || "",
+            "Facebook",
+            "New",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]];
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `LEADS_MAIN!B${nextRow}:J${nextRow}`,
+            valueInputOption: "USER_ENTERED",
+            requestBody: { values },
+        });
+
+        console.log(`✅ Lead written to Google Sheet row ${nextRow}`);
     } catch (err) {
         console.error("❌ Google Sheet error:", err.message);
     }
