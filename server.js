@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const { fetchLeadDetail } = require("./services/facebook");
+const { appendLeadToSheet } = require("./services/googleSheets");
 const express = require("express");
 
 const app = express();
@@ -10,22 +11,32 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
 
-// Health check
+function parseFacebookLead(leadData) {
+    const fieldData = leadData?.field_data;
+
+    if (!Array.isArray(fieldData) || fieldData.length === 0) {
+        throw new Error("Missing field_data");
+    }
+
+    const getValue = (...names) => {
+        const found = fieldData.find(item => names.includes(item.name));
+        return found?.values?.[0] || "";
+    };
+
+    return {
+        name: getValue("full_name", "name", "first_name"),
+        phone: getValue("phone_number", "phone", "mobile_phone"),
+    };
+}
+
 app.get("/health", (req, res) => {
     return res.status(200).send("OK");
 });
 
-// Facebook Webhook Verify
 app.get("/webhook/facebook", (req, res) => {
     const mode = req.query["hub.mode"];
     const token = req.query["hub.verify_token"];
     const challenge = req.query["hub.challenge"];
-
-    console.log("Facebook verify request:", {
-        mode,
-        token,
-        challenge,
-    });
 
     if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
         console.log("Facebook webhook verified");
@@ -36,7 +47,6 @@ app.get("/webhook/facebook", (req, res) => {
     return res.sendStatus(403);
 });
 
-// Facebook Webhook Receiver
 app.post("/webhook/facebook", async (req, res) => {
     try {
         console.log("Facebook webhook event received:");
@@ -59,12 +69,13 @@ app.post("/webhook/facebook", async (req, res) => {
                     console.log("=== LEAD DETAIL ===");
                     console.log(JSON.stringify(leadData, null, 2));
 
-                    lead = {
-                        name: "Facebook Lead",
-                        phone: "",
-                    };
+                    lead = parseFacebookLead(leadData);
+
+                    if (!lead.phone && !lead.name) {
+                        throw new Error("Parsed lead is empty");
+                    }
                 } catch (err) {
-                    console.warn("Fetch lead detail failed, using mock lead:", err.message);
+                    console.warn("Fetch/parse lead detail failed, using mock lead:", err.message);
 
                     lead = {
                         name: "Mock Facebook Lead",
@@ -72,7 +83,6 @@ app.post("/webhook/facebook", async (req, res) => {
                     };
                 }
 
-                const { appendLeadToSheet } = require("./services/googleSheets");
                 await appendLeadToSheet(lead);
             }
         }
