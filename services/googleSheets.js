@@ -16,7 +16,6 @@ async function appendLeadToSheet(lead) {
 
         const values = [
             [
-                "", // lead_id (ยังไม่ต้องใส่)
                 lead.phone || "",
                 lead.name || "", // map ไป customer_name
                 "Facebook",
@@ -26,14 +25,12 @@ async function appendLeadToSheet(lead) {
                 "", // last_contact_date
                 "", // next_follow_up
                 "", // note
-                new Date().toISOString(), // created_at
-                new Date().toISOString(), // updated_at
             ],
         ];
 
         await sheets.spreadsheets.values.append({
             spreadsheetId,
-            range: "LEADS_MAIN!A:E",
+            range: "LEADS_MAIN!B:J",
             valueInputOption: "USER_ENTERED",
             requestBody: {
                 values,
