@@ -1,4 +1,4 @@
-const axios = require("axios");
+﻿const axios = require("axios");
 
 async function fetchLeadDetail(leadgenId) {
     if (!leadgenId) {
@@ -37,15 +37,24 @@ async function fetchFormLeads() {
 
     const url = `https://graph.facebook.com/v25.0/${formId}/leads`;
 
-    const response = await axios.get(url, {
-        params: {
-            fields: "id,created_time,field_data,form_id,ad_id,campaign_id",
-            access_token: token,
-            limit: 25,
-        },
-    });
+    try {
+        const response = await axios.get(url, {
+            params: {
+                fields: "id,created_time,field_data",
+                access_token: token,
+                limit: 25,
+            },
+        });
 
-    return response.data?.data || [];
+        return response.data?.data || [];
+    } catch (err) {
+        console.error("❌ Facebook API error status:", err.response?.status);
+        console.error("❌ Facebook API error data:", JSON.stringify(err.response?.data, null, 2));
+
+        throw new Error(
+            err.response?.data?.error?.message || err.message
+        );
+    }
 }
 
 module.exports = {
