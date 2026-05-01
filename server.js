@@ -1,6 +1,6 @@
 ﻿require("dotenv").config();
 
-const { fetchLeadDetail, fetchFormLeads } = require("./services/facebook");
+const { fetchLeadDetail, fetchFormLeads, debugFacebookForm } = require("./services/facebook");
 const { appendLeadToSheet } = require("./services/googleSheets");
 const express = require("express");
 
@@ -142,6 +142,22 @@ app.get("/sync/facebook-leads", async (req, res) => {
     } catch (err) {
         console.error("❌ Facebook lead sync failed:", err.message);
 
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+        });
+    }
+});
+
+app.get("/debug/facebook-form", async (req, res) => {
+    try {
+        const result = await debugFacebookForm();
+
+        return res.status(200).json({
+            success: true,
+            form: result,
+        });
+    } catch (err) {
         return res.status(500).json({
             success: false,
             error: err.message,
