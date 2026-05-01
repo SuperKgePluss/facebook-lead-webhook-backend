@@ -1,8 +1,18 @@
 ﻿require("dotenv").config();
 
-const { fetchLeadDetail, fetchFormLeads, debugFacebookForm, debugLeadgenForms, fetchLatestLeadIdsFromPage } = require("./services/facebook");
-const { appendLeadToSheet } = require("./services/googleSheets");
 const express = require("express");
+const {
+    fetchLeadDetail,
+    fetchFormLeads,
+    debugFacebookForm,
+    debugLeadgenForms,
+    fetchLatestLeadIdsFromPage,
+} = require("./services/facebook");
+
+const {
+    appendLeadToSheet,
+    getExistingLeadgenIds,
+} = require("./services/googleSheets");
 
 const app = express();
 
@@ -52,38 +62,57 @@ app.post("/webhook/facebook", async (req, res) => {
         console.log("Facebook webhook event received:");
         console.log(JSON.stringify(req.body, null, 2));
 
-        const entry = req.body.entry?.[0];
-        const change = entry?.changes?.[0];
+        const entries = req.body.entry || [];
 
-        if (change?.field === "leadgen") {
-            const leadgenId = change.value?.leadgen_id;
+        for (const entry of entries) {
+            const changes = entry.changes || [];
 
-            console.log("Leadgen ID:", leadgenId);
-
-            if (leadgenId) {
-                let lead = null;
-
-                try {
-                    const leadData = await fetchLeadDetail(leadgenId);
-
-                    console.log("=== LEAD DETAIL ===");
-                    console.log(JSON.stringify(leadData, null, 2));
-
-                    lead = parseFacebookLead(leadData);
-
-                    if (!lead.phone && !lead.name) {
-                        throw new Error("Parsed lead is empty");
-                    }
-                } catch (err) {
-                    console.warn("Fetch/parse lead detail failed, using mock lead:", err.message);
-
-                    lead = {
-                        name: "Mock Facebook Lead",
-                        phone: "0899999999",
-                    };
+            for (const change of changes) {
+                if (change?.field !== "leadgen") {
+                    continue;
                 }
 
-                await appendLeadToSheet(lead);
+                const leadgenId = change.value?.leadgen_id;
+
+                if (!leadgenId) {
+                    console.warn("⚠️ Webhook missing leadgen_id → skip");
+                    continue;
+                }
+
+                try {
+                    console.log("Webhook Leadgen ID:", leadgenId);
+
+                    const leadData = await fetchLeadDetail(leadgenId);
+
+                    console.log("=== WEBHOOK LEAD DETAIL ===");
+                    console.log(JSON.stringify(leadData, null, 2));
+
+                    const lead = parseFacebookLead(leadData);
+
+                    lead.source = "Facebook";
+                    lead.facebook_leadgen_id = leadData.id || leadgenId;
+                    lead.facebook_created_time = leadData.created_time || "";
+                    lead.facebook_form_id = leadData.form_id || "";
+                    lead.facebook_form_name = "";
+                    lead.facebook_ad_id = leadData.ad_id || "";
+                    lead.facebook_campaign_id = leadData.campaign_id || "";
+
+                    if (!lead.facebook_leadgen_id) {
+                        console.warn("⚠️ Webhook lead has no facebook_leadgen_id → skip");
+                        continue;
+                    }
+
+                    if (!lead.phone && !lead.name) {
+                        console.warn("⚠️ Webhook parsed lead is empty → skip:", leadgenId);
+                        continue;
+                    }
+
+                    await appendLeadToSheet(lead);
+
+                    console.log("✅ Webhook lead processed:", leadgenId);
+                } catch (err) {
+                    console.error("❌ Webhook lead process failed:", err.message);
+                }
             }
         }
 
@@ -103,14 +132,32 @@ app.get("/sync/facebook-leads", async (req, res) => {
         console.log(`📥 Facebook lead refs fetched: ${leadRefs.length}`);
 
         let inserted = 0;
+        let skipped_existing = 0;
+        let skipped_empty = 0;
         let failed = 0;
+
+        const existingIds = await getExistingLeadgenIds();
 
         for (const leadRef of leadRefs) {
             try {
+                const leadgenId = leadRef.id;
+
+                if (!leadgenId) {
+                    console.warn("⚠️ Missing leadgen_id → skip");
+                    skipped_empty++;
+                    continue;
+                }
+
+                if (existingIds.has(leadgenId)) {
+                    console.log(`⏭️ Skipped existing leadgen_id: ${leadgenId}`);
+                    skipped_existing++;
+                    continue;
+                }
+
                 console.log("=== LEAD REF ===");
                 console.log(JSON.stringify(leadRef, null, 2));
 
-                const leadData = await fetchLeadDetail(leadRef.id);
+                const leadData = await fetchLeadDetail(leadgenId);
 
                 console.log("=== LEAD DETAIL ===");
                 console.log(JSON.stringify(leadData, null, 2));
@@ -118,18 +165,28 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 const lead = parseFacebookLead(leadData);
 
                 lead.source = "Facebook";
-                lead.facebook_leadgen_id = leadData.id || leadRef.id || "";
+                lead.facebook_leadgen_id = leadData.id || leadgenId;
                 lead.facebook_created_time = leadData.created_time || leadRef.created_time || "";
                 lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
                 lead.facebook_form_name = leadRef.form_name || "";
+                lead.facebook_ad_id = leadData.ad_id || "";
+                lead.facebook_campaign_id = leadData.campaign_id || "";
+
+                if (!lead.facebook_leadgen_id) {
+                    console.warn("⚠️ Lead has no facebook_leadgen_id → skip");
+                    skipped_empty++;
+                    continue;
+                }
 
                 if (!lead.phone && !lead.name) {
-                    console.warn("⚠️ Skipped empty lead:", leadRef.id);
-                    failed++;
+                    console.warn("⚠️ Skipped empty lead:", leadgenId);
+                    skipped_empty++;
                     continue;
                 }
 
                 await appendLeadToSheet(lead);
+
+                existingIds.add(leadgenId);
                 inserted++;
             } catch (err) {
                 failed++;
@@ -141,6 +198,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
             success: true,
             fetched: leadRefs.length,
             inserted,
+            skipped_existing,
+            skipped_empty,
             failed,
         });
     } catch (err) {
