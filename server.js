@@ -1,6 +1,6 @@
-require("dotenv").config();
+﻿require("dotenv").config();
 
-const { fetchLeadDetail } = require("./services/facebook");
+const { fetchLeadDetail, fetchFormLeads } = require("./services/facebook");
 const { appendLeadToSheet } = require("./services/googleSheets");
 const express = require("express");
 
@@ -91,6 +91,61 @@ app.post("/webhook/facebook", async (req, res) => {
     } catch (err) {
         console.error("Webhook error:", err.message);
         return res.sendStatus(200);
+    }
+});
+
+app.get("/sync/facebook-leads", async (req, res) => {
+    try {
+        console.log("🔄 Facebook lead sync started");
+
+        const leads = await fetchFormLeads();
+
+        console.log(`📥 Facebook leads fetched: ${leads.length}`);
+
+        let inserted = 0;
+        let failed = 0;
+
+        for (const leadData of leads) {
+            try {
+                console.log("=== PULLED LEAD ===");
+                console.log(JSON.stringify(leadData, null, 2));
+
+                const lead = parseFacebookLead(leadData);
+
+                lead.source = "Facebook";
+                lead.facebook_leadgen_id = leadData.id || "";
+                lead.facebook_created_time = leadData.created_time || "";
+                lead.facebook_form_id = leadData.form_id || "";
+                lead.facebook_ad_id = leadData.ad_id || "";
+                lead.facebook_campaign_id = leadData.campaign_id || "";
+
+                if (!lead.phone && !lead.name) {
+                    console.warn("⚠️ Skipped empty lead:", leadData.id);
+                    failed++;
+                    continue;
+                }
+
+                await appendLeadToSheet(lead);
+                inserted++;
+            } catch (err) {
+                failed++;
+                console.error("❌ Lead sync item failed:", err.message);
+            }
+        }
+
+        return res.status(200).json({
+            success: true,
+            fetched: leads.length,
+            inserted,
+            failed,
+        });
+    } catch (err) {
+        console.error("❌ Facebook lead sync failed:", err.message);
+
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+        });
     }
 });
 
