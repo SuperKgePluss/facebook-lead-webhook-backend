@@ -1,6 +1,6 @@
 ﻿require("dotenv").config();
 
-const { fetchLeadDetail, fetchFormLeads, debugFacebookForm, debugLeadgenForms } = require("./services/facebook");
+const { fetchLeadDetail, fetchFormLeads, debugFacebookForm, debugLeadgenForms, fetchLatestLeadIdsFromPage } = require("./services/facebook");
 const { appendLeadToSheet } = require("./services/googleSheets");
 const express = require("express");
 
@@ -98,29 +98,33 @@ app.get("/sync/facebook-leads", async (req, res) => {
     try {
         console.log("🔄 Facebook lead sync started");
 
-        const leads = await fetchFormLeads();
+        const leadRefs = await fetchLatestLeadIdsFromPage();
 
-        console.log(`📥 Facebook leads fetched: ${leads.length}`);
+        console.log(`📥 Facebook lead refs fetched: ${leadRefs.length}`);
 
         let inserted = 0;
         let failed = 0;
 
-        for (const leadData of leads) {
+        for (const leadRef of leadRefs) {
             try {
-                console.log("=== PULLED LEAD ===");
+                console.log("=== LEAD REF ===");
+                console.log(JSON.stringify(leadRef, null, 2));
+
+                const leadData = await fetchLeadDetail(leadRef.id);
+
+                console.log("=== LEAD DETAIL ===");
                 console.log(JSON.stringify(leadData, null, 2));
 
                 const lead = parseFacebookLead(leadData);
 
                 lead.source = "Facebook";
-                lead.facebook_leadgen_id = leadData.id || "";
-                lead.facebook_created_time = leadData.created_time || "";
-                lead.facebook_form_id = leadData.form_id || "";
-                lead.facebook_ad_id = leadData.ad_id || "";
-                lead.facebook_campaign_id = leadData.campaign_id || "";
+                lead.facebook_leadgen_id = leadData.id || leadRef.id || "";
+                lead.facebook_created_time = leadData.created_time || leadRef.created_time || "";
+                lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
+                lead.facebook_form_name = leadRef.form_name || "";
 
                 if (!lead.phone && !lead.name) {
-                    console.warn("⚠️ Skipped empty lead:", leadData.id);
+                    console.warn("⚠️ Skipped empty lead:", leadRef.id);
                     failed++;
                     continue;
                 }
@@ -135,7 +139,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            fetched: leads.length,
+            fetched: leadRefs.length,
             inserted,
             failed,
         });
