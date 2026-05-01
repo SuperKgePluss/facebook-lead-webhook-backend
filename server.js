@@ -207,6 +207,22 @@ app.get("/debug/facebook-form-raw", async (req, res) => {
     }
 });
 
+app.get("/debug/lead/:leadgenId", async (req, res) => {
+    try {
+        const leadData = await fetchLeadDetail(req.params.leadgenId);
+
+        return res.status(200).json({
+            success: true,
+            lead: leadData,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: err.response?.data || err.message,
+        });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
