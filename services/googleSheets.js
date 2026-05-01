@@ -16,6 +16,21 @@ const SHEETS = {
     DEALS: "DEALS",
 };
 
+async function createSheetsClient() {
+    const auth = new google.auth.GoogleAuth({
+        credentials: {
+            client_email: process.env.GOOGLE_CLIENT_EMAIL,
+            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+        },
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+
+    const sheets = google.sheets({ version: "v4", auth });
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+
+    return { sheets, spreadsheetId };
+}
+
 async function readSheet(sheets, spreadsheetId, range) {
     const result = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -25,12 +40,21 @@ async function readSheet(sheets, spreadsheetId, range) {
     return result.data.values || [];
 }
 
+async function updateSheet(sheets, spreadsheetId, range, values) {
+    await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range,
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values },
+    });
+}
+
 function findLeadByPhone(rows, phone) {
     const normalizedPhone = normalizePhone(phone);
 
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
-        const rowPhone = normalizePhone(row[1]); // Column B: phone
+        const rowPhone = normalizePhone(row[1]);
 
         if (rowPhone && rowPhone === normalizedPhone) {
             return {
@@ -55,17 +79,13 @@ function isCompletedLead(leadRow) {
     return String(leadRow?.status || "").toLowerCase() === "completed";
 }
 
-function hasRows(rows) {
-    return Array.isArray(rows) && rows.length > 0;
-}
-
 function findLatestDealByLeadId(rows, leadId) {
     let latestDeal = null;
 
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
 
-        if ((row[1] || "") === leadId) { // Column B: lead_id
+        if ((row[1] || "") === leadId) {
             latestDeal = {
                 rowNumber: i + 1,
                 deal_id: row[0] || "",
@@ -82,7 +102,7 @@ function findLeadDetailByLeadId(rows, leadId) {
     for (let i = 1; i < rows.length; i++) {
         const row = rows[i];
 
-        if ((row[0] || "") === leadId) { // Column A: lead_id
+        if ((row[0] || "") === leadId) {
             return {
                 rowNumber: i + 1,
                 lead_id: row[0] || "",
@@ -93,31 +113,14 @@ function findLeadDetailByLeadId(rows, leadId) {
     return null;
 }
 
-async function upsertLeadDetail(sheets, spreadsheetId, detailsRows, leadId, lead) {
-    const existingDetail = findLeadDetailByLeadId(detailsRows, leadId);
+function mergeSource(currentSource, incomingSource) {
+    const current = String(currentSource || "").trim();
+    const incoming = String(incomingSource || "Facebook").trim();
 
-    if (existingDetail) {
-        await updateSheet(
-            sheets,
-            spreadsheetId,
-            `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:L${existingDetail.rowNumber}`,
-            buildLeadDetailUpdateRow(leadId, lead)
-        );
+    if (!current) return incoming;
+    if (current === incoming) return current;
 
-        console.log(`🔄 Updated lead detail: ${leadId}`);
-        return;
-    }
-
-    const nextDetailRow = getNextRow(detailsRows);
-
-    await updateSheet(
-        sheets,
-        spreadsheetId,
-        `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:L${nextDetailRow}`,
-        buildLeadDetailRow(leadId, lead)
-    );
-
-    console.log(`✅ Created lead detail: ${leadId}`);
+    return "Multiple";
 }
 
 function buildLeadMainRow(leadId, lead) {
@@ -133,6 +136,21 @@ function buildLeadMainRow(leadId, lead) {
         "",
         lead.note || "",
         new Date().toISOString(),
+        new Date().toISOString(),
+    ]];
+}
+
+function buildExistingLeadUpdateRow(existingLead, lead) {
+    return [[
+        normalizePhone(lead.phone || existingLead.phone),
+        lead.name || existingLead.customer_name || "",
+        mergeSource(existingLead.source, lead.source || "Facebook"),
+        existingLead.status || "New",
+        "",
+        "",
+        "",
+        "",
+        lead.note || "",
         new Date().toISOString(),
     ]];
 }
@@ -171,15 +189,17 @@ function buildExistingDealUpdateRow(existingDeal, lead) {
         "",
         lead.note || "",
         new Date().toISOString(),
+        new Date().toISOString(),
     ]];
 }
 
 function buildLeadDetailRow(leadId, lead) {
     return [[
         leadId,
-        lead.name || "",
         lead.facebook_leadgen_id || "",
+        lead.name || "",
         lead.facebook_form_id || "",
+        lead.facebook_form_name || "",
         lead.facebook_ad_id || "",
         lead.facebook_campaign_id || "",
         lead.facebook_created_time || "",
@@ -191,37 +211,13 @@ function buildLeadDetailRow(leadId, lead) {
     ]];
 }
 
-function mergeSource(currentSource, incomingSource) {
-    const current = String(currentSource || "").trim();
-    const incoming = String(incomingSource || "Facebook").trim();
-
-    if (!current) return incoming;
-    if (current === incoming) return current;
-
-    return "Multiple";
-}
-
-function buildExistingLeadUpdateRow(existingLead, lead) {
+function buildLeadDetailUpdateRow(leadId, lead) {
     return [[
-        normalizePhone(lead.phone || existingLead.phone),
-        lead.name || existingLead.customer_name || "",
-        mergeSource(existingLead.source, lead.source || "Facebook"),
-        existingLead.status || "New",
-        "",
-        "",
-        "",
-        "",
-        lead.note || "",
-        new Date().toISOString(),
-    ]];
-}
-
-function buildLeadDetailUpdateRow(existingLeadId, lead) {
-    return [[
-        existingLeadId,
-        lead.name || "",
+        leadId,
         lead.facebook_leadgen_id || "",
+        lead.name || "",
         lead.facebook_form_id || "",
+        lead.facebook_form_name || "",
         lead.facebook_ad_id || "",
         lead.facebook_campaign_id || "",
         lead.facebook_created_time || "",
@@ -233,28 +229,50 @@ function buildLeadDetailUpdateRow(existingLeadId, lead) {
     ]];
 }
 
-async function updateSheet(sheets, spreadsheetId, range, values) {
-    await sheets.spreadsheets.values.update({
+async function getExistingLeadgenIds() {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+
+    const result = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        range,
-        valueInputOption: "USER_ENTERED",
-        requestBody: { values },
+        range: `${SHEETS.LEAD_DETAILS}!B:B`,
     });
+
+    const values = result.data.values || [];
+
+    return new Set(
+        values
+            .flat()
+            .map(value => String(value || "").trim())
+            .filter(Boolean)
+            .filter(value => value !== "facebook_leadgen_id")
+    );
 }
 
-async function createSheetsClient() {
-    const auth = new google.auth.GoogleAuth({
-        credentials: {
-            client_email: process.env.GOOGLE_CLIENT_EMAIL,
-            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-        },
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-    });
+async function upsertLeadDetail(sheets, spreadsheetId, detailsRows, leadId, lead) {
+    const existingDetail = findLeadDetailByLeadId(detailsRows, leadId);
 
-    const sheets = google.sheets({ version: "v4", auth });
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    if (existingDetail) {
+        await updateSheet(
+            sheets,
+            spreadsheetId,
+            `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:M${existingDetail.rowNumber}`,
+            buildLeadDetailUpdateRow(leadId, lead)
+        );
 
-    return { sheets, spreadsheetId };
+        console.log(`🔄 Updated lead detail: ${leadId}`);
+        return;
+    }
+
+    const nextDetailRow = getNextRow(detailsRows);
+
+    await updateSheet(
+        sheets,
+        spreadsheetId,
+        `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:M${nextDetailRow}`,
+        buildLeadDetailRow(leadId, lead)
+    );
+
+    console.log(`✅ Created lead detail: ${leadId}`);
 }
 
 async function appendLeadToSheet(lead) {
@@ -276,7 +294,7 @@ async function appendLeadToSheet(lead) {
         const detailsRows = await readSheet(
             sheets,
             spreadsheetId,
-            `${SHEETS.LEAD_DETAILS}!A:L`
+            `${SHEETS.LEAD_DETAILS}!A:M`
         );
 
         const existingLead = findLeadByPhone(leadsRows, lead.phone);
@@ -308,15 +326,18 @@ async function appendLeadToSheet(lead) {
             await updateSheet(
                 sheets,
                 spreadsheetId,
-                `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:L${nextDetailRow}`,
+                `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:M${nextDetailRow}`,
                 buildLeadDetailRow(leadId, lead)
             );
 
             console.log(`✅ New lead created: ${leadId}, deal: ${dealId}`);
-            return;
-        }
 
-        // ===== Existing lead logic =====
+            return {
+                action: "created",
+                lead_id: leadId,
+                deal_id: dealId,
+            };
+        }
 
         const leadId = existingLead.lead_id;
 
@@ -347,7 +368,12 @@ async function appendLeadToSheet(lead) {
             await upsertLeadDetail(sheets, spreadsheetId, detailsRows, leadId, lead);
 
             console.log(`🔄 Updated existing deal: ${latestDeal.deal_id}`);
-            return;
+
+            return {
+                action: "updated_existing",
+                lead_id: leadId,
+                deal_id: latestDeal.deal_id,
+            };
         }
 
         if (isCompleted) {
@@ -371,13 +397,44 @@ async function appendLeadToSheet(lead) {
             await upsertLeadDetail(sheets, spreadsheetId, detailsRows, leadId, lead);
 
             console.log(`🆕 New deal created for existing lead: ${dealId}`);
-            return;
+
+            return {
+                action: "created_new_deal_for_existing_lead",
+                lead_id: leadId,
+                deal_id: dealId,
+            };
         }
+
+        return {
+            action: "no_action",
+            lead_id: leadId,
+        };
     } catch (err) {
         console.error("❌ Google Sheet error:", err.message);
+        throw err;
     }
+}
+
+async function getExistingLeadgenIds() {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+
+    const result = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${SHEETS.LEAD_DETAILS}!B:B`,
+    });
+
+    const values = result.data.values || [];
+
+    return new Set(
+        values
+            .flat()
+            .map(value => String(value || "").trim())
+            .filter(Boolean)
+            .filter(value => value !== "facebook_leadgen_id")
+    );
 }
 
 module.exports = {
     appendLeadToSheet,
+    getExistingLeadgenIds,
 };
