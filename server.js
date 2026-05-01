@@ -181,6 +181,32 @@ app.get("/debug/leadgen-forms", async (req, res) => {
     }
 });
 
+app.get("/debug/facebook-form-raw", async (req, res) => {
+    try {
+        const formId = process.env.FB_FORM_ID;
+        const token = process.env.FB_PAGE_ACCESS_TOKEN;
+
+        const axios = require("axios");
+
+        const response = await axios.get(`https://graph.facebook.com/v25.0/${formId}`, {
+            params: {
+                fields: "id,name,status,created_time,questions",
+                access_token: token,
+            },
+        });
+
+        return res.status(200).json({
+            success: true,
+            form: response.data,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: err.response?.data || err.message,
+        });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
