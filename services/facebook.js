@@ -86,8 +86,38 @@ async function debugFacebookForm() {
     }
 }
 
+async function debugLeadgenForms() {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.FB_PAGE_ID;
+
+    if (!token) {
+        throw new Error("Missing FB_PAGE_ACCESS_TOKEN");
+    }
+
+    if (!pageId) {
+        throw new Error("Missing FB_PAGE_ID");
+    }
+
+    const url = `https://graph.facebook.com/v25.0/${pageId}/leadgen_forms`;
+
+    try {
+        const response = await axios.get(url, {
+            params: {
+                fields: "id,name,status",
+                access_token: token,
+            },
+        });
+
+        return response.data;
+    } catch (err) {
+        console.error("❌ Facebook forms list error:", JSON.stringify(err.response?.data, null, 2));
+        throw new Error(err.response?.data?.error?.message || err.message);
+    }
+}
+
 module.exports = {
     fetchLeadDetail,
     fetchFormLeads,
     debugFacebookForm,
+    debugLeadgenForms,
 };

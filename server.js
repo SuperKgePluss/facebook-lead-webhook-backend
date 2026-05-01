@@ -1,6 +1,6 @@
 ﻿require("dotenv").config();
 
-const { fetchLeadDetail, fetchFormLeads, debugFacebookForm } = require("./services/facebook");
+const { fetchLeadDetail, fetchFormLeads, debugFacebookForm, debugLeadgenForms } = require("./services/facebook");
 const { appendLeadToSheet } = require("./services/googleSheets");
 const express = require("express");
 
@@ -156,6 +156,22 @@ app.get("/debug/facebook-form", async (req, res) => {
         return res.status(200).json({
             success: true,
             form: result,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+        });
+    }
+});
+
+app.get("/debug/leadgen-forms", async (req, res) => {
+    try {
+        const result = await debugLeadgenForms();
+
+        return res.status(200).json({
+            success: true,
+            result,
         });
     } catch (err) {
         return res.status(500).json({
