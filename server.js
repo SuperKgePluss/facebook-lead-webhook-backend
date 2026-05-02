@@ -125,6 +125,27 @@ app.post("/webhook/facebook", async (req, res) => {
 
 app.get("/sync/facebook-leads", async (req, res) => {
     try {
+        // ✅ Block public access to sync endpoint
+        if (!process.env.SYNC_SECRET) {
+            console.error("❌ Missing SYNC_SECRET in environment variables");
+
+            return res.status(500).json({
+                success: false,
+                error: "Server misconfigured: missing SYNC_SECRET",
+            });
+        }
+
+        const incomingSecret = String(req.query.secret || "").trim();
+
+        if (incomingSecret !== process.env.SYNC_SECRET) {
+            console.warn("⛔ Unauthorized sync attempt");
+
+            return res.status(401).json({
+                success: false,
+                error: "Unauthorized",
+            });
+        }
+
         console.log("🔄 Facebook lead sync started");
 
         const leadRefs = await fetchLatestLeadIdsFromPage();
@@ -132,6 +153,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
         console.log(`📥 Facebook lead refs fetched: ${leadRefs.length}`);
 
         let inserted = 0;
+        let updated_existing = 0;
         let skipped_existing = 0;
         let skipped_empty = 0;
         let failed = 0;
@@ -140,7 +162,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
 
         for (const leadRef of leadRefs) {
             try {
-                const leadgenId = leadRef.id;
+                const leadgenId = String(leadRef.id || "").trim();
 
                 if (!leadgenId) {
                     console.warn("⚠️ Missing leadgen_id → skip");
@@ -165,7 +187,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 const lead = parseFacebookLead(leadData);
 
                 lead.source = "Facebook";
-                lead.facebook_leadgen_id = leadData.id || leadgenId;
+                lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
                 lead.facebook_created_time = leadData.created_time || leadRef.created_time || "";
                 lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
                 lead.facebook_form_name = leadRef.form_name || "";
@@ -184,10 +206,15 @@ app.get("/sync/facebook-leads", async (req, res) => {
                     continue;
                 }
 
-                await appendLeadToSheet(lead);
+                const result = await appendLeadToSheet(lead);
 
                 existingIds.add(leadgenId);
-                inserted++;
+
+                if (result?.action === "created") {
+                    inserted++;
+                } else {
+                    updated_existing++;
+                }
             } catch (err) {
                 failed++;
                 console.error("❌ Lead sync item failed:", err.message);
@@ -198,6 +225,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
             success: true,
             fetched: leadRefs.length,
             inserted,
+            updated_existing,
             skipped_existing,
             skipped_empty,
             failed,
