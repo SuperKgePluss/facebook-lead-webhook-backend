@@ -355,12 +355,14 @@ app.post("/import/legacy", async (req, res) => {
             const preferredCallDay = String(row[9] || "").trim();
             const preferredCallTime = String(row[10] || "").trim();
 
-            if (!phone && !name) {
+            const cleanPhone = phone?.replace(/\D/g, "");
+
+            if (!cleanPhone) {
                 skipped++;
                 preview.push({
                     row: i + 1,
                     action: "skipped",
-                    reason: "missing phone and name"
+                    reason: "missing phone"
                 });
                 continue;
             }
