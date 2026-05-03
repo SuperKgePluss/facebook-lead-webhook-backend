@@ -39,6 +39,14 @@ function parseFacebookLead(leadData) {
     };
 }
 
+function formatDateTimeForSheet(date = new Date()) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    return date.toISOString();
+}
+
 app.get("/health", (req, res) => {
     return res.status(200).send("OK");
 });

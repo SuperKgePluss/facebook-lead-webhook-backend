@@ -10,6 +10,14 @@ function generateId(prefix) {
     return `${prefix}-${Date.now()}`;
 }
 
+function formatDateTimeForSheet(date = new Date()) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    return date.toISOString();
+}
+
 const SHEETS = {
     LEADS_MAIN: "LEADS_MAIN",
     LEAD_DETAILS: "LEAD_DETAILS",
