@@ -326,6 +326,29 @@ app.get("/debug/lead/:leadgenId", async (req, res) => {
     }
 });
 
+function mapLegacySource(source) {
+    const value = String(source || "").trim().toLowerCase();
+
+    if (value.includes("lead gen")) return "Facebook";
+    if (value.includes("fb chat")) return "Messenger";
+    if (value.includes("messenger")) return "Messenger";
+    if (value.includes("website")) return "Website";
+
+    return "Legacy Import";
+}
+
+function mapLegacyClassification(classification) {
+    const value = String(classification || "").trim().toLowerCase();
+
+    if (value === "hot") return "Interested";
+    if (value === "warm") return "Contacted";
+    if (value === "cold") return "New";
+    if (value === "not interested") return "Not Interested";
+    if (value === "purchased") return "Closed";
+
+    return "New";
+}
+
 app.post("/import/legacy", async (req, res) => {
     const dryRun = String(req.query.dry_run || "false") === "true";
 
@@ -364,6 +387,7 @@ app.post("/import/legacy", async (req, res) => {
             const province = String(row[7] || "").trim();
             const preferredCallDay = String(row[9] || "").trim();
             const preferredCallTime = String(row[10] || "").trim();
+            const classification = String(row[20] || "").trim(); // U = Classification
 
             const cleanPhone = phone?.replace(/\D/g, "");
 
@@ -409,9 +433,14 @@ app.post("/import/legacy", async (req, res) => {
             const lead = {
                 phone,
                 name,
-                source: source || "Legacy Import",
+                source: mapLegacySource(source),
+                status: mapLegacyClassification(classification),
                 sales_owner: salesperson,
-                note: noteParts.join("\n"),
+                note: [
+                    `Original source: ${source || "-"}`,
+                    classification && `Original classification: ${classification}`,
+                    noteParts.join("\n"),
+                ].filter(Boolean).join("\n"),
                 additional_note: noteParts.join("\n"),
             };
 

@@ -15,7 +15,15 @@ function formatDateTimeForSheet(date = new Date()) {
         return "";
     }
 
-    return date.toISOString();
+    return date.toLocaleString("th-TH", {
+        timeZone: "Asia/Bangkok",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+    });
 }
 
 const SHEETS = {
@@ -137,7 +145,7 @@ function buildLeadMainRow(leadId, lead) {
         normalizePhone(lead.phone),
         lead.name || "",
         lead.source || "Facebook",
-        "New",
+        lead.status || "New",
         "",
         "",
         "",
