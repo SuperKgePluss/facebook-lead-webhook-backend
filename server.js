@@ -342,6 +342,8 @@ app.post("/import/legacy", async (req, res) => {
         let skipped = 0;
         const preview = [];
 
+        const seenImportPhones = new Set();
+
         for (let i = 1; i < rawRows.length; i++) {
             const row = rawRows[i];
 
@@ -366,6 +368,20 @@ app.post("/import/legacy", async (req, res) => {
                 });
                 continue;
             }
+
+            if (seenImportPhones.has(cleanPhone)) {
+                skipped++;
+                preview.push({
+                    row: i + 1,
+                    action: "skipped",
+                    reason: "duplicate phone in import file",
+                    phone,
+                    name
+                });
+                continue;
+            }
+
+            seenImportPhones.add(cleanPhone);
 
             const normalizedPhone = String(phone || "").replace(/\D/g, "");
             const existingLead = leadsRows.find((leadRow, index) => {
