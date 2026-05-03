@@ -135,8 +135,8 @@ function buildLeadMainRow(leadId, lead) {
         "",
         "",
         lead.note || "",
-        new Date().toISOString(),
-        new Date().toISOString(),
+        new Date().formatDateTimeForSheet(),
+        new Date().formatDateTimeForSheet(),
     ]];
 }
 
@@ -151,7 +151,7 @@ function buildExistingLeadUpdateRow(existingLead, lead) {
         "",
         "",
         lead.note || "",
-        new Date().toISOString(),
+        new Date().formatDateTimeForSheet(),
     ]];
 }
 
@@ -169,8 +169,8 @@ function buildDealRow(dealId, leadId, lead) {
         "",
         "",
         lead.note || "",
-        new Date().toISOString(),
-        new Date().toISOString(),
+        new Date().formatDateTimeForSheet(),
+        new Date().formatDateTimeForSheet(),
     ]];
 }
 
@@ -188,8 +188,8 @@ function buildExistingDealUpdateRow(existingDeal, lead) {
         "",
         "",
         lead.note || "",
-        new Date().toISOString(),
-        new Date().toISOString(),
+        new Date().formatDateTimeForSheet(),
+        new Date().formatDateTimeForSheet(),
     ]];
 }
 

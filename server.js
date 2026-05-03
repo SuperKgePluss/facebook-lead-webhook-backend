@@ -91,7 +91,9 @@ app.post("/webhook/facebook", async (req, res) => {
 
                     lead.source = "Facebook";
                     lead.facebook_leadgen_id = leadData.id || leadgenId;
-                    lead.facebook_created_time = leadData.created_time || "";
+                    lead.facebook_created_time = leadData.created_time
+                        ? formatDateTimeForSheet(new Date(leadData.created_time))
+                        : "";
                     lead.facebook_form_id = leadData.form_id || "";
                     lead.facebook_form_name = "";
                     lead.facebook_ad_id = leadData.ad_id || "";
@@ -188,7 +190,9 @@ app.get("/sync/facebook-leads", async (req, res) => {
 
                 lead.source = "Facebook";
                 lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
-                lead.facebook_created_time = leadData.created_time || leadRef.created_time || "";
+                lead.facebook_created_time = leadData.created_time
+                    ? formatDateTimeForSheet(new Date(leadData.created_time))
+                    : "";
                 lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
                 lead.facebook_form_name = leadRef.form_name || "";
                 lead.facebook_ad_id = leadData.ad_id || "";
@@ -310,6 +314,66 @@ app.get("/debug/lead/:leadgenId", async (req, res) => {
         return res.status(500).json({
             success: false,
             error: err.response?.data || err.message,
+        });
+    }
+});
+
+app.post("/import/legacy", async (req, res) => {
+    const dryRun = String(req.query.dry_run || "false") === "true";
+
+    try {
+        const { sheets, spreadsheetId } = await require("./services/googleSheets").createSheetsClient();
+
+        const rawRows = await require("./services/googleSheets").readSheet(
+            sheets,
+            spreadsheetId,
+            "IMPORT_RAW!A:Z"
+        );
+
+        let inserted = 0;
+        let updated = 0;
+        let skipped = 0;
+
+        for (let i = 1; i < rawRows.length; i++) {
+            const row = rawRows[i];
+
+            const phone = String(row[5] || "").trim(); // ← ปรับ index ตาม mapping จริง
+            const name = String(row[4] || "").trim();
+
+            if (!phone) {
+                skipped++;
+                continue;
+            }
+
+            const lead = {
+                phone,
+                name,
+                source: "Legacy Import",
+                note: "Imported from legacy sheet"
+            };
+
+            if (!dryRun) {
+                const result = await appendLeadToSheet(lead);
+
+                if (result?.action === "created") inserted++;
+                else updated++;
+            } else {
+                inserted++;
+            }
+        }
+
+        return res.json({
+            success: true,
+            dryRun,
+            inserted,
+            updated,
+            skipped
+        });
+
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: err.message
         });
     }
 });
