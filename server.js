@@ -322,52 +322,117 @@ app.post("/import/legacy", async (req, res) => {
     const dryRun = String(req.query.dry_run || "false") === "true";
 
     try {
-        const { sheets, spreadsheetId } = await require("./services/googleSheets").createSheetsClient();
+        const googleSheets = require("./services/googleSheets");
+        const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
 
-        const rawRows = await require("./services/googleSheets").readSheet(
+        const rawRows = await googleSheets.readSheet(
             sheets,
             spreadsheetId,
             "IMPORT_RAW!A:Z"
         );
 
+        const leadsRows = await googleSheets.readSheet(
+            sheets,
+            spreadsheetId,
+            "LEADS_MAIN!A:L"
+        );
+
         let inserted = 0;
         let updated = 0;
         let skipped = 0;
+        const preview = [];
 
         for (let i = 1; i < rawRows.length; i++) {
             const row = rawRows[i];
 
-            const phone = String(row[5] || "").trim(); // ← ปรับ index ตาม mapping จริง
+            const source = String(row[0] || "").trim();
+            const rawMessage = String(row[1] || "").trim();
+            const leadInDate = String(row[2] || "").trim();
+            const salesperson = String(row[3] || "").trim();
             const name = String(row[4] || "").trim();
+            const phone = String(row[5] || "").trim();
+            const province = String(row[7] || "").trim();
+            const preferredCallDay = String(row[9] || "").trim();
+            const preferredCallTime = String(row[10] || "").trim();
 
-            if (!phone) {
+            if (!phone && !name) {
                 skipped++;
+                preview.push({
+                    row: i + 1,
+                    action: "skipped",
+                    reason: "missing phone and name"
+                });
                 continue;
             }
+
+            const normalizedPhone = String(phone || "").replace(/\D/g, "");
+            const existingLead = leadsRows.find((leadRow, index) => {
+                if (index === 0) return false;
+                const existingPhone = String(leadRow[1] || "").replace(/\D/g, "");
+                return normalizedPhone && existingPhone === normalizedPhone;
+            });
+
+            const noteParts = [
+                rawMessage && `Legacy message: ${rawMessage}`,
+                leadInDate && `Lead in date: ${leadInDate}`,
+                province && `Province: ${province}`,
+                preferredCallDay && `Preferred call day: ${preferredCallDay}`,
+                preferredCallTime && `Preferred call time: ${preferredCallTime}`,
+            ].filter(Boolean);
 
             const lead = {
                 phone,
                 name,
-                source: "Legacy Import",
-                note: "Imported from legacy sheet"
+                source: source || "Legacy Import",
+                sales_owner: salesperson,
+                note: noteParts.join("\n"),
+                additional_note: noteParts.join("\n"),
             };
 
-            if (!dryRun) {
-                const result = await appendLeadToSheet(lead);
-
-                if (result?.action === "created") {
-                    inserted++;
-                }
-                else if (
-                    result?.action === "updated_existing" ||
-                    result?.action === "created_new_deal_for_existing_lead"
-                ) {
+            if (dryRun) {
+                if (existingLead) {
                     updated++;
+                    preview.push({
+                        row: i + 1,
+                        action: "would_update",
+                        phone,
+                        name,
+                        existing_lead_id: existingLead[0] || ""
+                    });
+                } else {
+                    inserted++;
+                    preview.push({
+                        row: i + 1,
+                        action: "would_insert",
+                        phone,
+                        name
+                    });
                 }
-                else {
-                    skipped++;
-                }
+
+                continue;
             }
+
+            const result = await appendLeadToSheet(lead);
+
+            if (result?.action === "created") {
+                inserted++;
+            } else if (
+                result?.action === "updated_existing" ||
+                result?.action === "created_new_deal_for_existing_lead"
+            ) {
+                updated++;
+            } else {
+                skipped++;
+            }
+
+            preview.push({
+                row: i + 1,
+                action: result?.action || "unknown",
+                phone,
+                name,
+                lead_id: result?.lead_id || "",
+                deal_id: result?.deal_id || "",
+            });
         }
 
         return res.json({
@@ -375,7 +440,8 @@ app.post("/import/legacy", async (req, res) => {
             dryRun,
             inserted,
             updated,
-            skipped
+            skipped,
+            preview,
         });
 
     } catch (err) {
