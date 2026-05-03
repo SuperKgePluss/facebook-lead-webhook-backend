@@ -355,10 +355,18 @@ app.post("/import/legacy", async (req, res) => {
             if (!dryRun) {
                 const result = await appendLeadToSheet(lead);
 
-                if (result?.action === "created") inserted++;
-                else updated++;
-            } else {
-                inserted++;
+                if (result?.action === "created") {
+                    inserted++;
+                }
+                else if (
+                    result?.action === "updated_existing" ||
+                    result?.action === "created_new_deal_for_existing_lead"
+                ) {
+                    updated++;
+                }
+                else {
+                    skipped++;
+                }
             }
         }
 
