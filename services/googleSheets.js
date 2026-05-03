@@ -437,4 +437,6 @@ async function getExistingLeadgenIds() {
 module.exports = {
     appendLeadToSheet,
     getExistingLeadgenIds,
+    createSheetsClient,
+    readSheet,
 };
