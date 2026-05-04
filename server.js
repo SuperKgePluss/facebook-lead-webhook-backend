@@ -21,6 +21,14 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
 
+const ENV = process.env.SHEET_ENV || "prod";
+
+const SHEETS = {
+    LEADS_MAIN: ENV === "dev" ? "LEADS_MAIN_DEV" : "LEADS_MAIN",
+    DEALS: ENV === "dev" ? "DEALS_DEV" : "DEALS",
+    LEAD_DETAILS: ENV === "dev" ? "LEAD_DETAILS_DEV" : "LEAD_DETAILS",
+};
+
 function parseFacebookLead(leadData) {
     const fieldData = leadData?.field_data;
 

@@ -114,35 +114,66 @@ async function fetchLatestLeadIdsFromPage() {
     if (!token) throw new Error("Missing FB_PAGE_ACCESS_TOKEN");
     if (!pageId) throw new Error("Missing FB_PAGE_ID");
 
-    const url = `https://graph.facebook.com/v25.0/${pageId}`;
+    const formsUrl = `https://graph.facebook.com/v25.0/${pageId}/leadgen_forms`;
 
     try {
-        const response = await axios.get(url, {
+        const formsResponse = await axios.get(formsUrl, {
             params: {
-                fields: "leadgen_forms.limit(10){id,name,leads.limit(25){id,created_time}}",
+                fields: "id,name,status",
+                limit: 100,
                 access_token: token,
             },
         });
 
-        const forms = response.data?.leadgen_forms?.data || [];
+        const forms = formsResponse.data?.data || [];
         const leads = [];
 
-        for (const form of forms) {
-            const formLeads = form?.leads?.data || [];
+        console.log(`📋 Lead forms found: ${forms.length}`);
 
-            for (const lead of formLeads) {
-                leads.push({
-                    id: lead.id,
-                    created_time: lead.created_time,
-                    form_id: form.id,
-                    form_name: form.name,
+        for (const form of forms) {
+            let nextUrl = `https://graph.facebook.com/v25.0/${form.id}/leads`;
+            let pageCount = 0;
+
+            while (nextUrl) {
+                pageCount++;
+
+                if (pageCount > 50) {
+                    console.warn(`⚠️ Stop pagination for form ${form.id}: max page limit reached`);
+                    break;
+                }
+
+                const leadResponse = await axios.get(nextUrl, {
+                    params: nextUrl.includes("?")
+                        ? {}
+                        : {
+                            fields: "id,created_time",
+                            limit: 100,
+                            access_token: token,
+                        },
                 });
+
+                const formLeads = leadResponse.data?.data || [];
+
+                for (const lead of formLeads) {
+                    leads.push({
+                        id: lead.id,
+                        created_time: lead.created_time,
+                        form_id: form.id,
+                        form_name: form.name,
+                    });
+                }
+
+                nextUrl = leadResponse.data?.paging?.next || null;
             }
+
+            console.log(`✅ Form synced: ${form.name} (${form.id})`);
         }
+
+        console.log(`📥 Total lead refs fetched: ${leads.length}`);
 
         return leads;
     } catch (err) {
-        console.error("❌ Facebook nested lead query error:", JSON.stringify(err.response?.data, null, 2));
+        console.error("❌ Facebook paginated lead query error:", JSON.stringify(err.response?.data, null, 2));
         throw new Error(err.response?.data?.error?.message || err.message);
     }
 }

@@ -88,7 +88,12 @@ function findLeadByPhone(rows, phone) {
 }
 
 function getNextRow(rows) {
-    return rows.length + 1;
+    for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i] && rows[i].some(cell => cell !== "")) {
+            return i + 2;
+        }
+    }
+    return 2;
 }
 
 function isCompletedLead(leadRow) {
