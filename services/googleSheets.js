@@ -5,7 +5,7 @@ function normalizePhone(phone) {
 
     if (!digits) return "";
 
-    if (digits.startsWith("66") && digits.length >= 11) {
+    if (digits.startsWith("66") && digits.length > 2) {
         digits = "0" + digits.slice(2);
     }
 
