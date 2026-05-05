@@ -22,6 +22,63 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
 
+function normalizeProvince(rawProvince) {
+    const raw = String(rawProvince || "").trim();
+    if (!raw) return { province: "", rawProvince: "" };
+
+    const lower = raw.toLowerCase();
+
+    if (lower.includes("@") || lower.includes("http")) {
+        return { province: "", rawProvince: raw };
+    }
+
+    const aliases = {
+        "กทม": "กรุงเทพมหานคร",
+        "กทม.": "กรุงเทพมหานคร",
+        "กรุงเทพ": "กรุงเทพมหานคร",
+        "กรุงเทพฯ": "กรุงเทพมหานคร",
+        "กรุงเทพมหานคร": "กรุงเทพมหานคร",
+        "bangkok": "กรุงเทพมหานคร",
+        "bkk": "กรุงเทพมหานคร",
+
+        "พิษณุโลก": "พิษณุโลก",
+        "phitsanulok": "พิษณุโลก",
+
+        "สุรินทร์": "สุรินทร์",
+        "surin": "สุรินทร์",
+
+        "ภูเก็ต": "ภูเก็ต",
+        "phuket": "ภูเก็ต",
+
+        "นนทบุรี": "นนทบุรี",
+        "nonthaburi": "นนทบุรี",
+
+        "ชลบุรี": "ชลบุรี",
+        "chonburi": "ชลบุรี",
+
+        "ระยอง": "ระยอง",
+        "rayong": "ระยอง",
+
+        "ฉะเชิงเทรา": "ฉะเชิงเทรา",
+        "chachoengsao": "ฉะเชิงเทรา"
+    };
+
+    const cleaned = lower.replace(/\s+/g, "").replace(".", "");
+
+    for (const [key, value] of Object.entries(aliases)) {
+        const normalizedKey = key.toLowerCase().replace(/\s+/g, "").replace(".", "");
+        if (cleaned === normalizedKey || cleaned.includes(normalizedKey)) {
+            return { province: value, rawProvince: raw };
+        }
+    }
+
+    if (raw.length > 30) {
+        return { province: "", rawProvince: raw };
+    }
+
+    return { province: raw, rawProvince: raw };
+}
+
 function parseFacebookLead(leadData) {
     const fieldData = leadData?.field_data;
 
@@ -43,7 +100,9 @@ function parseFacebookLead(leadData) {
     const name = getValue("full_name", "name", "first_name");
     const phone = getValue("phone_number", "phone", "mobile_phone");
 
-    const province = getValue("province");
+    const rawProvince = getValue("province");
+    const provinceResult = normalizeProvince(rawProvince);
+    const province = provinceResult.province;
 
     const preferred_call_day = getValue(
         "วันที่สะดวกให้ติดต่อกลับ",
@@ -64,8 +123,10 @@ function parseFacebookLead(leadData) {
         preferred_call_day,
         preferred_call_time,
         inbox_url,
-        note: "", // ไม่ยัดข้อมูลพวกนี้แล้ว
-        additional_note: ""
+        note: "",
+        additional_note: provinceResult.rawProvince && provinceResult.rawProvince !== province
+            ? `Raw province input: ${provinceResult.rawProvince}`
+            : ""
     };
 }
 
