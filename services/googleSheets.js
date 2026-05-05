@@ -1,9 +1,19 @@
 ﻿const { google } = require("googleapis");
 
 function normalizePhone(phone) {
-    return String(phone || "")
-        .replace(/\D/g, "")
-        .trim();
+    let digits = String(phone || "").replace(/\D/g, "").trim();
+
+    if (!digits) return "";
+
+    if (digits.startsWith("66") && digits.length >= 11) {
+        digits = "0" + digits.slice(2);
+    }
+
+    if (digits.length === 9 && !digits.startsWith("0")) {
+        digits = "0" + digits;
+    }
+
+    return digits;
 }
 
 function generateId(prefix) {
@@ -219,12 +229,11 @@ function buildLeadDetailRow(leadId, lead) {
         leadId,
         lead.facebook_leadgen_id || "",
         lead.name || "",
-        lead.facebook_form_id || "",
         lead.facebook_form_name || "",
+        lead.facebook_form_id || "",
         lead.facebook_ad_id || "",
         lead.facebook_campaign_id || "",
         lead.facebook_created_time || "",
-        lead.facebook_name || "",
         lead.line_user_id || "",
         lead.line_display_name || "",
         lead.line_created_time || "",
@@ -233,21 +242,7 @@ function buildLeadDetailRow(leadId, lead) {
 }
 
 function buildLeadDetailUpdateRow(leadId, lead) {
-    return [[
-        leadId,
-        lead.facebook_leadgen_id || "",
-        lead.name || "",
-        lead.facebook_form_id || "",
-        lead.facebook_form_name || "",
-        lead.facebook_ad_id || "",
-        lead.facebook_campaign_id || "",
-        lead.facebook_created_time || "",
-        lead.facebook_name || "",
-        lead.line_user_id || "",
-        lead.line_display_name || "",
-        lead.line_created_time || "",
-        lead.additional_note || "",
-    ]];
+    return buildLeadDetailRow(leadId, lead);
 }
 
 async function getExistingLeadgenIds() {
@@ -276,7 +271,7 @@ async function upsertLeadDetail(sheets, spreadsheetId, detailsRows, leadId, lead
         await updateSheet(
             sheets,
             spreadsheetId,
-            `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:M${existingDetail.rowNumber}`,
+            `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:L${existingDetail.rowNumber}`,
             buildLeadDetailUpdateRow(leadId, lead)
         );
 
@@ -289,7 +284,7 @@ async function upsertLeadDetail(sheets, spreadsheetId, detailsRows, leadId, lead
     await updateSheet(
         sheets,
         spreadsheetId,
-        `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:M${nextDetailRow}`,
+        `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:L${nextDetailRow}`,
         buildLeadDetailRow(leadId, lead)
     );
 
@@ -315,7 +310,7 @@ async function appendLeadToSheet(lead) {
         const detailsRows = await readSheet(
             sheets,
             spreadsheetId,
-            `${SHEETS.LEAD_DETAILS}!A:M`
+            `${SHEETS.LEAD_DETAILS}!A:L`
         );
 
         const existingLead = findLeadByPhone(leadsRows, lead.phone);
@@ -347,7 +342,7 @@ async function appendLeadToSheet(lead) {
             await updateSheet(
                 sheets,
                 spreadsheetId,
-                `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:M${nextDetailRow}`,
+                `${SHEETS.LEAD_DETAILS}!A${nextDetailRow}:L${nextDetailRow}`,
                 buildLeadDetailRow(leadId, lead)
             );
 

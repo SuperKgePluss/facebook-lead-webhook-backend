@@ -37,13 +37,43 @@ function parseFacebookLead(leadData) {
     }
 
     const getValue = (...names) => {
-        const found = fieldData.find(item => names.includes(item.name));
+        const normalizedNames = names.map(n => String(n).toLowerCase());
+
+        const found = fieldData.find(item => {
+            const itemName = String(item.name || "").toLowerCase();
+            return normalizedNames.includes(itemName);
+        });
+
         return found?.values?.[0] || "";
     };
 
+    const name = getValue("full_name", "name", "first_name");
+    const phone = getValue("phone_number", "phone", "mobile_phone");
+    const province = getValue("province");
+    const preferredCallDay = getValue(
+        "วันที่สะดวกให้ติดต่อกลับ",
+        "preferred_call_day",
+        "preferred call day"
+    );
+    const preferredCallTime = getValue(
+        "ช่วงเวลาที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
+        "preferred_call_time",
+        "preferred call time"
+    );
+    const inboxUrl = getValue("inbox_url", "Inbox URL");
+
+    const noteParts = [
+        province && `จังหวัด: ${province}`,
+        preferredCallDay && `วันที่สะดวกให้ติดต่อกลับ: ${preferredCallDay}`,
+        preferredCallTime && `ช่วงเวลาที่สะดวกให้ติดต่อกลับ: ${preferredCallTime}`,
+        inboxUrl && `Inbox URL: ${inboxUrl}`,
+    ].filter(Boolean);
+
     return {
-        name: getValue("full_name", "name", "first_name"),
-        phone: getValue("phone_number", "phone", "mobile_phone"),
+        name,
+        phone,
+        note: noteParts.join("\n"),
+        additional_note: noteParts.join("\n"),
     };
 }
 
@@ -52,7 +82,15 @@ function formatDateTimeForSheet(date = new Date()) {
         return "";
     }
 
-    return date.toISOString();
+    return date.toLocaleString("th-TH", {
+        timeZone: "Asia/Bangkok",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+    });
 }
 
 app.get("/health", (req, res) => {
