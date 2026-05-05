@@ -42,34 +42,30 @@ function parseFacebookLead(leadData) {
 
     const name = getValue("full_name", "name", "first_name");
     const phone = getValue("phone_number", "phone", "mobile_phone");
+
     const province = getValue("province");
 
-    const preferredCallDay = getValue(
+    const preferred_call_day = getValue(
         "วันที่สะดวกให้ติดต่อกลับ",
-        "preferred_call_day",
-        "preferred call day"
+        "preferred_call_day"
     );
 
-    const preferredCallTime = getValue(
+    const preferred_call_time = getValue(
         "ช่วงเวลาที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
-        "preferred_call_time",
-        "preferred call time"
+        "preferred_call_time"
     );
 
-    const inboxUrl = getValue("inbox_url", "Inbox URL");
-
-    const noteParts = [
-        province && `จังหวัด: ${province}`,
-        preferredCallDay && `วันที่สะดวกให้ติดต่อกลับ: ${preferredCallDay}`,
-        preferredCallTime && `ช่วงเวลาที่สะดวกให้ติดต่อกลับ: ${preferredCallTime}`,
-        inboxUrl && `Inbox URL: ${inboxUrl}`,
-    ].filter(Boolean);
+    const inbox_url = getValue("inbox_url", "Inbox URL");
 
     return {
         name,
         phone,
-        note: noteParts.join("\n"),
-        additional_note: noteParts.join("\n"),
+        province,
+        preferred_call_day,
+        preferred_call_time,
+        inbox_url,
+        note: "", // ไม่ยัดข้อมูลพวกนี้แล้ว
+        additional_note: ""
     };
 }
 
@@ -439,7 +435,7 @@ app.post("/import/legacy", async (req, res) => {
         const leadsRows = await googleSheets.readSheet(
             sheets,
             spreadsheetId,
-            "LEADS_MAIN!A:L"
+            "LEADS_MAIN!A:P"
         );
 
         let inserted = 0;

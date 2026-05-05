@@ -193,33 +193,39 @@ function mergeSource(currentSource, incomingSource) {
 
 function buildLeadMainRow(leadId, lead) {
     return [
-        leadId,
-        normalizePhone(lead.phone),
-        lead.name || "",
-        lead.source || "Facebook",
-        lead.status || "New",
-        lead.sales_owner || "",
-        lead.latest_audio_link || "",
-        lead.last_contact_date || "",
-        lead.next_follow_up || "",
-        lead.note || "",
-        formatDateTimeForSheet(new Date()),
-        formatDateTimeForSheet(new Date()),
+        leadId,                          // A
+        normalizePhone(lead.phone),      // B
+        lead.name || "",                 // C
+        lead.source || "Facebook",       // D
+        lead.status || "New",            // E
+        lead.sales_owner || "",          // F
+        lead.province || "",             // G
+        lead.preferred_call_day || "",   // H
+        lead.preferred_call_time || "",  // I
+        lead.inbox_url || "",            // J
+        lead.latest_audio_link || "",    // K
+        lead.last_contact_date || "",    // L
+        lead.next_follow_up || "",       // M
+        lead.note || "",                 // N
+        formatDateTimeForSheet(new Date()), // O
+        formatDateTimeForSheet(new Date())  // P
     ];
 }
 
 function buildExistingLeadUpdateRow(existingLead, lead) {
     return [
-        normalizePhone(lead.phone || existingLead.phone),
-        lead.name || existingLead.customer_name || "",
-        mergeSource(existingLead.source, lead.source || "Facebook"),
-        existingLead.status || "New",
-        "",
-        "",
-        "",
-        "",
-        lead.note || "",
-        formatDateTimeForSheet(new Date()),
+        normalizePhone(lead.phone || existingLead.phone), // B
+        lead.name || existingLead.customer_name || "",   // C
+        mergeSource(existingLead.source, lead.source || "Facebook"), // D
+        existingLead.status || "New",                    // E
+        "",                                              // F
+        lead.province || "",                             // G
+        lead.preferred_call_day || "",                   // H
+        lead.preferred_call_time || "",                  // I
+        lead.inbox_url || "",                            // J
+        "", "", "",                                      // K L M
+        lead.note || "",                                 // N
+        formatDateTimeForSheet(new Date())               // O
     ];
 }
 
@@ -263,18 +269,22 @@ function buildExistingDealUpdateRow(existingDeal, lead) {
 
 function buildLeadDetailRow(leadId, lead) {
     return [
-        leadId,
-        lead.facebook_leadgen_id || "",
-        lead.name || "",
-        lead.facebook_form_name || "",
-        lead.facebook_form_id || "",
-        lead.facebook_ad_id || "",
-        lead.facebook_campaign_id || "",
-        lead.facebook_created_time || "",
-        lead.line_user_id || "",
-        lead.line_display_name || "",
-        lead.line_created_time || "",
-        lead.additional_note || "",
+        leadId,                             // A
+        lead.facebook_leadgen_id || "",     // B
+        lead.name || "",                    // C
+        lead.facebook_form_name || "",      // D
+        lead.facebook_form_id || "",        // E
+        lead.facebook_ad_id || "",          // F
+        lead.facebook_campaign_id || "",    // G
+        lead.facebook_created_time || "",   // H
+        lead.province || "",                // I
+        lead.preferred_call_day || "",      // J
+        lead.preferred_call_time || "",     // K
+        lead.inbox_url || "",               // L
+        lead.line_user_id || "",            // M
+        lead.line_display_name || "",       // N
+        lead.line_created_time || "",       // O
+        lead.additional_note || ""          // P
     ];
 }
 
@@ -334,7 +344,7 @@ async function appendLeadsToSheetBatch(leads) {
     const leadsRows = await readSheet(
         sheets,
         spreadsheetId,
-        `${SHEETS.LEADS_MAIN}!A:L`
+        `${SHEETS.LEADS_MAIN}!A:P`
     );
 
     const dealsRows = await readSheet(
@@ -346,7 +356,7 @@ async function appendLeadsToSheetBatch(leads) {
     const detailsRows = await readSheet(
         sheets,
         spreadsheetId,
-        `${SHEETS.LEAD_DETAILS}!A:L`
+        `${SHEETS.LEAD_DETAILS}!A:P`
     );
 
     let nextLeadRow = getNextRow(leadsRows);
@@ -455,7 +465,7 @@ async function appendLeadsToSheetBatch(leads) {
 
             if (existingDetail) {
                 updateData.push({
-                    range: `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:L${existingDetail.rowNumber}`,
+                    range: `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:P${existingDetail.rowNumber}`,
                     values: [detailRow],
                 });
 
@@ -467,7 +477,7 @@ async function appendLeadsToSheetBatch(leads) {
             }
 
             updateData.push({
-                range: `${SHEETS.LEADS_MAIN}!B${existingLead.rowNumber}:L${existingLead.rowNumber}`,
+                range: `${SHEETS.LEADS_MAIN}!B${existingLead.rowNumber}:O${existingLead.rowNumber}`,
                 values: [buildExistingLeadUpdateRow(existingLead, lead)],
             });
 
@@ -492,13 +502,13 @@ async function appendLeadsToSheetBatch(leads) {
         });
 
         updateData.push({
-            range: `${SHEETS.LEADS_MAIN}!B${existingLead.rowNumber}:L${existingLead.rowNumber}`,
+            range: `${SHEETS.LEADS_MAIN}!B${existingLead.rowNumber}:O${existingLead.rowNumber}`,
             values: [buildExistingLeadUpdateRow(existingLead, lead)],
         });
 
         if (existingDetail) {
             updateData.push({
-                range: `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:L${existingDetail.rowNumber}`,
+                range: `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:P${existingDetail.rowNumber}`,
                 values: [updatedLeadDetailRow],
             });
 
@@ -529,7 +539,7 @@ async function appendLeadsToSheetBatch(leads) {
         await updateSheet(
             sheets,
             spreadsheetId,
-            `${SHEETS.LEADS_MAIN}!A${startLeadRow}:L${endRow}`,
+            `${SHEETS.LEADS_MAIN}!A${startLeadRow}:P${endRow}`,
             newLeadRows
         );
     }
@@ -551,7 +561,7 @@ async function appendLeadsToSheetBatch(leads) {
         await updateSheet(
             sheets,
             spreadsheetId,
-            `${SHEETS.LEAD_DETAILS}!A${startDetailRow}:L${endRow}`,
+            `${SHEETS.LEAD_DETAILS}!A${startDetailRow}:P${endRow}`,
             newDetailRows
         );
     }
