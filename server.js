@@ -6,12 +6,13 @@ const {
     fetchFormLeads,
     debugFacebookForm,
     debugLeadgenForms,
+    debugFacebookAccess,
     fetchLatestLeadIdsFromPage,
 } = require("./services/facebook");
 
 const {
     appendLeadToSheet,
-    getExistingLeadgenIds,
+    appendLeadsToSheetBatch,
 } = require("./services/googleSheets");
 
 const app = express();
@@ -20,14 +21,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
-
-const ENV = process.env.SHEET_ENV || "prod";
-
-const SHEETS = {
-    LEADS_MAIN: ENV === "dev" ? "LEADS_MAIN_DEV" : "LEADS_MAIN",
-    DEALS: ENV === "dev" ? "DEALS_DEV" : "DEALS",
-    LEAD_DETAILS: ENV === "dev" ? "LEAD_DETAILS_DEV" : "LEAD_DETAILS",
-};
 
 function parseFacebookLead(leadData) {
     const fieldData = leadData?.field_data;
@@ -50,16 +43,19 @@ function parseFacebookLead(leadData) {
     const name = getValue("full_name", "name", "first_name");
     const phone = getValue("phone_number", "phone", "mobile_phone");
     const province = getValue("province");
+
     const preferredCallDay = getValue(
         "วันที่สะดวกให้ติดต่อกลับ",
         "preferred_call_day",
         "preferred call day"
     );
+
     const preferredCallTime = getValue(
         "ช่วงเวลาที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
         "preferred_call_time",
         "preferred call time"
     );
+
     const inboxUrl = getValue("inbox_url", "Inbox URL");
 
     const noteParts = [
@@ -91,6 +87,34 @@ function formatDateTimeForSheet(date = new Date()) {
         minute: "2-digit",
         hour12: false,
     });
+}
+
+function requireSyncSecret(req, res) {
+    if (!process.env.SYNC_SECRET) {
+        console.error("❌ Missing SYNC_SECRET in environment variables");
+
+        res.status(500).json({
+            success: false,
+            error: "Server misconfigured: missing SYNC_SECRET",
+        });
+
+        return false;
+    }
+
+    const incomingSecret = String(req.query.secret || "").trim();
+
+    if (incomingSecret !== process.env.SYNC_SECRET) {
+        console.warn("⛔ Unauthorized attempt");
+
+        res.status(401).json({
+            success: false,
+            error: "Unauthorized",
+        });
+
+        return false;
+    }
+
+    return true;
 }
 
 app.get("/health", (req, res) => {
@@ -137,14 +161,10 @@ app.post("/webhook/facebook", async (req, res) => {
                     console.log("Webhook Leadgen ID:", leadgenId);
 
                     const leadData = await fetchLeadDetail(leadgenId);
-
-                    console.log("=== WEBHOOK LEAD DETAIL ===");
-                    console.log(JSON.stringify(leadData, null, 2));
-
                     const lead = parseFacebookLead(leadData);
 
                     lead.source = "Facebook";
-                    lead.facebook_leadgen_id = leadData.id || leadgenId;
+                    lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
                     lead.facebook_created_time = leadData.created_time
                         ? formatDateTimeForSheet(new Date(leadData.created_time))
                         : "";
@@ -163,11 +183,11 @@ app.post("/webhook/facebook", async (req, res) => {
                         continue;
                     }
 
-                    await appendLeadToSheet(lead);
+                    const result = await appendLeadToSheet(lead);
 
-                    console.log("✅ Webhook lead processed:", leadgenId);
+                    console.log("✅ Webhook lead processed:", leadgenId, result);
                 } catch (err) {
-                    console.error("❌ Webhook lead process failed:", err.message);
+                    console.error("❌ Webhook lead process failed:", leadgenId, err.message);
                 }
             }
         }
@@ -181,65 +201,42 @@ app.post("/webhook/facebook", async (req, res) => {
 
 app.get("/sync/facebook-leads", async (req, res) => {
     try {
-        // ✅ Block public access to sync endpoint
-        if (!process.env.SYNC_SECRET) {
-            console.error("❌ Missing SYNC_SECRET in environment variables");
+        if (!requireSyncSecret(req, res)) return;
 
-            return res.status(500).json({
-                success: false,
-                error: "Server misconfigured: missing SYNC_SECRET",
-            });
-        }
+        const mode = String(req.query.mode || "").trim().toLowerCase();
+        const limitQuery = Number(req.query.limit);
+        const limit = mode === "full"
+            ? null
+            : Number.isFinite(limitQuery) && limitQuery > 0
+                ? limitQuery
+                : null;
 
-        const incomingSecret = String(req.query.secret || "").trim();
+        console.log("🔄 Facebook lead batch sync started");
+        console.log(`⚙️ Sync mode: ${mode || "default"}`);
+        console.log(`⚙️ Sync limit: ${limit || "none"}`);
 
-        if (incomingSecret !== process.env.SYNC_SECRET) {
-            console.warn("⛔ Unauthorized sync attempt");
-
-            return res.status(401).json({
-                success: false,
-                error: "Unauthorized",
-            });
-        }
-
-        console.log("🔄 Facebook lead sync started");
-
-        const leadRefs = await fetchLatestLeadIdsFromPage();
+        const leadRefs = await fetchLatestLeadIdsFromPage({ limit });
 
         console.log(`📥 Facebook lead refs fetched: ${leadRefs.length}`);
 
-        let inserted = 0;
-        let updated_existing = 0;
-        let skipped_existing = 0;
+        const parsedLeads = [];
+        const failedItems = [];
         let skipped_empty = 0;
-        let failed = 0;
-
-        const existingIds = await getExistingLeadgenIds();
 
         for (const leadRef of leadRefs) {
+            const leadgenId = String(leadRef.id || "").trim();
+
+            if (!leadgenId) {
+                skipped_empty++;
+                failedItems.push({
+                    leadgen_id: "",
+                    reason: "missing_leadgen_id",
+                });
+                continue;
+            }
+
             try {
-                const leadgenId = String(leadRef.id || "").trim();
-
-                if (!leadgenId) {
-                    console.warn("⚠️ Missing leadgen_id → skip");
-                    skipped_empty++;
-                    continue;
-                }
-
-                if (existingIds.has(leadgenId)) {
-                    console.log(`⏭️ Skipped existing leadgen_id: ${leadgenId}`);
-                    skipped_existing++;
-                    continue;
-                }
-
-                console.log("=== LEAD REF ===");
-                console.log(JSON.stringify(leadRef, null, 2));
-
                 const leadData = await fetchLeadDetail(leadgenId);
-
-                console.log("=== LEAD DETAIL ===");
-                console.log(JSON.stringify(leadData, null, 2));
-
                 const lead = parseFacebookLead(leadData);
 
                 lead.source = "Facebook";
@@ -253,47 +250,78 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 lead.facebook_campaign_id = leadData.campaign_id || "";
 
                 if (!lead.facebook_leadgen_id) {
-                    console.warn("⚠️ Lead has no facebook_leadgen_id → skip");
                     skipped_empty++;
+                    failedItems.push({
+                        leadgen_id: leadgenId,
+                        reason: "missing_facebook_leadgen_id",
+                    });
                     continue;
                 }
 
                 if (!lead.phone && !lead.name) {
-                    console.warn("⚠️ Skipped empty lead:", leadgenId);
                     skipped_empty++;
+                    failedItems.push({
+                        leadgen_id: leadgenId,
+                        reason: "missing_phone_and_name",
+                    });
                     continue;
                 }
 
-                const result = await appendLeadToSheet(lead);
-
-                existingIds.add(leadgenId);
-
-                if (result?.action === "created") {
-                    inserted++;
-                } else {
-                    updated_existing++;
-                }
+                parsedLeads.push(lead);
             } catch (err) {
-                failed++;
-                console.error("❌ Lead sync item failed:", err.message);
+                failedItems.push({
+                    leadgen_id: leadgenId,
+                    form_id: leadRef.form_id || "",
+                    form_name: leadRef.form_name || "",
+                    reason: err.message,
+                });
+
+                console.error(`❌ Lead parse/fetch failed: ${leadgenId} - ${err.message}`);
             }
         }
 
+        const batchResult = await appendLeadsToSheetBatch(parsedLeads);
+
+        const failed = failedItems.length;
+
         return res.status(200).json({
             success: true,
+            mode: mode || "default",
+            limit: limit || null,
             fetched: leadRefs.length,
-            inserted,
-            updated_existing,
-            skipped_existing,
-            skipped_empty,
+            parsed: parsedLeads.length,
+            inserted: batchResult.created,
+            updated_existing: batchResult.updated_existing,
+            skipped_existing: batchResult.skipped_existing,
+            skipped_empty: skipped_empty + batchResult.skipped_empty,
             failed,
+            failed_items: failedItems.slice(0, 30),
+            batch_skipped_empty_items: batchResult.skipped_empty_items.slice(0, 30),
         });
     } catch (err) {
-        console.error("❌ Facebook lead sync failed:", err.message);
+        console.error("❌ Facebook lead batch sync failed:", err.message);
 
         return res.status(500).json({
             success: false,
             error: err.message,
+        });
+    }
+});
+
+app.get("/debug/facebook-access", async (req, res) => {
+    try {
+        if (!requireSyncSecret(req, res)) return;
+
+        const result = await debugFacebookAccess();
+
+        return res.status(200).json({
+            success: true,
+            result,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            error: err.response?.data || err.message,
         });
     }
 });
@@ -433,16 +461,16 @@ app.post("/import/legacy", async (req, res) => {
             const province = String(row[7] || "").trim();
             const preferredCallDay = String(row[9] || "").trim();
             const preferredCallTime = String(row[10] || "").trim();
-            const classification = String(row[20] || "").trim(); // U = Classification
+            const classification = String(row[20] || "").trim();
 
-            const cleanPhone = phone?.replace(/\D/g, "");
+            const cleanPhone = googleSheets.normalizePhone(phone);
 
             if (!cleanPhone) {
                 skipped++;
                 preview.push({
                     row: i + 1,
                     action: "skipped",
-                    reason: "missing phone"
+                    reason: "missing phone",
                 });
                 continue;
             }
@@ -454,18 +482,17 @@ app.post("/import/legacy", async (req, res) => {
                     action: "skipped",
                     reason: "duplicate phone in import file",
                     phone,
-                    name
+                    name,
                 });
                 continue;
             }
 
             seenImportPhones.add(cleanPhone);
 
-            const normalizedPhone = String(phone || "").replace(/\D/g, "");
             const existingLead = leadsRows.find((leadRow, index) => {
                 if (index === 0) return false;
-                const existingPhone = String(leadRow[1] || "").replace(/\D/g, "");
-                return normalizedPhone && existingPhone === normalizedPhone;
+                const existingPhone = googleSheets.normalizePhone(leadRow[1]);
+                return cleanPhone && existingPhone === cleanPhone;
             });
 
             const noteParts = [
@@ -498,7 +525,7 @@ app.post("/import/legacy", async (req, res) => {
                         action: "would_update",
                         phone,
                         name,
-                        existing_lead_id: existingLead[0] || ""
+                        existing_lead_id: existingLead[0] || "",
                     });
                 } else {
                     inserted++;
@@ -506,14 +533,14 @@ app.post("/import/legacy", async (req, res) => {
                         row: i + 1,
                         action: "would_insert",
                         phone,
-                        name
+                        name,
                     });
                 }
 
                 continue;
             }
 
-            const result = await appendLeadToSheet(lead);
+            const result = await googleSheets.appendLeadToSheet(lead);
 
             if (result?.action === "created") {
                 inserted++;
@@ -544,11 +571,10 @@ app.post("/import/legacy", async (req, res) => {
             skipped,
             preview,
         });
-
     } catch (err) {
         return res.status(500).json({
             success: false,
-            error: err.message
+            error: err.message,
         });
     }
 });
