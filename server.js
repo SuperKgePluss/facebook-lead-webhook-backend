@@ -129,6 +129,28 @@ function normalizeProvince(rawProvince) {
     return { province: "UNKNOWN", rawProvince: raw };
 }
 
+function normalizePreferredCallValues(values, exactLabels) {
+    const normalizeDisplayValue = (value) => String(value || "")
+        .replace(/_/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    const normalizeMatchKey = (value) => normalizeDisplayValue(value)
+        .toLowerCase()
+        .replace(/\s+/g, "");
+
+    const labelByKey = exactLabels.reduce((map, label) => {
+        map[normalizeMatchKey(label)] = label;
+        return map;
+    }, {});
+
+    return values
+        .map(normalizeDisplayValue)
+        .filter(Boolean)
+        .map(value => labelByKey[normalizeMatchKey(value)] || value)
+        .join(", ");
+}
+
 function parseFacebookLead(leadData) {
     const fieldData = leadData?.field_data;
 
@@ -147,6 +169,17 @@ function parseFacebookLead(leadData) {
         return found?.values?.[0] || "";
     };
 
+    const getValues = (...names) => {
+        const normalizedNames = names.map(n => String(n).toLowerCase());
+
+        const found = fieldData.find(item => {
+            const itemName = String(item.name || "").toLowerCase();
+            return normalizedNames.includes(itemName);
+        });
+
+        return Array.isArray(found?.values) ? found.values : [];
+    };
+
     const name = getValue("full_name", "name", "first_name");
     const phone = getValue("phone_number", "phone", "mobile_phone");
 
@@ -154,14 +187,29 @@ function parseFacebookLead(leadData) {
     const provinceResult = normalizeProvince(rawProvince);
     const province = provinceResult.province;
 
-    const preferred_call_day = getValue(
-        "วันที่สะดวกให้ติดต่อกลับ",
-        "preferred_call_day"
+    const preferred_call_day = normalizePreferredCallValues(
+        getValues(
+            "วันที่สะดวกให้ติดต่อกลับ",
+            "preferred_call_day"
+        ),
+        [
+            "วันจันทร์ - ศุกร์ (วันธรรมดา)",
+            "วันเสาร์ - อาทิตย์ (วันหยุด)",
+            "สะดวกทุกวัน",
+        ]
     );
 
-    const preferred_call_time = getValue(
-        "ช่วงเวลาที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
-        "preferred_call_time"
+    const preferred_call_time = normalizePreferredCallValues(
+        getValues(
+            "ช่วงเวลาที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
+            "preferred_call_time"
+        ),
+        [
+            "ช่วงเช้า (09:00 - 12:00 น.)",
+            "ช่วงบ่าย (12:00 - 17:00 น.)",
+            "ช่วงค่ำ (17:00 - 20:00 น.)",
+            "สะดวกทุกช่วงเวลา",
+        ]
     );
 
     const inbox_url = getValue("inbox_url", "Inbox URL");
