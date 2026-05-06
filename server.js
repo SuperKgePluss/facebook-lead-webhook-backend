@@ -24,59 +24,109 @@ const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
 
 function normalizeProvince(rawProvince) {
     const raw = String(rawProvince || "").trim();
-    if (!raw) return { province: "", rawProvince: "" };
+    if (!raw) return { province: "UNKNOWN", rawProvince: "" };
 
-    const lower = raw.toLowerCase();
+    const normalizeKey = (value) => String(value || "")
+        .trim()
+        .toLowerCase()
+        .replace(/^จังหวัด/i, "")
+        .replace(/^changwat/i, "")
+        .replace(/^provinceof/i, "")
+        .replace(/province$/i, "")
+        .replace(/[.\-_/(),'"`’‘“”]/g, "")
+        .replace(/\s+/g, "");
 
-    if (lower.includes("@") || lower.includes("http")) {
-        return { province: "", rawProvince: raw };
-    }
+    const cleaned = normalizeKey(raw);
+    if (!cleaned) return { province: "UNKNOWN", rawProvince: raw };
 
-    const aliases = {
-        "กทม": "กรุงเทพมหานคร",
-        "กทม.": "กรุงเทพมหานคร",
-        "กรุงเทพ": "กรุงเทพมหานคร",
-        "กรุงเทพฯ": "กรุงเทพมหานคร",
-        "กรุงเทพมหานคร": "กรุงเทพมหานคร",
-        "bangkok": "กรุงเทพมหานคร",
-        "bkk": "กรุงเทพมหานคร",
-
-        "พิษณุโลก": "พิษณุโลก",
-        "phitsanulok": "พิษณุโลก",
-
-        "สุรินทร์": "สุรินทร์",
-        "surin": "สุรินทร์",
-
-        "ภูเก็ต": "ภูเก็ต",
-        "phuket": "ภูเก็ต",
-
-        "นนทบุรี": "นนทบุรี",
-        "nonthaburi": "นนทบุรี",
-
-        "ชลบุรี": "ชลบุรี",
-        "chonburi": "ชลบุรี",
-
-        "ระยอง": "ระยอง",
-        "rayong": "ระยอง",
-
-        "ฉะเชิงเทรา": "ฉะเชิงเทรา",
-        "chachoengsao": "ฉะเชิงเทรา"
+    const provinceAliases = {
+        "กรุงเทพมหานคร": ["กทม", "กทม.", "กรุงเทพ", "กรุงเทพฯ", "bangkok", "bkk"],
+        "กระบี่": ["krabi"],
+        "กาญจนบุรี": ["kanchanaburi"],
+        "กาฬสินธุ์": ["kalasin"],
+        "กำแพงเพชร": ["kamphaengphet", "kamphaeng phet"],
+        "ขอนแก่น": ["khonkaen", "khon kaen"],
+        "จันทบุรี": ["chanthaburi"],
+        "ฉะเชิงเทรา": ["chachoengsao"],
+        "ชลบุรี": ["chonburi", "chon buri"],
+        "ชัยนาท": ["chainat", "chai nat"],
+        "ชัยภูมิ": ["chaiyaphum"],
+        "ชุมพร": ["chumphon"],
+        "เชียงราย": ["chiangrai", "chiang rai"],
+        "เชียงใหม่": ["chiangmai", "chiang mai"],
+        "ตรัง": ["trang"],
+        "ตราด": ["trat"],
+        "ตาก": ["tak"],
+        "นครนายก": ["nakhonnayok", "nakhon nayok"],
+        "นครปฐม": ["nakhonpathom", "nakhon pathom"],
+        "นครพนม": ["nakhonphanom", "nakhon phanom"],
+        "นครราชสีมา": ["nakhonratchasima", "nakhon ratchasima", "korat"],
+        "นครศรีธรรมราช": ["nakhonsithammarat", "nakhon si thammarat"],
+        "นครสวรรค์": ["nakhonsawan", "nakhon sawan"],
+        "นนทบุรี": ["nonthaburi"],
+        "นราธิวาส": ["narathiwat"],
+        "น่าน": ["nan"],
+        "บึงกาฬ": ["buengkan", "bueng kan"],
+        "บุรีรัมย์": ["buriram", "buri ram"],
+        "ปทุมธานี": ["pathumthani", "pathum thani"],
+        "ประจวบคีรีขันธ์": ["prachuapkhirikhan", "prachuap khiri khan"],
+        "ปราจีนบุรี": ["prachinburi", "prachin buri"],
+        "ปัตตานี": ["pattani"],
+        "พระนครศรีอยุธยา": ["phranakhonsiayutthaya", "phra nakhon si ayutthaya", "ayutthaya"],
+        "พังงา": ["phangnga", "phang nga"],
+        "พัทลุง": ["phatthalung"],
+        "พิจิตร": ["phichit"],
+        "พิษณุโลก": ["phitsanulok"],
+        "เพชรบุรี": ["phetchaburi"],
+        "เพชรบูรณ์": ["phetchabun"],
+        "แพร่": ["phrae"],
+        "พะเยา": ["phayao"],
+        "ภูเก็ต": ["phuket"],
+        "มหาสารคาม": ["mahasarakham", "maha sarakham"],
+        "มุกดาหาร": ["mukdahan"],
+        "แม่ฮ่องสอน": ["maehongson", "mae hong son"],
+        "ยโสธร": ["yasothon"],
+        "ยะลา": ["yala"],
+        "ร้อยเอ็ด": ["roiet", "roi et"],
+        "ระนอง": ["ranong"],
+        "ระยอง": ["rayong"],
+        "ราชบุรี": ["ratchaburi"],
+        "ลพบุรี": ["lopburi", "lop buri"],
+        "ลำปาง": ["lampang"],
+        "ลำพูน": ["lamphun"],
+        "เลย": ["loei"],
+        "ศรีสะเกษ": ["sisaket", "si sa ket"],
+        "สกลนคร": ["sakonnakhon", "sakon nakhon"],
+        "สงขลา": ["songkhla"],
+        "สตูล": ["satun"],
+        "สมุทรปราการ": ["samutprakan", "samut prakan"],
+        "สมุทรสงคราม": ["samutsongkhram", "samut songkhram"],
+        "สมุทรสาคร": ["samutsakhon", "samut sakhon"],
+        "สระแก้ว": ["sakaeo", "sa kaeo"],
+        "สระบุรี": ["saraburi"],
+        "สิงห์บุรี": ["singburi", "sing buri"],
+        "สุโขทัย": ["sukhothai"],
+        "สุพรรณบุรี": ["suphanburi", "suphan buri"],
+        "สุราษฎร์ธานี": ["suratthani", "surat thani"],
+        "สุรินทร์": ["surin"],
+        "หนองคาย": ["nongkhai", "nong khai"],
+        "หนองบัวลำภู": ["nongbualamphu", "nong bua lamphu"],
+        "อ่างทอง": ["angthong", "ang thong"],
+        "อำนาจเจริญ": ["amnatcharoen", "amnat charoen"],
+        "อุดรธานี": ["udonthani", "udon thani"],
+        "อุตรดิตถ์": ["uttaradit"],
+        "อุทัยธานี": ["uthaithani", "uthai thani"],
+        "อุบลราชธานี": ["ubonratchathani", "ubon ratchathani"],
     };
 
-    const cleaned = lower.replace(/\s+/g, "").replace(".", "");
-
-    for (const [key, value] of Object.entries(aliases)) {
-        const normalizedKey = key.toLowerCase().replace(/\s+/g, "").replace(".", "");
-        if (cleaned === normalizedKey || cleaned.includes(normalizedKey)) {
-            return { province: value, rawProvince: raw };
+    for (const [officialName, aliases] of Object.entries(provinceAliases)) {
+        const acceptedValues = [officialName, ...aliases].map(normalizeKey);
+        if (acceptedValues.includes(cleaned)) {
+            return { province: officialName, rawProvince: raw };
         }
     }
 
-    if (raw.length > 30) {
-        return { province: "", rawProvince: raw };
-    }
-
-    return { province: raw, rawProvince: raw };
+    return { province: "UNKNOWN", rawProvince: raw };
 }
 
 function parseFacebookLead(leadData) {
