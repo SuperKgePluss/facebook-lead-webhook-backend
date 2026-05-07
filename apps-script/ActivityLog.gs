@@ -1,3 +1,4 @@
+// Activity log creation helpers for user-driven lead changes.
 function createLeadStatusActivity_(leadSheet, row, oldValue, newValue) {
   const lead = getRowObject_(leadSheet, row);
   const leadId = String(lead.lead_id || '').trim();

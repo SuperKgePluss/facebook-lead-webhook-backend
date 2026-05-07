@@ -1,3 +1,4 @@
+// Phone, source, province, zone, and updated_at normalization for LEADS_MAIN edits.
 function normalizePhone(value) {
   let digits = String(value || '').replace(/\D/g, '').trim();
   if (!digits) return '';

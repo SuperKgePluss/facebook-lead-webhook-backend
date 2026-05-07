@@ -1,3 +1,4 @@
+// Trigger entrypoints and shared sheet helpers. Row 1 contains headers, row 2 is reserved, and data starts at row 3.
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 
@@ -71,6 +72,11 @@ function appendObjectRow_(sheetName, object) {
   return row;
 }
 
+function getEditedHeader_(sheet, column) {
+  const headerMap = getHeaderMap_(sheet);
+  return Object.keys(headerMap).find(header => headerMap[header] === column) || '';
+}
+
 function onEdit(e) {
   if (!e || !e.range) return;
 
@@ -79,9 +85,15 @@ function onEdit(e) {
   if (e.range.getRow() < DATA_START_ROW) return;
 
   const headerMap = getHeaderMap_(sheet);
-  const editedHeader = Object.keys(headerMap).find(header => headerMap[header] === e.range.getColumn());
+  const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
+
+  if (editedHeader === 'open_deal') {
+    handleOpenDealEdit_(e, sheet, e.range.getRow());
+    return;
+  }
 
   normalizeLeadMainRow(sheet, e.range.getRow());
+  refreshOpenDealCheckboxForRow_(sheet, e.range.getRow());
 
   if (editedHeader === 'lead_status') {
     createLeadStatusActivity_(sheet, e.range.getRow(), e.oldValue || '', e.value || '');

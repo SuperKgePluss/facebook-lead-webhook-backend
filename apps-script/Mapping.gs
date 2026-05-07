@@ -1,4 +1,5 @@
-function normalizeKey_(value) {
+// Mapping rule lookup helpers for the long-table MAPPING_RULES sheet.
+function normalizeMappingKey_(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
@@ -26,13 +27,13 @@ function normalizeByRule(ruleType, value) {
 
   const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
   const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
-  const targetRule = normalizeKey_(ruleType);
-  const targetInput = normalizeKey_(input);
+  const targetRule = normalizeMappingKey_(ruleType);
+  const targetInput = normalizeMappingKey_(input);
 
   for (let i = 0; i < values.length; i++) {
     const row = values[i];
-    const rowRuleType = normalizeKey_(row[headerMap.rule_type - 1]);
-    const rowInput = normalizeKey_(row[headerMap.input_value - 1]);
+    const rowRuleType = normalizeMappingKey_(row[headerMap.rule_type - 1]);
+    const rowInput = normalizeMappingKey_(row[headerMap.input_value - 1]);
 
     if (rowRuleType === targetRule && rowInput === targetInput) {
       return String(row[headerMap.output_value - 1] || '').trim();

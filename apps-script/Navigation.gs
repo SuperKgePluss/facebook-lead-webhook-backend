@@ -1,3 +1,4 @@
+// Navigation helpers for Open Deal checkbox actions and ACTIVITY_LOG open_audio selection.
 function onSelectionChange(e) {
   if (!e || !e.range) return;
 
@@ -7,11 +8,6 @@ function onSelectionChange(e) {
 
   const headerMap = getHeaderMap_(sheet);
   const selectedHeader = Object.keys(headerMap).find(header => headerMap[header] === e.range.getColumn());
-
-  if (sheet.getName() === 'LEADS_MAIN' && selectedHeader === 'open_deal') {
-    navigateToLatestMatch_('DEALS', 'lead_id', getRowObject_(sheet, row).lead_id);
-    return;
-  }
 
   if (sheet.getName() === 'ACTIVITY_LOG' && selectedHeader === 'open_audio') {
     const activity = getRowObject_(sheet, row);
@@ -28,6 +24,65 @@ function onSelectionChange(e) {
   }
 }
 
+function handleOpenDealEdit_(e, sheet, row) {
+  if (String(e.value || '').toUpperCase() !== 'TRUE') {
+    return;
+  }
+
+  const headerMap = getHeaderMap_(sheet);
+  const openDealColumn = headerMap.open_deal;
+  if (!openDealColumn) return;
+
+  const openDealCell = sheet.getRange(row, openDealColumn);
+  const leadId = String(getRowObject_(sheet, row).lead_id || '').trim();
+
+  openDealCell.setValue(false);
+
+  if (!leadId || !navigateToLatestMatch_('DEALS', 'lead_id', leadId)) {
+    SpreadsheetApp.getActive().toast('\u0e44\u0e21\u0e48\u0e1e\u0e1a Deal \u0e02\u0e2d\u0e07 Lead \u0e19\u0e35\u0e49', 'Open Deal', 5);
+  }
+}
+
+function refreshOpenDealCheckboxes() {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName('LEADS_MAIN');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  for (let row = DATA_START_ROW; row <= lastRow; row++) {
+    refreshOpenDealCheckboxForRow_(sheet, row);
+  }
+}
+
+function refreshOpenDealCheckboxForRow_(sheet, row) {
+  if (!sheet || sheet.getName() !== 'LEADS_MAIN' || row < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  const openDealColumn = headerMap.open_deal;
+  const leadIdColumn = headerMap.lead_id;
+  if (!openDealColumn || !leadIdColumn) return;
+
+  const openDealCell = sheet.getRange(row, openDealColumn);
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+
+  if (leadId) {
+    openDealCell.insertCheckboxes();
+    if (String(openDealCell.getValue()).toUpperCase() !== 'TRUE') {
+      openDealCell.setValue(false);
+    }
+    return;
+  }
+
+  openDealCell.clearContent();
+  openDealCell.clearDataValidations();
+}
+
+function setupLeadMainUi() {
+  refreshOpenDealCheckboxes();
+}
+
 function navigateToLatestMatch_(targetSheetName, matchHeader, matchValue) {
   const value = String(matchValue || '').trim();
   if (!value) return false;
@@ -37,7 +92,7 @@ function navigateToLatestMatch_(targetSheetName, matchHeader, matchValue) {
   if (!targetSheet) return false;
 
   const headerMap = getHeaderMap_(targetSheet);
-  const matchColumn = headerMap[matchHeader];
+  const matchColumn = headerMap[normalizeHeaderName_(matchHeader)];
   if (!matchColumn) return false;
 
   let matchedRow = null;
