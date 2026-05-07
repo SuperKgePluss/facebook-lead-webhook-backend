@@ -664,6 +664,8 @@ function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl) 
 }
 
 app.post("/import/legacy", async (req, res) => {
+    const dryRun = String(req.query.dry_run ?? "true").trim().toLowerCase() !== "false";
+
     try {
         const googleSheets = require("./services/googleSheets");
         const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
@@ -874,7 +876,9 @@ app.post("/import/legacy", async (req, res) => {
 
         return res.json({
             success: true,
-            dry_run: true,
+            dry_run: dryRun,
+            received_query: req.query,
+            parsed_dry_run: dryRun,
             total_rows: rowsWithValidPhone + rowsMissingPhone,
             rows_with_valid_phone: rowsWithValidPhone,
             rows_missing_phone: rowsMissingPhone,
