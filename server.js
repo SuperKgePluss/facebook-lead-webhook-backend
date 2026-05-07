@@ -663,6 +663,70 @@ function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl) 
     return activities;
 }
 
+function generateImportId(prefix) {
+    return `${prefix}-${Date.now()}${Math.floor(Math.random() * 100000)}`;
+}
+
+function putIfBlank(updateObject, existingObject, key, value) {
+    const existingValue = String(existingObject?.[key] || "").trim();
+    const incomingValue = String(value || "").trim();
+
+    if (!existingValue && incomingValue) {
+        updateObject[key] = incomingValue;
+    }
+}
+
+function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = null) {
+    if (!existingLeadObject) {
+        return {
+            lead_id: leadId,
+            customer_name: values.name,
+            phone: cleanPhone,
+            source: mapLegacySource(values.source),
+            customer_type: values.corporateName,
+            province: values.province,
+            preferred_call_day: values.preferredCallDay,
+            preferred_call_time: values.preferredCallTime,
+            lead_status: mapLegacyClassification(values.classification),
+            sales_owner: values.salesperson,
+            created_at: values.leadInDate || new Date(),
+            updated_at: new Date(),
+        };
+    }
+
+    const updateObject = {
+        updated_at: new Date(),
+    };
+
+    putIfBlank(updateObject, existingLeadObject, "customer_name", values.name);
+    putIfBlank(updateObject, existingLeadObject, "phone", cleanPhone);
+    putIfBlank(updateObject, existingLeadObject, "source", mapLegacySource(values.source));
+    putIfBlank(updateObject, existingLeadObject, "customer_type", values.corporateName);
+    putIfBlank(updateObject, existingLeadObject, "province", values.province);
+    putIfBlank(updateObject, existingLeadObject, "preferred_call_day", values.preferredCallDay);
+    putIfBlank(updateObject, existingLeadObject, "preferred_call_time", values.preferredCallTime);
+    putIfBlank(updateObject, existingLeadObject, "lead_status", mapLegacyClassification(values.classification));
+    putIfBlank(updateObject, existingLeadObject, "sales_owner", values.salesperson);
+    putIfBlank(updateObject, existingLeadObject, "created_at", values.leadInDate);
+
+    return updateObject;
+}
+
+function buildLegacyActivityObjects(activityPreviews, leadId, salesOwner) {
+    return activityPreviews.map(activity => ({
+        activity_id: generateImportId("ACT"),
+        lead_id: leadId,
+        follow_up_no: activity.follow_up_no,
+        action_type: "Follow-up",
+        result: "",
+        note: activity.note,
+        audio_url: activity.audio_url,
+        audio_file_name: "",
+        created_by: salesOwner,
+        created_at: activity.created_at || new Date(),
+    }));
+}
+
 app.post("/import/legacy", async (req, res) => {
     const dryRun = String(req.query.dry_run ?? "true").trim().toLowerCase() !== "false";
 
@@ -729,6 +793,29 @@ app.post("/import/legacy", async (req, res) => {
         let wouldCreateActivity = 0;
         let manualReview = 0;
         const samplePreviewItems = [];
+        let insertedLeads = 0;
+        let updatedExistingLeads = 0;
+        let createdActivities = 0;
+        let skippedMissingPhone = 0;
+        let skippedDuplicateOrExisting = 0;
+        let failedRows = 0;
+        const sampleResultItems = [];
+        const pendingLeadCreates = [];
+        const pendingLeadUpdates = [];
+        const pendingActivityCreates = [];
+        const knownLeadsByPhone = new Map();
+
+        for (let i = 2; i < leadsRows.length; i++) {
+            const leadObject = googleSheets.rowToObject(leadHeaders, leadsRows[i]);
+            const existingPhone = googleSheets.normalizePhone(leadObject.phone);
+
+            if (!existingPhone) continue;
+
+            knownLeadsByPhone.set(existingPhone, {
+                ...leadObject,
+                rowNumber: i + 1,
+            });
+        }
 
         for (let i = 1; i < rawRows.length; i++) {
             const row = rawRows[i];
@@ -761,6 +848,7 @@ app.post("/import/legacy", async (req, res) => {
             if (!cleanPhone) {
                 rowsMissingPhone++;
                 manualReview++;
+                skippedMissingPhone++;
                 if (samplePreviewItems.length < 30) {
                     samplePreviewItems.push({
                         row: i + 1,
@@ -769,27 +857,41 @@ app.post("/import/legacy", async (req, res) => {
                         raw_data: rowObject,
                     });
                 }
+                if (!dryRun && sampleResultItems.length < 10) {
+                    sampleResultItems.push({
+                        row: i + 1,
+                        action: "skipped",
+                        reason: "missing_or_invalid_phone",
+                    });
+                }
                 continue;
             }
 
             rowsWithValidPhone++;
 
-            const existingLead = leadsRows.find((leadRow, index) => {
-                if (index < 2) return false;
-                const leadObject = googleSheets.rowToObject(leadHeaders, leadRow);
-                const existingPhone = googleSheets.normalizePhone(leadObject.phone);
-                return cleanPhone && existingPhone === cleanPhone;
-            });
+            const existingLeadObject = knownLeadsByPhone.get(cleanPhone) || null;
 
-            const existingLeadObject = existingLead
-                ? googleSheets.rowToObject(leadHeaders, existingLead)
-                : null;
+            if (!dryRun && existingLeadObject && !existingLeadObject.rowNumber) {
+                skippedDuplicateOrExisting++;
+
+                if (sampleResultItems.length < 10) {
+                    sampleResultItems.push({
+                        row: i + 1,
+                        action: "skipped_duplicate_or_existing",
+                        phone: cleanPhone,
+                        reason: "duplicate_phone_already_queued_for_import",
+                    });
+                }
+
+                continue;
+            }
+
             const leadId = existingLeadObject?.lead_id || "";
-            const leadAction = existingLead
+            const leadAction = existingLeadObject
                 ? "would_update_existing_lead"
                 : "would_create_lead";
 
-            if (existingLead) {
+            if (existingLeadObject) {
                 wouldUpdateExistingLead++;
             } else {
                 wouldCreateLead++;
@@ -872,6 +974,119 @@ app.post("/import/legacy", async (req, res) => {
                     raw_data: rowObject,
                 });
             }
+
+            if (dryRun && !existingLeadObject) {
+                knownLeadsByPhone.set(cleanPhone, {
+                    lead_id: "(resolved after lead creation)",
+                    phone: cleanPhone,
+                });
+            }
+
+            if (!dryRun) {
+                try {
+                    const values = {
+                        source,
+                        leadInDate,
+                        salesperson,
+                        name,
+                        province,
+                        corporateName,
+                        preferredCallDay,
+                        preferredCallTime,
+                        classification,
+                    };
+                    let resolvedLeadId = leadId;
+                    let resultAction = "";
+
+                    if (existingLeadObject) {
+                        const updateObject = buildLegacyLeadObject(values, cleanPhone, resolvedLeadId, existingLeadObject);
+                        pendingLeadUpdates.push({
+                            rowNumber: existingLeadObject.rowNumber,
+                            object: updateObject,
+                        });
+                        resultAction = "updated_existing_lead";
+                    } else {
+                        resolvedLeadId = generateImportId("LEAD");
+                        const leadObject = buildLegacyLeadObject(values, cleanPhone, resolvedLeadId);
+                        pendingLeadCreates.push(leadObject);
+                        knownLeadsByPhone.set(cleanPhone, {
+                            ...leadObject,
+                            rowNumber: null,
+                        });
+                        resultAction = "inserted_lead";
+                    }
+
+                    const activityObjects = buildLegacyActivityObjects(activityPreviews, resolvedLeadId, salesperson);
+
+                    if (activityObjects.length) {
+                        pendingActivityCreates.push(...activityObjects);
+                    }
+
+                    if (sampleResultItems.length < 10) {
+                        sampleResultItems.push({
+                            row: i + 1,
+                            action: resultAction,
+                            lead_id: resolvedLeadId,
+                            phone: cleanPhone,
+                            created_activities: activityObjects.length,
+                        });
+                    }
+                } catch (err) {
+                    failedRows++;
+
+                    if (sampleResultItems.length < 10) {
+                        sampleResultItems.push({
+                            row: i + 1,
+                            action: "failed",
+                            phone: cleanPhone,
+                            error: err.message,
+                        });
+                    }
+                }
+            }
+        }
+
+        if (!dryRun) {
+            for (const update of pendingLeadUpdates) {
+                try {
+                    await googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.object);
+                    updatedExistingLeads++;
+                } catch (err) {
+                    failedRows++;
+                }
+            }
+
+            if (pendingLeadCreates.length) {
+                try {
+                    await googleSheets.appendObjects("LEADS_MAIN", pendingLeadCreates);
+                    insertedLeads += pendingLeadCreates.length;
+                } catch (err) {
+                    for (const leadObject of pendingLeadCreates) {
+                        try {
+                            await googleSheets.appendObjects("LEADS_MAIN", [leadObject]);
+                            insertedLeads++;
+                        } catch (rowErr) {
+                            failedRows++;
+                        }
+                    }
+                }
+            }
+
+            if (pendingActivityCreates.length) {
+                try {
+                    await googleSheets.appendObjects("ACTIVITY_LOG", pendingActivityCreates);
+                    createdActivities += pendingActivityCreates.length;
+                } catch (err) {
+                    for (const activityObject of pendingActivityCreates) {
+                        try {
+                            await googleSheets.appendObjects("ACTIVITY_LOG", [activityObject]);
+                            createdActivities++;
+                        } catch (rowErr) {
+                            failedRows++;
+                        }
+                    }
+                }
+            }
         }
 
         return res.json({
@@ -892,6 +1107,13 @@ app.post("/import/legacy", async (req, res) => {
             detected_headers: detectedHeaders,
             missing_expected_headers: missingExpectedHeaders,
             sample_preview_items: samplePreviewItems,
+            inserted_leads: insertedLeads,
+            updated_existing_leads: updatedExistingLeads,
+            created_activities: createdActivities,
+            skipped_missing_phone: skippedMissingPhone,
+            skipped_duplicate_or_existing: skippedDuplicateOrExisting,
+            failed_rows: failedRows,
+            sample_result_items: sampleResultItems,
         });
     } catch (err) {
         return res.status(500).json({
