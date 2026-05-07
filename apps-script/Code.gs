@@ -1,10 +1,26 @@
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 
+function normalizeHeaderName_(headerName) {
+  const aliases = {
+    facebook_lead_id: 'facebook_leadgen_id',
+    fb_lead_id: 'facebook_leadgen_id',
+  };
+
+  const normalized = String(headerName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+  return aliases[normalized] || normalized;
+}
+
 function getHeaderMap_(sheet) {
   const headers = sheet.getRange(HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
   return headers.reduce((map, header, index) => {
-    const name = String(header || '').trim();
+    const name = normalizeHeaderName_(header);
     if (name) {
       map[name] = index + 1;
     }
@@ -14,7 +30,7 @@ function getHeaderMap_(sheet) {
 
 function getHeaderColumn_(sheet, headerName) {
   const map = getHeaderMap_(sheet);
-  const column = map[headerName];
+  const column = map[normalizeHeaderName_(headerName)];
   if (!column) {
     throw new Error('Missing header: ' + headerName);
   }
@@ -25,7 +41,7 @@ function getRowObject_(sheet, row) {
   const headers = sheet.getRange(HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
   const values = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
   return headers.reduce((object, header, index) => {
-    const name = String(header || '').trim();
+    const name = normalizeHeaderName_(header);
     if (name) {
       object[name] = values[index];
     }
@@ -36,8 +52,9 @@ function getRowObject_(sheet, row) {
 function setRowObjectValues_(sheet, row, object) {
   const headerMap = getHeaderMap_(sheet);
   Object.keys(object).forEach(header => {
-    if (headerMap[header]) {
-      sheet.getRange(row, headerMap[header]).setValue(object[header]);
+    const normalizedHeader = normalizeHeaderName_(header);
+    if (headerMap[normalizedHeader]) {
+      sheet.getRange(row, headerMap[normalizedHeader]).setValue(object[header]);
     }
   });
 }

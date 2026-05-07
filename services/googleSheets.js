@@ -9,6 +9,11 @@ const SHEETS = {
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 
+const HEADER_ALIASES = {
+    facebook_lead_id: "facebook_leadgen_id",
+    fb_lead_id: "facebook_leadgen_id",
+};
+
 function normalizePhone(phone) {
     let digits = String(phone || "").replace(/\D/g, "").trim();
 
@@ -72,12 +77,29 @@ function getNextDataRow(rows) {
     return Math.max(getLastDataRow(rows) + 1, DATA_START_ROW);
 }
 
+function normalizeHeaderName(headerName) {
+    const normalized = String(headerName || "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+
+    return HEADER_ALIASES[normalized] || normalized;
+}
+
 function groupObjectRanges(headers, rowNumber, object) {
     const groups = [];
     let currentGroup = null;
 
     headers.forEach((header, index) => {
-        if (!header || !Object.prototype.hasOwnProperty.call(object, header)) {
+        const canonicalHeader = normalizeHeaderName(header);
+
+        if (
+            !canonicalHeader ||
+            canonicalHeader === "open_deal" ||
+            !Object.prototype.hasOwnProperty.call(object, canonicalHeader)
+        ) {
             if (currentGroup) {
                 groups.push(currentGroup);
                 currentGroup = null;
@@ -89,14 +111,14 @@ function groupObjectRanges(headers, rowNumber, object) {
             currentGroup = {
                 startIndex: index,
                 endIndex: index,
-                values: [object[header] ?? ""],
+                values: [object[canonicalHeader] ?? ""],
             };
             return;
         }
 
         if (index === currentGroup.endIndex + 1) {
             currentGroup.endIndex = index;
-            currentGroup.values.push(object[header] ?? "");
+            currentGroup.values.push(object[canonicalHeader] ?? "");
             return;
         }
 
@@ -104,7 +126,7 @@ function groupObjectRanges(headers, rowNumber, object) {
         currentGroup = {
             startIndex: index,
             endIndex: index,
-            values: [object[header] ?? ""],
+            values: [object[canonicalHeader] ?? ""],
         };
     });
 
@@ -194,8 +216,8 @@ async function getHeaders(sheetName) {
 }
 
 function headerIndex(headers, headerName) {
-    const target = String(headerName || "").trim();
-    const index = headers.findIndex(header => String(header || "").trim() === target);
+    const target = normalizeHeaderName(headerName);
+    const index = headers.findIndex(header => normalizeHeaderName(header) === target);
 
     if (index === -1) {
         throw new Error(`Missing required header: ${target}`);
@@ -206,8 +228,10 @@ function headerIndex(headers, headerName) {
 
 function rowToObject(headers, row) {
     return headers.reduce((object, header, index) => {
-        if (header) {
-            object[header] = row?.[index] || "";
+        const canonicalHeader = normalizeHeaderName(header);
+
+        if (canonicalHeader) {
+            object[canonicalHeader] = row?.[index] || "";
         }
 
         return object;
@@ -215,7 +239,7 @@ function rowToObject(headers, row) {
 }
 
 function objectToRow(headers, object) {
-    return headers.map(header => object?.[header] ?? "");
+    return headers.map(header => object?.[normalizeHeaderName(header)] ?? "");
 }
 
 async function appendObjects(sheetName, objects) {
@@ -645,4 +669,5 @@ module.exports = {
     appendObjects,
     updateObjectRow,
     normalizePhone,
+    normalizeHeaderName,
 };
