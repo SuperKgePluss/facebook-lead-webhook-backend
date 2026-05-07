@@ -1,10 +1,13 @@
-﻿const { google } = require("googleapis");
+const { google } = require("googleapis");
 
 const SHEETS = {
     LEADS_MAIN: "LEADS_MAIN",
     LEAD_DETAILS: "LEAD_DETAILS",
     DEALS: "DEALS",
 };
+
+const HEADER_ROW = 1;
+const DATA_START_ROW = 3;
 
 function normalizePhone(phone) {
     let digits = String(phone || "").replace(/\D/g, "").trim();
@@ -42,11 +45,104 @@ function formatDateTimeForSheet(date = new Date()) {
     });
 }
 
+function columnToLetter(columnNumber) {
+    let column = columnNumber;
+    let letter = "";
+
+    while (column > 0) {
+        const remainder = (column - 1) % 26;
+        letter = String.fromCharCode(65 + remainder) + letter;
+        column = Math.floor((column - 1) / 26);
+    }
+
+    return letter;
+}
+
+function getLastDataRow(rows) {
+    for (let i = rows.length - 1; i >= DATA_START_ROW - 1; i--) {
+        if (rows[i] && rows[i].some(cell => String(cell || "").trim() !== "")) {
+            return i + 1;
+        }
+    }
+
+    return DATA_START_ROW - 1;
+}
+
+function getNextDataRow(rows) {
+    return Math.max(getLastDataRow(rows) + 1, DATA_START_ROW);
+}
+
+function groupObjectRanges(headers, rowNumber, object) {
+    const groups = [];
+    let currentGroup = null;
+
+    headers.forEach((header, index) => {
+        if (!header || !Object.prototype.hasOwnProperty.call(object, header)) {
+            if (currentGroup) {
+                groups.push(currentGroup);
+                currentGroup = null;
+            }
+            return;
+        }
+
+        if (!currentGroup) {
+            currentGroup = {
+                startIndex: index,
+                endIndex: index,
+                values: [object[header] ?? ""],
+            };
+            return;
+        }
+
+        if (index === currentGroup.endIndex + 1) {
+            currentGroup.endIndex = index;
+            currentGroup.values.push(object[header] ?? "");
+            return;
+        }
+
+        groups.push(currentGroup);
+        currentGroup = {
+            startIndex: index,
+            endIndex: index,
+            values: [object[header] ?? ""],
+        };
+    });
+
+    if (currentGroup) {
+        groups.push(currentGroup);
+    }
+
+    return groups.map(group => {
+        const startColumn = columnToLetter(group.startIndex + 1);
+        const endColumn = columnToLetter(group.endIndex + 1);
+
+        return {
+            rowNumber,
+            rangeSuffix: `${startColumn}${rowNumber}:${endColumn}${rowNumber}`,
+            values: [group.values],
+        };
+    });
+}
+
 async function createSheetsClient() {
+    const privateKey = process.env.GOOGLE_PRIVATE_KEY;
+
+    if (!process.env.GOOGLE_CLIENT_EMAIL) {
+        throw new Error("Missing GOOGLE_CLIENT_EMAIL");
+    }
+
+    if (!privateKey) {
+        throw new Error("Missing GOOGLE_PRIVATE_KEY");
+    }
+
+    if (!process.env.GOOGLE_SHEET_ID) {
+        throw new Error("Missing GOOGLE_SHEET_ID");
+    }
+
     const auth = new google.auth.GoogleAuth({
         credentials: {
             client_email: process.env.GOOGLE_CLIENT_EMAIL,
-            private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+            private_key: privateKey.replace(/\\n/g, "\n"),
         },
         scopes: ["https://www.googleapis.com/auth/spreadsheets"],
     });
@@ -87,31 +183,99 @@ async function batchUpdateValues(sheets, spreadsheetId, data) {
     });
 }
 
-function getNextRow(rows) {
-    for (let i = rows.length - 1; i >= 0; i--) {
-        if (rows[i] && rows[i].some(cell => String(cell || "").trim() !== "")) {
-            return i + 2;
-        }
-    }
-
-    return 2;
+async function getSheetRows(sheetName) {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    return readSheet(sheets, spreadsheetId, `${sheetName}!A:ZZ`);
 }
 
-function findLeadByPhone(rows, phone) {
+async function getHeaders(sheetName) {
+    const rows = await getSheetRows(sheetName);
+    return rows[HEADER_ROW - 1] || [];
+}
+
+function headerIndex(headers, headerName) {
+    const target = String(headerName || "").trim();
+    const index = headers.findIndex(header => String(header || "").trim() === target);
+
+    if (index === -1) {
+        throw new Error(`Missing required header: ${target}`);
+    }
+
+    return index;
+}
+
+function rowToObject(headers, row) {
+    return headers.reduce((object, header, index) => {
+        if (header) {
+            object[header] = row?.[index] || "";
+        }
+
+        return object;
+    }, {});
+}
+
+function objectToRow(headers, object) {
+    return headers.map(header => object?.[header] ?? "");
+}
+
+async function appendObjects(sheetName, objects) {
+    if (!objects.length) return [];
+
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    const rows = await readSheet(sheets, spreadsheetId, `${sheetName}!A:ZZ`);
+    const headers = rows[HEADER_ROW - 1] || [];
+    let nextRow = getNextDataRow(rows);
+    const data = [];
+    const appendedRows = [];
+
+    for (const object of objects) {
+        const rowNumber = nextRow++;
+        const groups = groupObjectRanges(headers, rowNumber, object);
+
+        for (const group of groups) {
+            data.push({
+                range: `${sheetName}!${group.rangeSuffix}`,
+                values: group.values,
+            });
+        }
+
+        appendedRows.push(rowNumber);
+    }
+
+    await batchUpdateValues(sheets, spreadsheetId, data);
+
+    return appendedRows;
+}
+
+async function updateObjectRow(sheetName, rowNumber, object) {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    const headers = await getHeaders(sheetName);
+    const groups = groupObjectRanges(headers, rowNumber, object);
+
+    await batchUpdateValues(
+        sheets,
+        spreadsheetId,
+        groups.map(group => ({
+            range: `${sheetName}!${group.rangeSuffix}`,
+            values: group.values,
+        }))
+    );
+}
+
+function findLeadByPhone(headers, rows, phone) {
+    const phoneIndex = headerIndex(headers, "phone");
     const normalizedPhone = normalizePhone(phone);
 
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-        const rowPhone = normalizePhone(row[1]);
+    if (!normalizedPhone) return null;
+
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const row = rows[i] || [];
+        const rowPhone = normalizePhone(row[phoneIndex]);
 
         if (rowPhone && rowPhone === normalizedPhone) {
             return {
+                ...rowToObject(headers, row),
                 rowNumber: i + 1,
-                lead_id: row[0] || "",
-                phone: row[1] || "",
-                customer_name: row[2] || "",
-                source: row[3] || "",
-                status: row[4] || "",
             };
         }
     }
@@ -119,19 +283,19 @@ function findLeadByPhone(rows, phone) {
     return null;
 }
 
-function findLeadDetailByLeadgenId(rows, leadgenId) {
+function findLeadDetailByLeadgenId(headers, rows, leadgenId) {
+    const leadgenIndex = headerIndex(headers, "facebook_leadgen_id");
     const target = String(leadgenId || "").trim();
 
     if (!target) return null;
 
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const row = rows[i] || [];
 
-        if (String(row[1] || "").trim() === target) {
+        if (String(row[leadgenIndex] || "").trim() === target) {
             return {
+                ...rowToObject(headers, row),
                 rowNumber: i + 1,
-                lead_id: row[0] || "",
-                facebook_leadgen_id: row[1] || "",
             };
         }
     }
@@ -139,37 +303,20 @@ function findLeadDetailByLeadgenId(rows, leadgenId) {
     return null;
 }
 
-function findLeadDetailByLeadId(rows, leadId) {
+function findLatestDealByLeadId(headers, rows, leadId) {
+    const leadIdIndex = headerIndex(headers, "lead_id");
     const target = String(leadId || "").trim();
+    let latestDeal = null;
 
     if (!target) return null;
 
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const row = rows[i] || [];
 
-        if (String(row[0] || "").trim() === target) {
-            return {
-                rowNumber: i + 1,
-                lead_id: row[0] || "",
-            };
-        }
-    }
-
-    return null;
-}
-
-function findLatestDealByLeadId(rows, leadId) {
-    let latestDeal = null;
-
-    for (let i = 1; i < rows.length; i++) {
-        const row = rows[i];
-
-        if ((row[1] || "") === leadId) {
+        if (String(row[leadIdIndex] || "").trim() === target) {
             latestDeal = {
+                ...rowToObject(headers, row),
                 rowNumber: i + 1,
-                deal_id: row[0] || "",
-                lead_id: row[1] || "",
-                deal_status: row[2] || "",
             };
         }
     }
@@ -177,134 +324,74 @@ function findLatestDealByLeadId(rows, leadId) {
     return latestDeal;
 }
 
-function isCompletedLead(leadRow) {
-    return String(leadRow?.status || "").toLowerCase() === "completed";
+function isCompletedLead(leadObject) {
+    const status = String(leadObject?.lead_status || "").trim().toLowerCase();
+    return status === "completed" || status === "closed won";
 }
 
-function mergeSource(currentSource, incomingSource) {
-    const current = String(currentSource || "").trim();
-    const incoming = String(incomingSource || "Facebook").trim();
+function buildLeadMainObject(leadId, lead, existingLead = null) {
+    const now = formatDateTimeForSheet(new Date());
 
-    if (!current) return incoming;
-    if (current === incoming) return current;
-
-    return "Multiple";
+    return {
+        lead_id: leadId,
+        customer_name: lead.name || existingLead?.customer_name || "",
+        phone: normalizePhone(lead.phone || existingLead?.phone),
+        source: lead.source || existingLead?.source || "Facebook",
+        customer_type: existingLead?.customer_type || lead.customer_type || "",
+        province: lead.province || existingLead?.province || "",
+        zone: existingLead?.zone || lead.zone || "",
+        lead_status: existingLead?.lead_status || lead.status || "New",
+        reason: existingLead?.reason || lead.reason || "",
+        sales_owner: existingLead?.sales_owner || lead.sales_owner || "",
+        created_at: existingLead?.created_at || now,
+        updated_at: now,
+    };
 }
 
-function buildLeadMainRow(leadId, lead) {
-    return [
-        leadId,                          // A
-        normalizePhone(lead.phone),      // B
-        lead.name || "",                 // C
-        lead.source || "Facebook",       // D
-        lead.status || "New",            // E
-        lead.sales_owner || "",          // F
-        lead.province || "",             // G
-        lead.preferred_call_day || "",   // H
-        lead.preferred_call_time || "",  // I
-        lead.inbox_url || "",            // J
-        lead.latest_audio_link || "",    // K
-        lead.last_contact_date || "",    // L
-        lead.next_follow_up || "",       // M
-        lead.note || "",                 // N
-        formatDateTimeForSheet(new Date()), // O
-        formatDateTimeForSheet(new Date())  // P
-    ];
+function buildLeadMainUpdateObject(existingLead, lead) {
+    return {
+        customer_name: lead.name || existingLead.customer_name || "",
+        phone: normalizePhone(lead.phone || existingLead.phone),
+        source: lead.source || existingLead.source || "Facebook",
+        province: lead.province || existingLead.province || "",
+        updated_at: formatDateTimeForSheet(new Date()),
+    };
 }
 
-function buildExistingLeadUpdateRow(existingLead, lead) {
-    return [
-        normalizePhone(lead.phone || existingLead.phone), // B
-        lead.name || existingLead.customer_name || "",   // C
-        mergeSource(existingLead.source, lead.source || "Facebook"), // D
-        existingLead.status || "New",                    // E
-        "",                                              // F
-        lead.province || "",                             // G
-        lead.preferred_call_day || "",                   // H
-        lead.preferred_call_time || "",                  // I
-        lead.inbox_url || "",                            // J
-        "", "", "",                                      // K L M
-        lead.note || "",                                 // N
-        formatDateTimeForSheet(new Date())               // O
-    ];
+function buildLeadDetailObject(leadId, lead) {
+    return {
+        lead_id: leadId,
+        facebook_leadgen_id: lead.facebook_leadgen_id || "",
+        campaign_name: lead.facebook_campaign_name || "",
+        adset_name: lead.facebook_adset_name || "",
+        raw_province: lead.raw_province || "",
+        raw_data_json: lead.raw_data_json || "",
+        import_source: lead.source || "Facebook",
+    };
 }
 
-function buildDealRow(dealId, leadId, lead) {
-    return [
-        dealId,
-        leadId,
-        "New",
-        lead.product_name || "",
-        lead.package_name || "",
-        lead.price || "",
-        "Unpaid",
-        "",
-        "Not Scheduled",
-        "",
-        "",
-        lead.note || "",
-        formatDateTimeForSheet(new Date()),
-        formatDateTimeForSheet(new Date()),
-    ];
-}
-
-function buildExistingDealUpdateRow(existingDeal, lead) {
-    return [
-        existingDeal.deal_id,
-        existingDeal.lead_id,
-        existingDeal.deal_status || "New",
-        lead.product_name || "",
-        lead.package_name || "",
-        lead.price || "",
-        "Unpaid",
-        "",
-        "Not Scheduled",
-        "",
-        "",
-        lead.note || "",
-        formatDateTimeForSheet(new Date()),
-        formatDateTimeForSheet(new Date()),
-    ];
-}
-
-function buildLeadDetailRow(leadId, lead) {
-    return [
-        leadId,                             // A
-        lead.facebook_leadgen_id || "",     // B
-        lead.name || "",                    // C
-        lead.facebook_form_name || "",      // D
-        lead.facebook_form_id || "",        // E
-        lead.facebook_ad_id || "",          // F
-        lead.facebook_campaign_id || "",    // G
-        lead.facebook_created_time || "",   // H
-        lead.province || "",                // I
-        lead.preferred_call_day || "",      // J
-        lead.preferred_call_time || "",     // K
-        lead.inbox_url || "",               // L
-        lead.line_user_id || "",            // M
-        lead.line_display_name || "",       // N
-        lead.line_created_time || "",       // O
-        lead.additional_note || ""          // P
-    ];
+function buildDealObject(dealId, leadId, lead = {}, existingDeal = null) {
+    return {
+        deal_id: dealId,
+        lead_id: leadId,
+        product_model: lead.product_model || lead.product_name || existingDeal?.product_model || "",
+        package_type: lead.package_type || lead.package_name || existingDeal?.package_type || "",
+        price: lead.price || existingDeal?.price || "",
+        payment_status: existingDeal?.payment_status || lead.payment_status || "Unpaid",
+        payment_date: existingDeal?.payment_date || lead.payment_date || "",
+    };
 }
 
 async function getExistingLeadgenIds() {
-    const { sheets, spreadsheetId } = await createSheetsClient();
-
-    const result = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `${SHEETS.LEAD_DETAILS}!B:B`,
-    });
-
-    const values = result.data.values || [];
+    const rows = await getSheetRows(SHEETS.LEAD_DETAILS);
+    const headers = rows[HEADER_ROW - 1] || [];
+    const leadgenIndex = headerIndex(headers, "facebook_leadgen_id");
 
     return new Set(
-        values
-            .flat()
-            .map(value => String(value || "").trim())
+        rows
+            .slice(DATA_START_ROW - 1)
+            .map(row => String(row?.[leadgenIndex] || "").trim())
             .filter(Boolean)
-            .filter(value => value.toLowerCase() !== "facebook leadgen id")
-            .filter(value => value.toLowerCase() !== "facebook_leadgen_id")
     );
 }
 
@@ -341,46 +428,42 @@ async function appendLeadToSheet(lead) {
 async function appendLeadsToSheetBatch(leads) {
     const { sheets, spreadsheetId } = await createSheetsClient();
 
-    const leadsRows = await readSheet(
-        sheets,
-        spreadsheetId,
-        `${SHEETS.LEADS_MAIN}!A:P`
-    );
+    const [leadsRows, detailsRows, dealsRows] = await Promise.all([
+        readSheet(sheets, spreadsheetId, `${SHEETS.LEADS_MAIN}!A:ZZ`),
+        readSheet(sheets, spreadsheetId, `${SHEETS.LEAD_DETAILS}!A:ZZ`),
+        readSheet(sheets, spreadsheetId, `${SHEETS.DEALS}!A:ZZ`),
+    ]);
 
-    const dealsRows = await readSheet(
-        sheets,
-        spreadsheetId,
-        `${SHEETS.DEALS}!A:N`
-    );
+    const leadHeaders = leadsRows[HEADER_ROW - 1] || [];
+    const detailHeaders = detailsRows[HEADER_ROW - 1] || [];
+    const dealHeaders = dealsRows[HEADER_ROW - 1] || [];
 
-    const detailsRows = await readSheet(
-        sheets,
-        spreadsheetId,
-        `${SHEETS.LEAD_DETAILS}!A:P`
-    );
-
-    let nextLeadRow = getNextRow(leadsRows);
-    let nextDealRow = getNextRow(dealsRows);
-    let nextDetailRow = getNextRow(detailsRows);
-
-    const newLeadRows = [];
-    const newDealRows = [];
-    const newDetailRows = [];
-    const updateData = [];
+    headerIndex(leadHeaders, "phone");
+    headerIndex(detailHeaders, "facebook_leadgen_id");
+    headerIndex(dealHeaders, "lead_id");
 
     const createdItems = [];
     const updatedItems = [];
     const skippedExistingItems = [];
     const skippedEmptyItems = [];
+    const newLeadObjects = [];
+    const newDetailObjects = [];
+    const newDealObjects = [];
+    const updateData = [];
 
     const inMemoryLeadRows = leadsRows.map(row => [...row]);
-    const inMemoryDealRows = dealsRows.map(row => [...row]);
     const inMemoryDetailRows = detailsRows.map(row => [...row]);
+    const inMemoryDealRows = dealsRows.map(row => [...row]);
+
+    let nextLeadRow = getNextDataRow(inMemoryLeadRows);
+    let nextDetailRow = getNextDataRow(inMemoryDetailRows);
+    let nextDealRow = getNextDataRow(inMemoryDealRows);
 
     const seenLeadgenIds = new Set(
         detailsRows
-            .slice(1)
-            .map(row => String(row[1] || "").trim())
+            .slice(DATA_START_ROW - 1)
+            .map(row => rowToObject(detailHeaders, row).facebook_leadgen_id)
+            .map(value => String(value || "").trim())
             .filter(Boolean)
     );
 
@@ -413,24 +496,25 @@ async function appendLeadsToSheetBatch(leads) {
             continue;
         }
 
-        const existingLead = findLeadByPhone(inMemoryLeadRows, normalizedPhone);
+        const existingLead = findLeadByPhone(leadHeaders, inMemoryLeadRows, normalizedPhone);
 
         if (!existingLead) {
             const leadId = generateId("LEAD");
             const dealId = generateId("DEAL");
+            const leadObject = buildLeadMainObject(leadId, lead);
+            const detailObject = buildLeadDetailObject(leadId, lead);
+            const dealObject = buildDealObject(dealId, leadId, lead);
 
-            const leadMainRow = buildLeadMainRow(leadId, lead);
-            const dealRow = buildDealRow(dealId, leadId, lead);
-            const detailRow = buildLeadDetailRow(leadId, lead);
+            newLeadObjects.push(leadObject);
+            newDetailObjects.push(detailObject);
+            newDealObjects.push(dealObject);
 
-            newLeadRows.push(leadMainRow);
-            newDealRows.push(dealRow);
-            newDetailRows.push(detailRow);
-
-            inMemoryLeadRows[nextLeadRow - 1] = leadMainRow;
-            inMemoryDealRows[nextDealRow - 1] = dealRow;
-            inMemoryDetailRows[nextDetailRow - 1] = detailRow;
-
+            inMemoryLeadRows[nextLeadRow - 1] = objectToRow(leadHeaders, leadObject);
+            inMemoryDetailRows[nextDetailRow - 1] = objectToRow(detailHeaders, detailObject);
+            inMemoryDealRows[nextDealRow - 1] = objectToRow(dealHeaders, dealObject);
+            nextLeadRow++;
+            nextDetailRow++;
+            nextDealRow++;
             seenLeadgenIds.add(leadgenId);
 
             createdItems.push({
@@ -441,137 +525,99 @@ async function appendLeadsToSheetBatch(leads) {
                 name: lead.name || "",
             });
 
-            nextLeadRow++;
-            nextDealRow++;
-            nextDetailRow++;
-
             continue;
         }
 
         const leadId = existingLead.lead_id;
-        const latestDeal = findLatestDealByLeadId(inMemoryDealRows, leadId);
-        const existingDetail = findLeadDetailByLeadId(inMemoryDetailRows, leadId);
-        const completed = isCompletedLead(existingLead);
+        const latestDeal = findLatestDealByLeadId(dealHeaders, inMemoryDealRows, leadId);
+        const shouldCreateDeal = isCompletedLead(existingLead) || !latestDeal;
+        const detailObject = buildLeadDetailObject(leadId, lead);
+        const updateLeadObject = buildLeadMainUpdateObject(existingLead, lead);
 
-        if (completed || !latestDeal) {
-            const dealId = generateId("DEAL");
-            const dealRow = buildDealRow(dealId, leadId, lead);
-            const detailRow = buildLeadDetailRow(leadId, lead);
-
-            newDealRows.push(dealRow);
-
-            inMemoryDealRows[nextDealRow - 1] = dealRow;
-            nextDealRow++;
-
-            if (existingDetail) {
-                updateData.push({
-                    range: `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:P${existingDetail.rowNumber}`,
-                    values: [detailRow],
-                });
-
-                inMemoryDetailRows[existingDetail.rowNumber - 1] = detailRow;
-            } else {
-                newDetailRows.push(detailRow);
-                inMemoryDetailRows[nextDetailRow - 1] = detailRow;
-                nextDetailRow++;
-            }
-
+        for (const group of groupObjectRanges(leadHeaders, existingLead.rowNumber, updateLeadObject)) {
             updateData.push({
-                range: `${SHEETS.LEADS_MAIN}!B${existingLead.rowNumber}:O${existingLead.rowNumber}`,
-                values: [buildExistingLeadUpdateRow(existingLead, lead)],
+                range: `${SHEETS.LEADS_MAIN}!${group.rangeSuffix}`,
+                values: group.values,
             });
-
-            seenLeadgenIds.add(leadgenId);
-
-            updatedItems.push({
-                lead_id: leadId,
-                deal_id: dealId,
-                facebook_leadgen_id: leadgenId,
-                action: "created_new_deal_for_completed_or_missing_deal",
-            });
-
-            continue;
         }
 
-        const updatedDealRow = buildExistingDealUpdateRow(latestDeal, lead);
-        const updatedLeadDetailRow = buildLeadDetailRow(leadId, lead);
+        newDetailObjects.push(detailObject);
+        inMemoryDetailRows[nextDetailRow - 1] = objectToRow(detailHeaders, detailObject);
+        nextDetailRow++;
 
-        updateData.push({
-            range: `${SHEETS.DEALS}!A${latestDeal.rowNumber}:N${latestDeal.rowNumber}`,
-            values: [updatedDealRow],
-        });
+        let dealId = latestDeal?.deal_id || "";
 
-        updateData.push({
-            range: `${SHEETS.LEADS_MAIN}!B${existingLead.rowNumber}:O${existingLead.rowNumber}`,
-            values: [buildExistingLeadUpdateRow(existingLead, lead)],
-        });
-
-        if (existingDetail) {
-            updateData.push({
-                range: `${SHEETS.LEAD_DETAILS}!A${existingDetail.rowNumber}:P${existingDetail.rowNumber}`,
-                values: [updatedLeadDetailRow],
-            });
-
-            inMemoryDetailRows[existingDetail.rowNumber - 1] = updatedLeadDetailRow;
-        } else {
-            newDetailRows.push(updatedLeadDetailRow);
-            inMemoryDetailRows[nextDetailRow - 1] = updatedLeadDetailRow;
-            nextDetailRow++;
+        if (shouldCreateDeal) {
+            dealId = generateId("DEAL");
+            const dealObject = buildDealObject(dealId, leadId, lead);
+            newDealObjects.push(dealObject);
+            inMemoryDealRows[nextDealRow - 1] = objectToRow(dealHeaders, dealObject);
+            nextDealRow++;
         }
 
         seenLeadgenIds.add(leadgenId);
 
         updatedItems.push({
             lead_id: leadId,
-            deal_id: latestDeal.deal_id,
+            deal_id: dealId,
             facebook_leadgen_id: leadgenId,
-            action: "updated_existing",
+            action: shouldCreateDeal
+                ? "created_new_deal_for_completed_or_missing_deal"
+                : "updated_existing",
         });
     }
 
-    const startLeadRow = getNextRow(leadsRows);
-    const startDealRow = getNextRow(dealsRows);
-    const startDetailRow = getNextRow(detailsRows);
+    if (newLeadObjects.length) {
+        const startRow = getNextDataRow(leadsRows);
+        let rowNumber = startRow;
 
-    if (newLeadRows.length) {
-        const endRow = startLeadRow + newLeadRows.length - 1;
-
-        await updateSheet(
-            sheets,
-            spreadsheetId,
-            `${SHEETS.LEADS_MAIN}!A${startLeadRow}:P${endRow}`,
-            newLeadRows
-        );
+        for (const object of newLeadObjects) {
+            for (const group of groupObjectRanges(leadHeaders, rowNumber, object)) {
+                updateData.push({
+                    range: `${SHEETS.LEADS_MAIN}!${group.rangeSuffix}`,
+                    values: group.values,
+                });
+            }
+            rowNumber++;
+        }
     }
 
-    if (newDealRows.length) {
-        const endRow = startDealRow + newDealRows.length - 1;
+    if (newDetailObjects.length) {
+        const startRow = getNextDataRow(detailsRows);
+        let rowNumber = startRow;
 
-        await updateSheet(
-            sheets,
-            spreadsheetId,
-            `${SHEETS.DEALS}!A${startDealRow}:N${endRow}`,
-            newDealRows
-        );
+        for (const object of newDetailObjects) {
+            for (const group of groupObjectRanges(detailHeaders, rowNumber, object)) {
+                updateData.push({
+                    range: `${SHEETS.LEAD_DETAILS}!${group.rangeSuffix}`,
+                    values: group.values,
+                });
+            }
+            rowNumber++;
+        }
     }
 
-    if (newDetailRows.length) {
-        const endRow = startDetailRow + newDetailRows.length - 1;
+    if (newDealObjects.length) {
+        const startRow = getNextDataRow(dealsRows);
+        let rowNumber = startRow;
 
-        await updateSheet(
-            sheets,
-            spreadsheetId,
-            `${SHEETS.LEAD_DETAILS}!A${startDetailRow}:P${endRow}`,
-            newDetailRows
-        );
+        for (const object of newDealObjects) {
+            for (const group of groupObjectRanges(dealHeaders, rowNumber, object)) {
+                updateData.push({
+                    range: `${SHEETS.DEALS}!${group.rangeSuffix}`,
+                    values: group.values,
+                });
+            }
+            rowNumber++;
+        }
     }
 
     await batchUpdateValues(sheets, spreadsheetId, updateData);
 
-    console.log(`✅ Batch sync created: ${createdItems.length}`);
-    console.log(`🔄 Batch sync updated_existing: ${updatedItems.length}`);
-    console.log(`⏭️ Batch sync skipped_existing: ${skippedExistingItems.length}`);
-    console.log(`⚠️ Batch sync skipped_empty: ${skippedEmptyItems.length}`);
+    console.log(`Batch sync created: ${createdItems.length}`);
+    console.log(`Batch sync updated_existing: ${updatedItems.length}`);
+    console.log(`Batch sync skipped_existing: ${skippedExistingItems.length}`);
+    console.log(`Batch sync skipped_empty: ${skippedEmptyItems.length}`);
 
     return {
         created: createdItems.length,
@@ -591,5 +637,12 @@ module.exports = {
     getExistingLeadgenIds,
     createSheetsClient,
     readSheet,
+    getSheetRows,
+    getHeaders,
+    headerIndex,
+    rowToObject,
+    objectToRow,
+    appendObjects,
+    updateObjectRow,
     normalizePhone,
 };

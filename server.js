@@ -218,6 +218,7 @@ function parseFacebookLead(leadData) {
         name,
         phone,
         province,
+        raw_province: provinceResult.rawProvince,
         preferred_call_day,
         preferred_call_time,
         inbox_url,
@@ -327,6 +328,9 @@ app.post("/webhook/facebook", async (req, res) => {
                     lead.facebook_form_name = "";
                     lead.facebook_ad_id = leadData.ad_id || "";
                     lead.facebook_campaign_id = leadData.campaign_id || "";
+                    lead.facebook_campaign_name = leadData.campaign_name || "";
+                    lead.facebook_adset_name = leadData.adset_name || "";
+                    lead.raw_data_json = JSON.stringify(leadData);
 
                     if (!lead.facebook_leadgen_id) {
                         console.warn("⚠️ Webhook lead has no facebook_leadgen_id → skip");
@@ -403,6 +407,9 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 lead.facebook_form_name = leadRef.form_name || "";
                 lead.facebook_ad_id = leadData.ad_id || "";
                 lead.facebook_campaign_id = leadData.campaign_id || "";
+                lead.facebook_campaign_name = leadData.campaign_name || "";
+                lead.facebook_adset_name = leadData.adset_name || "";
+                lead.raw_data_json = JSON.stringify(leadData);
 
                 if (!lead.facebook_leadgen_id) {
                     skipped_empty++;
@@ -591,11 +598,8 @@ app.post("/import/legacy", async (req, res) => {
             "IMPORT_RAW!A:Z"
         );
 
-        const leadsRows = await googleSheets.readSheet(
-            sheets,
-            spreadsheetId,
-            "LEADS_MAIN!A:P"
-        );
+        const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
+        const leadHeaders = leadsRows[0] || [];
 
         let inserted = 0;
         let updated = 0;
@@ -645,8 +649,9 @@ app.post("/import/legacy", async (req, res) => {
             seenImportPhones.add(cleanPhone);
 
             const existingLead = leadsRows.find((leadRow, index) => {
-                if (index === 0) return false;
-                const existingPhone = googleSheets.normalizePhone(leadRow[1]);
+                if (index < 2) return false;
+                const leadObject = googleSheets.rowToObject(leadHeaders, leadRow);
+                const existingPhone = googleSheets.normalizePhone(leadObject.phone);
                 return cleanPhone && existingPhone === cleanPhone;
             });
 
@@ -680,7 +685,7 @@ app.post("/import/legacy", async (req, res) => {
                         action: "would_update",
                         phone,
                         name,
-                        existing_lead_id: existingLead[0] || "",
+                        existing_lead_id: googleSheets.rowToObject(leadHeaders, existingLead).lead_id || "",
                     });
                 } else {
                     inserted++;
