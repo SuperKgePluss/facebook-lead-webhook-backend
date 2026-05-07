@@ -1110,6 +1110,192 @@ function buildLegacyActivityObjects(activityPreviews, leadId, salesOwner) {
     }));
 }
 
+async function readFirstAvailableSheet(googleSheets, sheets, spreadsheetId, sheetNames, rangeSuffix = "A:ZZ") {
+    let lastError = null;
+
+    for (const sheetName of sheetNames) {
+        try {
+            return {
+                sheetName,
+                rows: await googleSheets.readSheet(
+                    sheets,
+                    spreadsheetId,
+                    `${sheetName}!${rangeSuffix}`
+                ),
+            };
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    throw lastError || new Error(`No available sheet found: ${sheetNames.join(", ")}`);
+}
+
+const CRM1_IMPORT_MARKERS = new Set([
+    "priority leads",
+    "lead new",
+    "close won & ส่งแบบสอบถาม",
+    "งานติดตั้ง",
+]);
+
+const CRM1_SKIP_MARKER_PATTERNS = [
+    "pivot leads",
+    "reason (update)",
+    "stage",
+    "reason",
+    "summary",
+    "pivot",
+    "report",
+    "config",
+];
+
+const CRM1_FIELD_ALIASES = {
+    customer_name: ["ชื่อลูกค้า", "ชื่อลูกค้า + ชื่อ LINE / FB", "Customer name", "Name"],
+    phone: ["เบอร์ติดต่อ", "เบอร์ติดต่อ (Tel.)", "Tel.", "Tel", "Phone"],
+    source: ["ช่องทางการขาย", "Sales Channel", "Sales channel"],
+    customer_type: ["ประเภทลูกค้า", "Customer type"],
+    location_type: ["ประเภทสถานที่", "Location type"],
+    rooms: ["ห้องที่ใช้งาน", "Rooms"],
+    area: ["พื้นที่ ตรม.", "sq m."],
+    stage: ["Stage", "สถานะ"],
+    reason: ["Reason", "เหตุผลยกเลิก"],
+    note: ["Notes", "Note", "Next_Step", "Next Step", "Column 23"],
+    month: ["Month"],
+    contact_method: ["วิธีการติดต่อ"],
+    last_contact_date: ["วันที่ติดตามล่าสุด", "Last Contact Date"],
+    follow_up_count: ["จำนวนการติดตาม", "จำนวนการติดตาม (ต้องครบ 3 ครั้ง)"],
+    next_step_date: ["Next_Step_Date"],
+    next_step: ["Next_Step"],
+    audio: ["ไฟล์เสียง", "Call Recording", "Audio URL", "Audio", "Recording"],
+    product_model: ["Product_Model", "Product Model", "ผลิตภัณฑ์"],
+    device_count: ["จำนวนเครื่องที่ติดตั้ง", "Device for setup"],
+    payment_date: ["วันที่ชำระเงิน", "Date Payment"],
+    payment_slip_url: ["หลักฐานการชำระ", "Link Slip"],
+    price: ["ยอดชำระ", "Price"],
+    install_date: ["วันที่ติดตั้ง", "Set up date"],
+    install_time: ["ช่วงเวลา"],
+    install_status: ["สถานะติดตั้ง", "สถานะ"],
+    address: ["สถานที่ติดตั้ง + ลิงค์โลเคชั่น", "สถานที่ติดตั้ง + จังหวัด", "Location", "Address"],
+    province: ["จังหวัด"],
+    zone: ["โซนพื้นที่"],
+    cancel_reason: ["เหตุผลยกเลิก"],
+};
+
+function isCrm1ImportMarker(value) {
+    return CRM1_IMPORT_MARKERS.has(normalizeMappingKey(value));
+}
+
+function isCrm1SkippedMarker(value) {
+    const marker = normalizeMappingKey(value);
+    return CRM1_SKIP_MARKER_PATTERNS.some(pattern => marker.includes(pattern));
+}
+
+function isCrm1AnyMarker(value) {
+    return isCrm1ImportMarker(value) || isCrm1SkippedMarker(value);
+}
+
+function rowHasAnyValue(row) {
+    return Array.isArray(row) && row.some(cell => String(cell || "").trim() !== "");
+}
+
+function getCrm1Value(rowObject, googleSheets, fieldName) {
+    const aliases = CRM1_FIELD_ALIASES[fieldName] || [];
+
+    for (const alias of aliases) {
+        const key = googleSheets.normalizeHeaderName(alias);
+        const value = String(rowObject[key] || "").trim();
+
+        if (value) return value;
+    }
+
+    return "";
+}
+
+function buildCrm1Blocks(rows) {
+    const parsedBlocks = [];
+    const skippedBlocks = [];
+
+    for (let i = 0; i < rows.length; i++) {
+        const marker = String(rows[i]?.[0] || "").trim();
+        if (!marker || !isCrm1AnyMarker(marker)) continue;
+
+        const block = {
+            marker,
+            markerRow: i + 1,
+            headerRow: i + 2,
+            headers: rows[i + 1] || [],
+            dataRows: [],
+        };
+
+        let j = i + 2;
+        for (; j < rows.length; j++) {
+            const firstCell = String(rows[j]?.[0] || "").trim();
+            if (firstCell && isCrm1AnyMarker(firstCell)) break;
+            block.dataRows.push({
+                rowNumber: j + 1,
+                row: rows[j] || [],
+            });
+        }
+
+        if (isCrm1ImportMarker(marker)) {
+            parsedBlocks.push(block);
+        } else {
+            skippedBlocks.push({
+                marker,
+                marker_row: block.markerRow,
+                reason: "ignored_block_type",
+            });
+        }
+
+        i = j - 1;
+    }
+
+    return { parsedBlocks, skippedBlocks };
+}
+
+function rowToCrm1Object(headers, row, googleSheets) {
+    return headers.reduce((object, header, index) => {
+        const key = googleSheets.normalizeHeaderName(header);
+        if (key) object[key] = row?.[index] || "";
+        return object;
+    }, {});
+}
+
+function detectCrm1Audio(rowObject, googleSheets, sourceBlock, sourceRow, normalizedPhone) {
+    const items = [];
+    const aliases = CRM1_FIELD_ALIASES.audio || [];
+
+    for (const alias of aliases) {
+        const key = googleSheets.normalizeHeaderName(alias);
+        const raw = String(rowObject[key] || "").trim();
+        if (!raw) continue;
+
+        const urls = extractUrls(raw);
+        if (urls.length) {
+            urls.forEach(url => items.push({
+                source_block: sourceBlock,
+                source_row: sourceRow,
+                normalized_phone: normalizedPhone,
+                audio_url: url,
+                audio_file_name: "",
+                detected_from_header: alias,
+            }));
+            continue;
+        }
+
+        items.push({
+            source_block: sourceBlock,
+            source_row: sourceRow,
+            normalized_phone: normalizedPhone,
+            audio_url: "",
+            audio_file_name: raw,
+            detected_from_header: alias,
+        });
+    }
+
+    return items;
+}
+
 app.post("/import/legacy", async (req, res) => {
     const dryRun = String(req.query.dry_run ?? "true").trim().toLowerCase() !== "false";
 
@@ -1117,11 +1303,13 @@ app.post("/import/legacy", async (req, res) => {
         const googleSheets = require("./services/googleSheets");
         const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
 
-        const rawRows = await googleSheets.readSheet(
+        const rawSheet = await readFirstAvailableSheet(
+            googleSheets,
             sheets,
             spreadsheetId,
-            "IMPORT_RAW!A:ZZ"
+            ["IMPORT_RAW_CRM2", "IMPORT_RAW"]
         );
+        const rawRows = rawSheet.rows;
 
         const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
         const leadHeaders = leadsRows[0] || [];
@@ -1655,6 +1843,7 @@ app.post("/import/legacy", async (req, res) => {
             cleaned_preferred_call_time_count: cleanedPreferredCallTimeCount,
             mapping_rules_loaded: mappingRules.loadedCount,
             mapping_rule_types_loaded: mappingRules.ruleTypes,
+            source_sheet_name: rawSheet.sheetName,
             audio_urls_detected: audioUrlsDetected,
             audio_activities_created: audioActivitiesCreated,
             audio_urls_skipped: audioUrlsSkipped,
@@ -1665,6 +1854,237 @@ app.post("/import/legacy", async (req, res) => {
     } catch (err) {
         return res.status(500).json({
             success: false,
+            error: err.message,
+        });
+    }
+});
+
+app.post("/import/legacy-crm1", async (req, res) => {
+    const dryRun = String(req.query.dry_run ?? "true").trim().toLowerCase() !== "false";
+
+    try {
+        const googleSheets = require("./services/googleSheets");
+        const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
+        const rawSheet = await readFirstAvailableSheet(
+            googleSheets,
+            sheets,
+            spreadsheetId,
+            ["IMPORT_RAW_CRM1"]
+        );
+        const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
+        const leadHeaders = leadsRows[0] || [];
+        const mappingRules = await loadMappingRules(googleSheets);
+        const { parsedBlocks, skippedBlocks } = buildCrm1Blocks(rawSheet.rows);
+        const knownLeadsByPhone = new Map();
+        const queuedPhones = new Set();
+        const samplePreviewItems = [];
+        const sampleAudioItems = [];
+        const failedRowSamples = [];
+
+        let totalRows = 0;
+        let rowsWithValidPhone = 0;
+        let rowsMissingPhone = 0;
+        let wouldCreateLead = 0;
+        let wouldUpdateExistingLead = 0;
+        let wouldCreateDeal = 0;
+        let wouldCreateInstallation = 0;
+        let wouldCreateActivity = 0;
+        let audioUrlsDetected = 0;
+        let audioFileNamesDetected = 0;
+        let failedRows = 0;
+
+        for (let i = 2; i < leadsRows.length; i++) {
+            const leadObject = googleSheets.rowToObject(leadHeaders, leadsRows[i]);
+            const existingPhone = normalizeLegacyImportPhone(leadObject.phone, googleSheets);
+
+            if (!existingPhone) continue;
+
+            knownLeadsByPhone.set(existingPhone, {
+                ...leadObject,
+                rowNumber: i + 1,
+            });
+        }
+
+        for (const block of parsedBlocks) {
+            for (const dataRow of block.dataRows) {
+                if (!rowHasAnyValue(dataRow.row)) continue;
+
+                totalRows++;
+
+                try {
+                    const rowObject = rowToCrm1Object(block.headers, dataRow.row, googleSheets);
+                    const customerName = getCrm1Value(rowObject, googleSheets, "customer_name");
+                    const phone = getCrm1Value(rowObject, googleSheets, "phone");
+                    const source = getCrm1Value(rowObject, googleSheets, "source");
+                    const customerType = getCrm1Value(rowObject, googleSheets, "customer_type");
+                    const stage = getCrm1Value(rowObject, googleSheets, "stage");
+                    const rawReason = getCrm1Value(rowObject, googleSheets, "reason")
+                        || getCrm1Value(rowObject, googleSheets, "cancel_reason");
+                    const note = getCrm1Value(rowObject, googleSheets, "note")
+                        || getCrm1Value(rowObject, googleSheets, "next_step");
+                    const rawProvince = getCrm1Value(rowObject, googleSheets, "province");
+                    const rawZone = getCrm1Value(rowObject, googleSheets, "zone");
+                    const productModel = getCrm1Value(rowObject, googleSheets, "product_model");
+                    const deviceCount = getCrm1Value(rowObject, googleSheets, "device_count");
+                    const paymentDate = getCrm1Value(rowObject, googleSheets, "payment_date");
+                    const paymentSlipUrl = getCrm1Value(rowObject, googleSheets, "payment_slip_url");
+                    const price = getCrm1Value(rowObject, googleSheets, "price");
+                    const installDateRaw = getCrm1Value(rowObject, googleSheets, "install_date");
+                    const installTime = getCrm1Value(rowObject, googleSheets, "install_time");
+                    const installStatus = getCrm1Value(rowObject, googleSheets, "install_status");
+                    const address = getCrm1Value(rowObject, googleSheets, "address");
+                    const lastContactDateRaw = getCrm1Value(rowObject, googleSheets, "last_contact_date");
+                    const nextStepDateRaw = getCrm1Value(rowObject, googleSheets, "next_step_date");
+                    const contactMethod = getCrm1Value(rowObject, googleSheets, "contact_method");
+                    const followUpCount = getCrm1Value(rowObject, googleSheets, "follow_up_count");
+                    const normalizedPhone = normalizeLegacyImportPhone(phone, googleSheets);
+
+                    if (!normalizedPhone) {
+                        rowsMissingPhone++;
+                        if (failedRowSamples.length < 10) {
+                            failedRowSamples.push({
+                                source_block: block.marker,
+                                source_row: dataRow.rowNumber,
+                                reason: "missing_or_invalid_phone",
+                            });
+                        }
+                        continue;
+                    }
+
+                    rowsWithValidPhone++;
+
+                    const provinceResult = normalizeLegacyProvince(rawProvince, mappingRules);
+                    const explicitZone = normalizeByMappingRules(mappingRules, "zone", rawZone);
+                    const derivedZone = normalizeLegacyZone(provinceResult.province, mappingRules);
+                    const zone = explicitZone || derivedZone;
+                    const normalizedSource = mapLegacySource(source || block.marker, mappingRules);
+                    const leadStatus = mapLegacyStatus(stage || block.marker, mappingRules);
+                    const reason = mapLegacyReason(rawReason || stage, mappingRules);
+                    const installDate = parseLegacyDateValue(installDateRaw).value;
+                    const lastContactDate = parseLegacyDateValue(lastContactDateRaw).value;
+                    const nextStepDate = parseLegacyDateValue(nextStepDateRaw).value;
+                    const audioItems = detectCrm1Audio(rowObject, googleSheets, block.marker, dataRow.rowNumber, normalizedPhone);
+                    const hasDealData = hasAnyValue({
+                        productModel,
+                        deviceCount,
+                        paymentDate,
+                        paymentSlipUrl,
+                        price,
+                    });
+                    const hasInstallationData = hasAnyValue({
+                        installDate,
+                        installTime,
+                        installStatus,
+                        address,
+                        zone,
+                    });
+                    const hasActivityData = hasAnyValue({
+                        contactMethod,
+                        lastContactDate,
+                        nextStepDate,
+                        note,
+                        followUpCount,
+                    }) || audioItems.length > 0;
+                    const existingLeadObject = knownLeadsByPhone.get(normalizedPhone);
+                    const duplicateQueued = queuedPhones.has(normalizedPhone);
+                    const wouldUpdate = Boolean(existingLeadObject || duplicateQueued);
+
+                    if (wouldUpdate) {
+                        wouldUpdateExistingLead++;
+                    } else {
+                        wouldCreateLead++;
+                        queuedPhones.add(normalizedPhone);
+                    }
+
+                    if (hasDealData) wouldCreateDeal++;
+                    if (hasInstallationData) wouldCreateInstallation++;
+                    if (hasActivityData) wouldCreateActivity++;
+
+                    audioItems.forEach(item => {
+                        if (item.audio_url) audioUrlsDetected++;
+                        if (item.audio_file_name) audioFileNamesDetected++;
+                        if (sampleAudioItems.length < 20) sampleAudioItems.push(item);
+                    });
+
+                    if (samplePreviewItems.length < 30) {
+                        samplePreviewItems.push({
+                            source_block: block.marker,
+                            source_row: dataRow.rowNumber,
+                            normalized_phone: normalizedPhone,
+                            customer_name: customerName,
+                            lead_status: leadStatus,
+                            source: normalizedSource,
+                            province: provinceResult.province,
+                            zone,
+                            customer_type: customerType,
+                            product_model: productModel,
+                            install_date: installDate,
+                            install_status: installStatus,
+                            stage,
+                            reason,
+                            note_preview: note,
+                            would_create_lead: !wouldUpdate,
+                            would_create_deal: hasDealData,
+                            would_create_installation: hasInstallationData,
+                            would_create_activity: hasActivityData,
+                        });
+                    }
+                } catch (err) {
+                    failedRows++;
+
+                    if (failedRowSamples.length < 10) {
+                        failedRowSamples.push({
+                            source_block: block.marker,
+                            source_row: dataRow.rowNumber,
+                            reason: err.message,
+                        });
+                    }
+                }
+            }
+        }
+
+        return res.status(dryRun ? 200 : 501).json({
+            success: dryRun,
+            dry_run: dryRun,
+            parsed_dry_run: dryRun,
+            source_sheet_name: rawSheet.sheetName,
+            real_import_implemented: false,
+            message: dryRun
+                ? undefined
+                : "CRM1 real import is not implemented yet. Re-run with dry_run=true for preview only.",
+            total_blocks_detected: parsedBlocks.length + skippedBlocks.length,
+            parsed_blocks: parsedBlocks.length,
+            parsed_block_details: parsedBlocks.map(block => ({
+                marker: block.marker,
+                marker_row: block.markerRow,
+                header_row: block.headerRow,
+                data_rows: block.dataRows.filter(item => rowHasAnyValue(item.row)).length,
+            })),
+            skipped_blocks: skippedBlocks.length,
+            total_rows: totalRows,
+            rows_with_valid_phone: rowsWithValidPhone,
+            rows_missing_phone: rowsMissingPhone,
+            would_create_lead: wouldCreateLead,
+            would_update_existing_lead: wouldUpdateExistingLead,
+            would_create_deal: wouldCreateDeal,
+            would_create_installation: wouldCreateInstallation,
+            would_create_activity: wouldCreateActivity,
+            audio_urls_detected: audioUrlsDetected,
+            audio_file_names_detected: audioFileNamesDetected,
+            failed_rows: failedRows,
+            mapping_rules_loaded: mappingRules.loadedCount,
+            mapping_rule_types_loaded: mappingRules.ruleTypes,
+            sample_preview_items: samplePreviewItems,
+            sample_audio_items: sampleAudioItems,
+            skipped_block_details: skippedBlocks,
+            failed_row_samples: failedRowSamples,
+        });
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            dry_run: dryRun,
+            parsed_dry_run: dryRun,
+            source_sheet_name: "IMPORT_RAW_CRM1",
             error: err.message,
         });
     }
