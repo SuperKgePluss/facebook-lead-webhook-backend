@@ -43,7 +43,19 @@ function handleOpenDealEdit_(e, sheet, row) {
   }
 }
 
-function refreshOpenDealCheckboxes() {
+function handleSaveFollowUpEdit_(e, sheet, row) {
+  if (String(e.value || '').toUpperCase() !== 'TRUE') {
+    return;
+  }
+
+  const headerMap = getHeaderMap_(sheet);
+  const saveFollowUpColumn = headerMap.save_follow_up;
+  if (!saveFollowUpColumn) return;
+
+  sheet.getRange(row, saveFollowUpColumn).setValue(false);
+}
+
+function refreshLeadMainActionCheckboxes() {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName('LEADS_MAIN');
   if (!sheet) return;
@@ -52,35 +64,50 @@ function refreshOpenDealCheckboxes() {
   if (lastRow < DATA_START_ROW) return;
 
   for (let row = DATA_START_ROW; row <= lastRow; row++) {
-    refreshOpenDealCheckboxForRow_(sheet, row);
+    refreshLeadMainActionCheckboxesForRow_(sheet, row);
   }
 }
 
-function refreshOpenDealCheckboxForRow_(sheet, row) {
+function refreshLeadMainActionCheckboxesForRow_(sheet, row) {
   if (!sheet || sheet.getName() !== 'LEADS_MAIN' || row < DATA_START_ROW) return;
 
   const headerMap = getHeaderMap_(sheet);
   const openDealColumn = headerMap.open_deal;
+  const saveFollowUpColumn = headerMap.save_follow_up;
   const leadIdColumn = headerMap.lead_id;
-  if (!openDealColumn || !leadIdColumn) return;
+  if (!leadIdColumn) return;
 
-  const openDealCell = sheet.getRange(row, openDealColumn);
   const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  const actionColumns = [openDealColumn, saveFollowUpColumn].filter(Boolean);
 
   if (leadId) {
-    openDealCell.insertCheckboxes();
-    if (String(openDealCell.getValue()).toUpperCase() !== 'TRUE') {
-      openDealCell.setValue(false);
-    }
+    actionColumns.forEach(column => {
+      const cell = sheet.getRange(row, column);
+      cell.insertCheckboxes();
+      if (String(cell.getValue()).toUpperCase() !== 'TRUE') {
+        cell.setValue(false);
+      }
+    });
     return;
   }
 
-  openDealCell.clearContent();
-  openDealCell.clearDataValidations();
+  actionColumns.forEach(column => {
+    const cell = sheet.getRange(row, column);
+    cell.clearContent();
+    cell.clearDataValidations();
+  });
+}
+
+function refreshOpenDealCheckboxes() {
+  refreshLeadMainActionCheckboxes();
+}
+
+function refreshOpenDealCheckboxForRow_(sheet, row) {
+  refreshLeadMainActionCheckboxesForRow_(sheet, row);
 }
 
 function setupLeadMainUi() {
-  refreshOpenDealCheckboxes();
+  refreshLeadMainActionCheckboxes();
 }
 
 function navigateToLatestMatch_(targetSheetName, matchHeader, matchValue) {

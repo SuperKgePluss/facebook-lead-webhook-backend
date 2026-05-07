@@ -92,6 +92,11 @@ function onEdit(e) {
     return;
   }
 
+  if (editedHeader === 'save_follow_up') {
+    handleSaveFollowUpEdit_(e, sheet, e.range.getRow());
+    return;
+  }
+
   normalizeLeadMainRow(sheet, e.range.getRow());
   refreshOpenDealCheckboxForRow_(sheet, e.range.getRow());
 
