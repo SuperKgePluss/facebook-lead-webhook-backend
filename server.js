@@ -1131,12 +1131,13 @@ async function readFirstAvailableSheet(googleSheets, sheets, spreadsheetId, shee
     throw lastError || new Error(`No available sheet found: ${sheetNames.join(", ")}`);
 }
 
-const CRM1_IMPORT_MARKERS = new Set([
+const CRM1_IMPORT_MARKERS = [
     "priority leads",
     "lead new",
+    "close won",
     "close won & ส่งแบบสอบถาม",
     "งานติดตั้ง",
-]);
+];
 
 const CRM1_SKIP_MARKER_PATTERNS = [
     "pivot leads",
@@ -1182,12 +1183,13 @@ const CRM1_FIELD_ALIASES = {
 };
 
 function isCrm1ImportMarker(value) {
-    return CRM1_IMPORT_MARKERS.has(normalizeMappingKey(value));
+    const marker = normalizeCrm1MarkerText(value);
+    return CRM1_IMPORT_MARKERS.some(pattern => marker.includes(normalizeCrm1MarkerText(pattern)));
 }
 
 function isCrm1SkippedMarker(value) {
-    const marker = normalizeMappingKey(value);
-    return CRM1_SKIP_MARKER_PATTERNS.some(pattern => marker.includes(pattern));
+    const marker = normalizeCrm1MarkerText(value);
+    return CRM1_SKIP_MARKER_PATTERNS.some(pattern => marker.includes(normalizeCrm1MarkerText(pattern)));
 }
 
 function isCrm1AnyMarker(value) {
@@ -1196,6 +1198,14 @@ function isCrm1AnyMarker(value) {
 
 function rowHasAnyValue(row) {
     return Array.isArray(row) && row.some(cell => String(cell || "").trim() !== "");
+}
+
+function normalizeCrm1MarkerText(value) {
+    return String(value || "")
+        .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
 }
 
 function getCrm1Value(rowObject, googleSheets, fieldName) {
@@ -1211,23 +1221,57 @@ function getCrm1Value(rowObject, googleSheets, fieldName) {
     return "";
 }
 
+function findNextNonEmptyRowIndex(rows, startIndex) {
+    for (let i = startIndex; i < rows.length; i++) {
+        if (rowHasAnyValue(rows[i])) return i;
+    }
+
+    return -1;
+}
+
 function buildCrm1Blocks(rows) {
     const parsedBlocks = [];
     const skippedBlocks = [];
+    const markerDetectionDebug = [];
 
     for (let i = 0; i < rows.length; i++) {
         const marker = String(rows[i]?.[0] || "").trim();
-        if (!marker || !isCrm1AnyMarker(marker)) continue;
+        const normalizedMarker = normalizeCrm1MarkerText(marker);
+        const isMarker = Boolean(marker && isCrm1AnyMarker(marker));
+
+        if (markerDetectionDebug.length < 50 && marker) {
+            markerDetectionDebug.push({
+                row: i + 1,
+                col_a: marker,
+                normalized_col_a: normalizedMarker,
+                detected_marker: isMarker,
+                import_marker: isMarker ? isCrm1ImportMarker(marker) : false,
+                skipped_marker: isMarker ? isCrm1SkippedMarker(marker) : false,
+            });
+        }
+
+        if (!isMarker) continue;
+
+        const headerIndex = findNextNonEmptyRowIndex(rows, i + 1);
+
+        if (headerIndex === -1) {
+            skippedBlocks.push({
+                marker,
+                marker_row: i + 1,
+                reason: "missing_header_row",
+            });
+            break;
+        }
 
         const block = {
             marker,
             markerRow: i + 1,
-            headerRow: i + 2,
-            headers: rows[i + 1] || [],
+            headerRow: headerIndex + 1,
+            headers: rows[headerIndex] || [],
             dataRows: [],
         };
 
-        let j = i + 2;
+        let j = headerIndex + 1;
         for (; j < rows.length; j++) {
             const firstCell = String(rows[j]?.[0] || "").trim();
             if (firstCell && isCrm1AnyMarker(firstCell)) break;
@@ -1250,7 +1294,7 @@ function buildCrm1Blocks(rows) {
         i = j - 1;
     }
 
-    return { parsedBlocks, skippedBlocks };
+    return { parsedBlocks, skippedBlocks, markerDetectionDebug };
 }
 
 function rowToCrm1Object(headers, row, googleSheets) {
@@ -1874,7 +1918,18 @@ app.post("/import/legacy-crm1", async (req, res) => {
         const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
         const leadHeaders = leadsRows[0] || [];
         const mappingRules = await loadMappingRules(googleSheets);
-        const { parsedBlocks, skippedBlocks } = buildCrm1Blocks(rawSheet.rows);
+        const { parsedBlocks, skippedBlocks, markerDetectionDebug } = buildCrm1Blocks(rawSheet.rows);
+        const sourceSheetRowCount = rawSheet.rows.length;
+        const sourceSheetColCount = rawSheet.rows.reduce((max, row) => Math.max(max, Array.isArray(row) ? row.length : 0), 0);
+        const first20ColAValues = rawSheet.rows.slice(0, 20).map((row, index) => ({
+            row: index + 1,
+            value: String(row?.[0] || ""),
+            normalized_value: normalizeCrm1MarkerText(row?.[0] || ""),
+        }));
+        const first5RowsPreview = rawSheet.rows.slice(0, 5).map((row, index) => ({
+            row: index + 1,
+            values: (row || []).slice(0, 12),
+        }));
         const knownLeadsByPhone = new Map();
         const queuedPhones = new Set();
         const samplePreviewItems = [];
@@ -2048,6 +2103,12 @@ app.post("/import/legacy-crm1", async (req, res) => {
             dry_run: dryRun,
             parsed_dry_run: dryRun,
             source_sheet_name: rawSheet.sheetName,
+            source_sheet_found: true,
+            source_sheet_row_count: sourceSheetRowCount,
+            source_sheet_col_count: sourceSheetColCount,
+            first_20_col_a_values: first20ColAValues,
+            first_5_rows_preview: first5RowsPreview,
+            marker_detection_debug: markerDetectionDebug,
             real_import_implemented: false,
             message: dryRun
                 ? undefined
@@ -2085,6 +2146,7 @@ app.post("/import/legacy-crm1", async (req, res) => {
             dry_run: dryRun,
             parsed_dry_run: dryRun,
             source_sheet_name: "IMPORT_RAW_CRM1",
+            source_sheet_found: false,
             error: err.message,
         });
     }
