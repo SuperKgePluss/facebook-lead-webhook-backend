@@ -570,10 +570,72 @@ app.get("/debug/lead/:leadgenId", async (req, res) => {
     }
 });
 
-function mapLegacySource(source) {
+function normalizeMappingKey(value) {
+    return String(value || "")
+        .replace(/_/g, " ")
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, " ");
+}
+
+function normalizeLooseMappingKey(value) {
+    return normalizeMappingKey(value)
+        .replace(/[.\-_/(),'"`’‘“”]/g, "")
+        .replace(/\s+/g, "");
+}
+
+async function loadMappingRules(googleSheets) {
+    const rows = await googleSheets.getSheetRows("MAPPING_RULES");
+    const headers = rows[0] || [];
+    const rules = new Map();
+    const ruleTypes = new Set();
+    let loadedCount = 0;
+
+    for (let i = 2; i < rows.length; i++) {
+        const rowObject = googleSheets.rowToObject(headers, rows[i]);
+        const ruleType = normalizeMappingKey(rowObject.rule_type);
+        const inputValue = normalizeMappingKey(rowObject.input_value);
+        const outputValue = String(rowObject.output_value || "").trim();
+
+        if (!ruleType || !inputValue || !outputValue) continue;
+
+        loadedCount++;
+        ruleTypes.add(ruleType);
+        rules.set(`${ruleType}::${inputValue}`, outputValue);
+        rules.set(`${ruleType}::${normalizeLooseMappingKey(rowObject.input_value)}`, outputValue);
+    }
+
+    return {
+        rules,
+        loadedCount,
+        ruleTypes: [...ruleTypes].sort(),
+    };
+}
+
+function normalizeByMappingRules(mappingRules, ruleType, rawValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw) return "";
+
+    const normalizedRuleType = normalizeMappingKey(ruleType);
+
+    if (normalizedRuleType === "province" && /^\d+$/.test(raw.replace(/\s+/g, ""))) {
+        return "";
+    }
+
+    return mappingRules.rules.get(`${normalizedRuleType}::${normalizeMappingKey(raw)}`)
+        || mappingRules.rules.get(`${normalizedRuleType}::${normalizeLooseMappingKey(raw)}`)
+        || "";
+}
+
+function mapLegacySource(source, mappingRules) {
+    const mapped = normalizeByMappingRules(mappingRules, "source", source);
+    if (mapped) return mapped;
+
     const value = String(source || "").trim().toLowerCase();
 
     if (value.includes("lead gen")) return "Facebook";
+    if (value.includes("leadgen")) return "Facebook";
+    if (value.includes("facebook")) return "Facebook";
     if (value.includes("fb chat")) return "Messenger";
     if (value.includes("messenger")) return "Messenger";
     if (value.includes("website")) return "Website";
@@ -581,17 +643,16 @@ function mapLegacySource(source) {
     return "Legacy Import";
 }
 
-function mapLegacyClassification(classification) {
-    const value = String(classification || "").trim().toLowerCase();
-
-    if (value === "hot") return "Interested";
-    if (value === "warm") return "Contacted";
-    if (value === "cold") return "New";
-    if (value === "not interested") return "Not Interested";
-    if (value === "purchased") return "Closed";
-
-    return "New";
+function mapLegacyStatus(classification, mappingRules) {
+    return normalizeByMappingRules(mappingRules, "lead_status", classification)
+        || LEGACY_IMPORT_STATUS;
 }
+
+function mapLegacyReason(reason, mappingRules) {
+    return normalizeByMappingRules(mappingRules, "reason", reason);
+}
+
+const LEGACY_IMPORT_STATUS = "Legacy Import";
 
 const LEGACY_IMPORT_FIELD_ALIASES = {
     source: ["Source"],
@@ -604,6 +665,7 @@ const LEGACY_IMPORT_FIELD_ALIASES = {
     preferred_call_day: ["Preferred Call Day"],
     preferred_call_time: ["Preferred Call Time"],
     classification: ["Classification"],
+    reason: ["Reason"],
     follow_up_1_date_time: ["Follow-up 1 Date/Time", "Follow up 1 Date/Time"],
     follow_up_1_details: ["Follow-up 1 Details", "Follow up 1 Details"],
     follow_up_2_date_time: ["Follow-up 2 Date/Time", "Follow up 2 Date/Time"],
@@ -639,12 +701,150 @@ function hasAnyValue(object) {
     return Object.values(object).some(value => String(value || "").trim() !== "");
 }
 
-function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl) {
+function normalizeLegacyProvince(rawProvince, mappingRules) {
+    const raw = String(rawProvince || "").trim();
+    if (!raw) {
+        return { province: "", rawProvince: "", wasNormalized: false, wasInvalid: false };
+    }
+
+    if (/^\d+$/.test(raw.replace(/\s+/g, ""))) {
+        return { province: "", rawProvince: raw, wasNormalized: false, wasInvalid: true };
+    }
+
+    const mappedProvince = normalizeByMappingRules(mappingRules, "province", raw);
+    if (mappedProvince) {
+        return {
+            province: mappedProvince,
+            rawProvince: raw,
+            wasNormalized: mappedProvince !== raw,
+            wasInvalid: false,
+        };
+    }
+
+    return { province: "", rawProvince: raw, wasNormalized: false, wasInvalid: true };
+}
+
+function splitLegacyChoiceValues(value) {
+    return String(value || "")
+        .replace(/_/g, " ")
+        .split(/[,;/\n]+/)
+        .map(item => item.replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+}
+
+function normalizeLegacyPreferredCallDay(rawValue, mappingRules) {
+    const mappedLabels = splitLegacyChoiceValues(rawValue)
+        .map(value => normalizeByMappingRules(mappingRules, "preferred_call_day", value))
+        .filter(Boolean);
+
+    return [...new Set(mappedLabels)].join(", ");
+}
+
+function normalizeLegacyPreferredCallTime(rawValue, mappingRules) {
+    const mappedLabels = splitLegacyChoiceValues(rawValue)
+        .map(value => normalizeByMappingRules(mappingRules, "preferred_call_time", value))
+        .filter(Boolean);
+
+    return [...new Set(mappedLabels)].join(", ");
+}
+
+function parseLegacyDateValue(rawValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw) {
+        return { value: "", isBlank: true, isInvalid: false };
+    }
+
+    const thaiMonths = {
+        มกราคม: 0,
+        กุมภาพันธ์: 1,
+        มีนาคม: 2,
+        เมษายน: 3,
+        พฤษภาคม: 4,
+        มิถุนายน: 5,
+        กรกฎาคม: 6,
+        สิงหาคม: 7,
+        กันยายน: 8,
+        ตุลาคม: 9,
+        พฤศจิกายน: 10,
+        ธันวาคม: 11,
+    };
+
+    const normalizeYear = (year) => {
+        const numericYear = Number(year);
+        if (numericYear < 100) return 2000 + numericYear;
+        if (numericYear > 2400) return numericYear - 543;
+        return numericYear;
+    };
+
+    const buildResult = (date) => {
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+            return { value: "", isBlank: false, isInvalid: true };
+        }
+
+        return { value: formatDateTimeForSheet(date), isBlank: false, isInvalid: false };
+    };
+
+    const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (isoMatch) {
+        return buildResult(new Date(
+            Number(isoMatch[1]),
+            Number(isoMatch[2]) - 1,
+            Number(isoMatch[3]),
+            Number(isoMatch[4] || 0),
+            Number(isoMatch[5] || 0),
+            Number(isoMatch[6] || 0)
+        ));
+    }
+
+    const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (slashMatch) {
+        return buildResult(new Date(
+            normalizeYear(slashMatch[3]),
+            Number(slashMatch[2]) - 1,
+            Number(slashMatch[1]),
+            Number(slashMatch[4] || 0),
+            Number(slashMatch[5] || 0),
+            Number(slashMatch[6] || 0)
+        ));
+    }
+
+    const thaiDateMatch = raw.match(/^(\d{1,2})\s+([ก-๙]+)\s+(\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (thaiDateMatch && Object.prototype.hasOwnProperty.call(thaiMonths, thaiDateMatch[2])) {
+        return buildResult(new Date(
+            normalizeYear(thaiDateMatch[3]),
+            thaiMonths[thaiDateMatch[2]],
+            Number(thaiDateMatch[1]),
+            Number(thaiDateMatch[4] || 0),
+            Number(thaiDateMatch[5] || 0),
+            Number(thaiDateMatch[6] || 0)
+        ));
+    }
+
+    if (/^\d{4}-\d{2}-\d{2}T/.test(raw)) {
+        return buildResult(new Date(raw));
+    }
+
+    return { value: "", isBlank: false, isInvalid: true };
+}
+
+function normalizeLegacyImportPhone(rawPhone, googleSheets) {
+    const cleanPhone = googleSheets.normalizePhone(rawPhone);
+    return /^0\d{9}$/.test(cleanPhone) ? cleanPhone : "";
+}
+
+function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl, debugCounters) {
     const activities = [];
 
     for (const followUpNo of [1, 2, 3]) {
         const details = getLegacyValue(rowObject, googleSheets, `follow_up_${followUpNo}_details`);
-        const createdAt = getLegacyValue(rowObject, googleSheets, `follow_up_${followUpNo}_date_time`);
+        const rawCreatedAt = getLegacyValue(rowObject, googleSheets, `follow_up_${followUpNo}_date_time`);
+        const parsedCreatedAt = parseLegacyDateValue(rawCreatedAt);
+
+        if (parsedCreatedAt.isBlank) {
+            debugCounters.blankDateCount++;
+        } else if (parsedCreatedAt.isInvalid) {
+            debugCounters.invalidDateCount++;
+        }
 
         if (!details) continue;
 
@@ -656,7 +856,8 @@ function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl) 
             action_type: "Follow-up",
             note: details,
             audio_url: audioUrl,
-            created_at: createdAt,
+            created_at: parsedCreatedAt.value,
+            raw_created_at: rawCreatedAt,
         });
     }
 
@@ -680,36 +881,49 @@ function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = 
     if (!existingLeadObject) {
         return {
             lead_id: leadId,
+            open_deal: false,
             customer_name: values.name,
             phone: cleanPhone,
-            source: mapLegacySource(values.source),
+            source: values.source,
             customer_type: values.corporateName,
             province: values.province,
+            save_follow_up: false,
             preferred_call_day: values.preferredCallDay,
             preferred_call_time: values.preferredCallTime,
-            lead_status: mapLegacyClassification(values.classification),
+            lead_status: values.leadStatus,
+            reason: values.reason,
             sales_owner: values.salesperson,
-            created_at: values.leadInDate || new Date(),
-            updated_at: new Date(),
+            created_at: values.leadInDate,
+            updated_at: values.updatedAt,
         };
     }
 
     const updateObject = {
-        updated_at: new Date(),
+        updated_at: values.updatedAt,
     };
 
     putIfBlank(updateObject, existingLeadObject, "customer_name", values.name);
     putIfBlank(updateObject, existingLeadObject, "phone", cleanPhone);
-    putIfBlank(updateObject, existingLeadObject, "source", mapLegacySource(values.source));
+    putIfBlank(updateObject, existingLeadObject, "source", values.source);
     putIfBlank(updateObject, existingLeadObject, "customer_type", values.corporateName);
     putIfBlank(updateObject, existingLeadObject, "province", values.province);
     putIfBlank(updateObject, existingLeadObject, "preferred_call_day", values.preferredCallDay);
     putIfBlank(updateObject, existingLeadObject, "preferred_call_time", values.preferredCallTime);
-    putIfBlank(updateObject, existingLeadObject, "lead_status", mapLegacyClassification(values.classification));
+    putIfBlank(updateObject, existingLeadObject, "lead_status", values.leadStatus);
+    putIfBlank(updateObject, existingLeadObject, "reason", values.reason);
     putIfBlank(updateObject, existingLeadObject, "sales_owner", values.salesperson);
     putIfBlank(updateObject, existingLeadObject, "created_at", values.leadInDate);
 
     return updateObject;
+}
+
+function buildLegacyLeadDetailObject(values, leadId, rowObject) {
+    return {
+        lead_id: leadId,
+        raw_province: values.rawProvince,
+        raw_data_json: JSON.stringify(rowObject),
+        import_source: "Legacy Import",
+    };
 }
 
 function buildLegacyActivityObjects(activityPreviews, leadId, salesOwner) {
@@ -723,7 +937,7 @@ function buildLegacyActivityObjects(activityPreviews, leadId, salesOwner) {
         audio_url: activity.audio_url,
         audio_file_name: "",
         created_by: salesOwner,
-        created_at: activity.created_at || new Date(),
+        created_at: activity.created_at,
     }));
 }
 
@@ -742,6 +956,9 @@ app.post("/import/legacy", async (req, res) => {
 
         const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
         const leadHeaders = leadsRows[0] || [];
+        const detailRows = await googleSheets.getSheetRows("LEAD_DETAILS");
+        const detailHeaders = detailRows[0] || [];
+        const mappingRules = await loadMappingRules(googleSheets);
 
         const rawHeaders = rawRows[0] || [];
         const detectedHeaders = rawHeaders
@@ -799,20 +1016,55 @@ app.post("/import/legacy", async (req, res) => {
         let skippedMissingPhone = 0;
         let skippedDuplicateOrExisting = 0;
         let failedRows = 0;
+        let normalizedProvinceCount = 0;
+        let invalidProvinceCount = 0;
+        let blankDateCount = 0;
+        let invalidDateCount = 0;
+        let cleanedPreferredCallDayCount = 0;
+        let cleanedPreferredCallTimeCount = 0;
         const sampleResultItems = [];
         const pendingLeadCreates = [];
         const pendingLeadUpdates = [];
+        const pendingLeadDetailCreates = [];
+        const pendingLeadDetailUpdates = [];
         const pendingActivityCreates = [];
         const knownLeadsByPhone = new Map();
+        const knownLeadDetailsByLeadId = new Map();
+        const debugCounters = {
+            get blankDateCount() {
+                return blankDateCount;
+            },
+            set blankDateCount(value) {
+                blankDateCount = value;
+            },
+            get invalidDateCount() {
+                return invalidDateCount;
+            },
+            set invalidDateCount(value) {
+                invalidDateCount = value;
+            },
+        };
 
         for (let i = 2; i < leadsRows.length; i++) {
             const leadObject = googleSheets.rowToObject(leadHeaders, leadsRows[i]);
-            const existingPhone = googleSheets.normalizePhone(leadObject.phone);
+            const existingPhone = normalizeLegacyImportPhone(leadObject.phone, googleSheets);
 
             if (!existingPhone) continue;
 
             knownLeadsByPhone.set(existingPhone, {
                 ...leadObject,
+                rowNumber: i + 1,
+            });
+        }
+
+        for (let i = 2; i < detailRows.length; i++) {
+            const detailObject = googleSheets.rowToObject(detailHeaders, detailRows[i]);
+            const detailLeadId = String(detailObject.lead_id || "").trim();
+
+            if (!detailLeadId) continue;
+
+            knownLeadDetailsByLeadId.set(detailLeadId, {
+                ...detailObject,
                 rowNumber: i + 1,
             });
         }
@@ -832,6 +1084,7 @@ app.post("/import/legacy", async (req, res) => {
             const preferredCallDay = getLegacyValue(rowObject, googleSheets, "preferred_call_day");
             const preferredCallTime = getLegacyValue(rowObject, googleSheets, "preferred_call_time");
             const classification = getLegacyValue(rowObject, googleSheets, "classification");
+            const reason = getLegacyValue(rowObject, googleSheets, "reason");
             const callRecording = getLegacyValue(rowObject, googleSheets, "call_recording");
             const numberOfDevicesBought = getLegacyValue(rowObject, googleSheets, "number_of_devices_bought");
             const whichPackage = getLegacyValue(rowObject, googleSheets, "which_package");
@@ -843,7 +1096,35 @@ app.post("/import/legacy", async (req, res) => {
             const installationDate = getLegacyValue(rowObject, googleSheets, "installation_date");
             const installationTime = getLegacyValue(rowObject, googleSheets, "installation_time");
 
-            const cleanPhone = googleSheets.normalizePhone(phone);
+            const cleanPhone = normalizeLegacyImportPhone(phone, googleSheets);
+            const provinceResult = normalizeLegacyProvince(province, mappingRules);
+            const cleanedPreferredCallDay = normalizeLegacyPreferredCallDay(preferredCallDay, mappingRules);
+            const cleanedPreferredCallTime = normalizeLegacyPreferredCallTime(preferredCallTime, mappingRules);
+            const cleanedSource = mapLegacySource(source, mappingRules);
+            const cleanedLeadStatus = mapLegacyStatus(classification, mappingRules);
+            const cleanedReason = mapLegacyReason(reason || classification, mappingRules);
+            const parsedLeadInDate = parseLegacyDateValue(leadInDate);
+            const updatedAt = formatDateTimeForSheet(new Date());
+
+            if (provinceResult.province) {
+                normalizedProvinceCount++;
+            } else if (provinceResult.wasInvalid) {
+                invalidProvinceCount++;
+            }
+
+            if (String(preferredCallDay || "").trim() && cleanedPreferredCallDay !== preferredCallDay) {
+                cleanedPreferredCallDayCount++;
+            }
+
+            if (String(preferredCallTime || "").trim() && cleanedPreferredCallTime !== preferredCallTime) {
+                cleanedPreferredCallTimeCount++;
+            }
+
+            if (parsedLeadInDate.isBlank) {
+                blankDateCount++;
+            } else if (parsedLeadInDate.isInvalid) {
+                invalidDateCount++;
+            }
 
             if (!cleanPhone) {
                 rowsMissingPhone++;
@@ -936,7 +1217,8 @@ app.post("/import/legacy", async (req, res) => {
                 rowObject,
                 googleSheets,
                 leadId,
-                callRecording
+                callRecording,
+                debugCounters
             );
 
             if (hasDealData) {
@@ -959,14 +1241,16 @@ app.post("/import/legacy", async (req, res) => {
                         target_sheet: "LEADS_MAIN",
                         customer_name: name,
                         phone: cleanPhone,
-                        source: mapLegacySource(source),
-                        lead_status: mapLegacyClassification(classification),
+                        source: cleanedSource,
+                        lead_status: cleanedLeadStatus,
+                        reason: cleanedReason,
                         sales_owner: salesperson,
-                        province,
+                        province: provinceResult.province,
+                        raw_province: provinceResult.rawProvince,
                         customer_type_or_raw_corporate_preview: corporateName,
-                        preferred_call_day: preferredCallDay,
-                        preferred_call_time: preferredCallTime,
-                        created_at: leadInDate,
+                        preferred_call_day: cleanedPreferredCallDay,
+                        preferred_call_time: cleanedPreferredCallTime,
+                        created_at: parsedLeadInDate.value,
                     },
                     deal_preview: hasDealData ? dealPreview : null,
                     installation_preview: hasInstallationData ? installationPreview : null,
@@ -985,15 +1269,18 @@ app.post("/import/legacy", async (req, res) => {
             if (!dryRun) {
                 try {
                     const values = {
-                        source,
-                        leadInDate,
+                        source: cleanedSource,
+                        leadInDate: parsedLeadInDate.value,
+                        updatedAt,
                         salesperson,
                         name,
-                        province,
+                        province: provinceResult.province,
+                        rawProvince: provinceResult.rawProvince,
                         corporateName,
-                        preferredCallDay,
-                        preferredCallTime,
-                        classification,
+                        preferredCallDay: cleanedPreferredCallDay,
+                        preferredCallTime: cleanedPreferredCallTime,
+                        leadStatus: cleanedLeadStatus,
+                        reason: cleanedReason,
                     };
                     let resolvedLeadId = leadId;
                     let resultAction = "";
@@ -1014,6 +1301,22 @@ app.post("/import/legacy", async (req, res) => {
                             rowNumber: null,
                         });
                         resultAction = "inserted_lead";
+                    }
+
+                    const detailObject = buildLegacyLeadDetailObject(values, resolvedLeadId, rowObject);
+                    const existingDetailObject = knownLeadDetailsByLeadId.get(resolvedLeadId);
+
+                    if (!existingDetailObject) {
+                        pendingLeadDetailCreates.push(detailObject);
+                        knownLeadDetailsByLeadId.set(resolvedLeadId, {
+                            ...detailObject,
+                            rowNumber: null,
+                        });
+                    } else if (!String(existingDetailObject.facebook_leadgen_id || "").trim()) {
+                        pendingLeadDetailUpdates.push({
+                            rowNumber: existingDetailObject.rowNumber,
+                            object: detailObject,
+                        });
                     }
 
                     const activityObjects = buildLegacyActivityObjects(activityPreviews, resolvedLeadId, salesperson);
@@ -1047,6 +1350,8 @@ app.post("/import/legacy", async (req, res) => {
         }
 
         if (!dryRun) {
+            const failedCreatedLeadIds = new Set();
+
             for (const update of pendingLeadUpdates) {
                 try {
                     await googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.object);
@@ -1067,17 +1372,46 @@ app.post("/import/legacy", async (req, res) => {
                             insertedLeads++;
                         } catch (rowErr) {
                             failedRows++;
+                            failedCreatedLeadIds.add(leadObject.lead_id);
                         }
                     }
                 }
             }
 
-            if (pendingActivityCreates.length) {
+            for (const update of pendingLeadDetailUpdates) {
                 try {
-                    await googleSheets.appendObjects("ACTIVITY_LOG", pendingActivityCreates);
-                    createdActivities += pendingActivityCreates.length;
+                    await googleSheets.updateObjectRow("LEAD_DETAILS", update.rowNumber, update.object);
                 } catch (err) {
-                    for (const activityObject of pendingActivityCreates) {
+                    failedRows++;
+                }
+            }
+
+            const leadDetailCreatesToWrite = pendingLeadDetailCreates
+                .filter(detailObject => !failedCreatedLeadIds.has(detailObject.lead_id));
+
+            if (leadDetailCreatesToWrite.length) {
+                try {
+                    await googleSheets.appendObjects("LEAD_DETAILS", leadDetailCreatesToWrite);
+                } catch (err) {
+                    for (const detailObject of leadDetailCreatesToWrite) {
+                        try {
+                            await googleSheets.appendObjects("LEAD_DETAILS", [detailObject]);
+                        } catch (rowErr) {
+                            failedRows++;
+                        }
+                    }
+                }
+            }
+
+            const activityCreatesToWrite = pendingActivityCreates
+                .filter(activityObject => !failedCreatedLeadIds.has(activityObject.lead_id));
+
+            if (activityCreatesToWrite.length) {
+                try {
+                    await googleSheets.appendObjects("ACTIVITY_LOG", activityCreatesToWrite);
+                    createdActivities += activityCreatesToWrite.length;
+                } catch (err) {
+                    for (const activityObject of activityCreatesToWrite) {
                         try {
                             await googleSheets.appendObjects("ACTIVITY_LOG", [activityObject]);
                             createdActivities++;
@@ -1113,6 +1447,14 @@ app.post("/import/legacy", async (req, res) => {
             skipped_missing_phone: skippedMissingPhone,
             skipped_duplicate_or_existing: skippedDuplicateOrExisting,
             failed_rows: failedRows,
+            normalized_province_count: normalizedProvinceCount,
+            invalid_province_count: invalidProvinceCount,
+            blank_date_count: blankDateCount,
+            invalid_date_count: invalidDateCount,
+            cleaned_preferred_call_day_count: cleanedPreferredCallDayCount,
+            cleaned_preferred_call_time_count: cleanedPreferredCallTimeCount,
+            mapping_rules_loaded: mappingRules.loadedCount,
+            mapping_rule_types_loaded: mappingRules.ruleTypes,
             sample_result_items: sampleResultItems,
         });
     } catch (err) {

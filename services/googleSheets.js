@@ -97,7 +97,6 @@ function groupObjectRanges(headers, rowNumber, object) {
 
         if (
             !canonicalHeader ||
-            canonicalHeader === "open_deal" ||
             !Object.prototype.hasOwnProperty.call(object, canonicalHeader)
         ) {
             if (currentGroup) {
