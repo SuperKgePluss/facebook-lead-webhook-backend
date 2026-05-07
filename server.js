@@ -588,6 +588,7 @@ async function loadMappingRules(googleSheets) {
     const rows = await googleSheets.getSheetRows("MAPPING_RULES");
     const headers = rows[0] || [];
     const rules = new Map();
+    const entriesByType = new Map();
     const ruleTypes = new Set();
     let loadedCount = 0;
 
@@ -597,24 +598,50 @@ async function loadMappingRules(googleSheets) {
         const inputValue = normalizeMappingKey(rowObject.input_value);
         const outputValue = String(rowObject.output_value || "").trim();
 
-        if (!ruleType || !inputValue || !outputValue) continue;
+        if (!ruleType || !inputValue) continue;
 
         loadedCount++;
         ruleTypes.add(ruleType);
-        rules.set(`${ruleType}::${inputValue}`, outputValue);
-        rules.set(`${ruleType}::${normalizeLooseMappingKey(rowObject.input_value)}`, outputValue);
+
+        const entry = {
+            ruleType,
+            inputValue,
+            looseInputValue: normalizeLooseMappingKey(rowObject.input_value),
+            outputValue,
+        };
+
+        if (!entriesByType.has(ruleType)) {
+            entriesByType.set(ruleType, []);
+        }
+
+        entriesByType.get(ruleType).push(entry);
+        rules.set(`${ruleType}::${entry.inputValue}`, outputValue);
+        rules.set(`${ruleType}::${entry.looseInputValue}`, outputValue);
     }
 
     return {
         rules,
+        entriesByType,
         loadedCount,
         ruleTypes: [...ruleTypes].sort(),
     };
 }
 
+function isInvalidByMappingRules(mappingRules, rawValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw) return false;
+
+    const normalized = normalizeMappingKey(raw);
+    const loose = normalizeLooseMappingKey(raw);
+
+    return mappingRules.rules.has(`invalid_value::${normalized}`)
+        || mappingRules.rules.has(`invalid_value::${loose}`);
+}
+
 function normalizeByMappingRules(mappingRules, ruleType, rawValue) {
     const raw = String(rawValue || "").trim();
     if (!raw) return "";
+    if (isInvalidByMappingRules(mappingRules, raw)) return "";
 
     const normalizedRuleType = normalizeMappingKey(ruleType);
 
@@ -622,14 +649,61 @@ function normalizeByMappingRules(mappingRules, ruleType, rawValue) {
         return "";
     }
 
-    return mappingRules.rules.get(`${normalizedRuleType}::${normalizeMappingKey(raw)}`)
-        || mappingRules.rules.get(`${normalizedRuleType}::${normalizeLooseMappingKey(raw)}`)
-        || "";
+    const exactKey = `${normalizedRuleType}::${normalizeMappingKey(raw)}`;
+    const looseKey = `${normalizedRuleType}::${normalizeLooseMappingKey(raw)}`;
+
+    if (mappingRules.rules.has(exactKey)) return mappingRules.rules.get(exactKey);
+    if (mappingRules.rules.has(looseKey)) return mappingRules.rules.get(looseKey);
+
+    return "";
+}
+
+function hasMappingRule(mappingRules, ruleType, rawValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw) return false;
+
+    const normalizedRuleType = normalizeMappingKey(ruleType);
+    return mappingRules.rules.has(`${normalizedRuleType}::${normalizeMappingKey(raw)}`)
+        || mappingRules.rules.has(`${normalizedRuleType}::${normalizeLooseMappingKey(raw)}`);
+}
+
+function normalizeMultiByMappingRules(mappingRules, ruleType, rawValue) {
+    const raw = String(rawValue || "").trim();
+    if (!raw || isInvalidByMappingRules(mappingRules, raw)) return "";
+
+    const normalizedRuleType = normalizeMappingKey(ruleType);
+    const entries = mappingRules.entriesByType.get(normalizedRuleType) || [];
+    const rawKey = normalizeMappingKey(raw);
+    const rawLooseKey = normalizeLooseMappingKey(raw);
+    const matches = [];
+
+    for (const entry of entries) {
+        if (!entry.outputValue) continue;
+        const keyIndex = rawKey.indexOf(entry.inputValue);
+        const looseKeyIndex = rawLooseKey.indexOf(entry.looseInputValue);
+
+        if (
+            rawKey === entry.inputValue ||
+            rawLooseKey === entry.looseInputValue ||
+            keyIndex !== -1 ||
+            looseKeyIndex !== -1
+        ) {
+            matches.push({
+                label: entry.outputValue,
+                index: [keyIndex, looseKeyIndex].filter(index => index >= 0).sort((a, b) => a - b)[0] || 0,
+            });
+        }
+    }
+
+    return [...new Set(matches
+        .sort((a, b) => a.index - b.index)
+        .map(match => match.label))].join(", ");
 }
 
 function mapLegacySource(source, mappingRules) {
-    const mapped = normalizeByMappingRules(mappingRules, "source", source);
-    if (mapped) return mapped;
+    if (hasMappingRule(mappingRules, "source", source) || isInvalidByMappingRules(mappingRules, source)) {
+        return normalizeByMappingRules(mappingRules, "source", source);
+    }
 
     const value = String(source || "").trim().toLowerCase();
 
@@ -644,8 +718,11 @@ function mapLegacySource(source, mappingRules) {
 }
 
 function mapLegacyStatus(classification, mappingRules) {
-    return normalizeByMappingRules(mappingRules, "lead_status", classification)
-        || LEGACY_IMPORT_STATUS;
+    if (hasMappingRule(mappingRules, "lead_status", classification) || isInvalidByMappingRules(mappingRules, classification)) {
+        return normalizeByMappingRules(mappingRules, "lead_status", classification);
+    }
+
+    return LEGACY_IMPORT_STATUS;
 }
 
 function mapLegacyReason(reason, mappingRules) {
@@ -684,6 +761,66 @@ const LEGACY_IMPORT_FIELD_ALIASES = {
     installation_time: ["Installation Time"],
 };
 
+function isLegacyAudioHeader(headerName) {
+    const header = String(headerName || "").toLowerCase();
+    return header.includes("call_recording")
+        || header.includes("call_recording_url")
+        || header.includes("audio")
+        || header.includes("recording");
+}
+
+function extractUrls(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return [];
+
+    return raw.match(/https?:\/\/[^\s,;]+/gi) || [];
+}
+
+function getLegacyAudioUrls(rowObject, debugCounters) {
+    const urls = [];
+
+    for (const [headerName, value] of Object.entries(rowObject)) {
+        if (!isLegacyAudioHeader(headerName)) continue;
+
+        const raw = String(value || "").trim();
+        if (!raw) continue;
+
+        const extractedUrls = extractUrls(raw);
+
+        if (!extractedUrls.length) {
+            debugCounters.audioUrlsSkipped++;
+            debugCounters.audioSkipReasons.invalid_audio_url = (debugCounters.audioSkipReasons.invalid_audio_url || 0) + 1;
+
+            if (debugCounters.sampleAudioItems.length < 10) {
+                debugCounters.sampleAudioItems.push({
+                    header: headerName,
+                    action: "skipped",
+                    reason: "invalid_audio_url",
+                    value: raw,
+                });
+            }
+            continue;
+        }
+
+        for (const url of extractedUrls) {
+            if (urls.includes(url)) continue;
+
+            urls.push(url);
+            debugCounters.audioUrlsDetected++;
+
+            if (debugCounters.sampleAudioItems.length < 10) {
+                debugCounters.sampleAudioItems.push({
+                    header: headerName,
+                    action: "detected",
+                    audio_url: url,
+                });
+            }
+        }
+    }
+
+    return urls;
+}
+
 function getLegacyValue(rowObject, googleSheets, fieldName) {
     const aliases = LEGACY_IMPORT_FIELD_ALIASES[fieldName] || [];
 
@@ -707,7 +844,7 @@ function normalizeLegacyProvince(rawProvince, mappingRules) {
         return { province: "", rawProvince: "", wasNormalized: false, wasInvalid: false };
     }
 
-    if (/^\d+$/.test(raw.replace(/\s+/g, ""))) {
+    if (/^\d+$/.test(raw.replace(/\s+/g, "")) || isInvalidByMappingRules(mappingRules, raw)) {
         return { province: "", rawProvince: raw, wasNormalized: false, wasInvalid: true };
     }
 
@@ -733,19 +870,24 @@ function splitLegacyChoiceValues(value) {
 }
 
 function normalizeLegacyPreferredCallDay(rawValue, mappingRules) {
-    const mappedLabels = splitLegacyChoiceValues(rawValue)
-        .map(value => normalizeByMappingRules(mappingRules, "preferred_call_day", value))
-        .filter(Boolean);
-
-    return [...new Set(mappedLabels)].join(", ");
+    return normalizeMultiByMappingRules(mappingRules, "preferred_call_day", rawValue);
 }
 
 function normalizeLegacyPreferredCallTime(rawValue, mappingRules) {
-    const mappedLabels = splitLegacyChoiceValues(rawValue)
-        .map(value => normalizeByMappingRules(mappingRules, "preferred_call_time", value))
-        .filter(Boolean);
+    return normalizeMultiByMappingRules(mappingRules, "preferred_call_time", rawValue);
+}
 
-    return [...new Set(mappedLabels)].join(", ");
+function normalizeLegacyZone(province, mappingRules) {
+    return normalizeByMappingRules(mappingRules, "zone", province);
+}
+
+function formatLegacyDateForSheet(date) {
+    const pad = (value) => String(value).padStart(2, "0");
+    return [
+        date.getFullYear(),
+        pad(date.getMonth() + 1),
+        pad(date.getDate()),
+    ].join("-") + ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function parseLegacyDateValue(rawValue) {
@@ -781,7 +923,7 @@ function parseLegacyDateValue(rawValue) {
             return { value: "", isBlank: false, isInvalid: true };
         }
 
-        return { value: formatDateTimeForSheet(date), isBlank: false, isInvalid: false };
+        return { value: formatLegacyDateForSheet(date), isBlank: false, isInvalid: false };
     };
 
     const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
@@ -832,13 +974,17 @@ function normalizeLegacyImportPhone(rawPhone, googleSheets) {
     return /^0\d{9}$/.test(cleanPhone) ? cleanPhone : "";
 }
 
-function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl, debugCounters) {
+function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrls, debugCounters) {
     const activities = [];
+    const usedAudioUrls = new Set();
 
     for (const followUpNo of [1, 2, 3]) {
         const details = getLegacyValue(rowObject, googleSheets, `follow_up_${followUpNo}_details`);
         const rawCreatedAt = getLegacyValue(rowObject, googleSheets, `follow_up_${followUpNo}_date_time`);
         const parsedCreatedAt = parseLegacyDateValue(rawCreatedAt);
+        let audioUrl = details
+            ? audioUrls[followUpNo - 1] || audioUrls.find(url => !usedAudioUrls.has(url)) || ""
+            : audioUrls[followUpNo - 1] || "";
 
         if (parsedCreatedAt.isBlank) {
             debugCounters.blankDateCount++;
@@ -846,7 +992,9 @@ function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl, 
             debugCounters.invalidDateCount++;
         }
 
-        if (!details) continue;
+        if (!details && !audioUrl) continue;
+        if (audioUrl && usedAudioUrls.has(audioUrl)) audioUrl = "";
+        if (audioUrl) usedAudioUrls.add(audioUrl);
 
         activities.push({
             target_sheet: "ACTIVITY_LOG",
@@ -860,6 +1008,25 @@ function buildLegacyActivityPreviews(rowObject, googleSheets, leadId, audioUrl, 
             raw_created_at: rawCreatedAt,
         });
     }
+
+    audioUrls.forEach((audioUrl, index) => {
+        if (usedAudioUrls.has(audioUrl)) return;
+
+        activities.push({
+            target_sheet: "ACTIVITY_LOG",
+            action: "would_create_activity",
+            lead_id: leadId || "(resolved after lead creation)",
+            follow_up_no: activities.length + 1 || index + 1,
+            action_type: "Follow-up",
+            note: "",
+            audio_url: audioUrl,
+            created_at: "",
+            raw_created_at: "",
+        });
+    });
+
+    const audioActivityCount = activities.filter(activity => activity.audio_url).length;
+    debugCounters.audioActivitiesCreated += audioActivityCount;
 
     return activities;
 }
@@ -887,6 +1054,7 @@ function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = 
             source: values.source,
             customer_type: values.corporateName,
             province: values.province,
+            zone: values.zone,
             save_follow_up: false,
             preferred_call_day: values.preferredCallDay,
             preferred_call_time: values.preferredCallTime,
@@ -907,6 +1075,7 @@ function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = 
     putIfBlank(updateObject, existingLeadObject, "source", values.source);
     putIfBlank(updateObject, existingLeadObject, "customer_type", values.corporateName);
     putIfBlank(updateObject, existingLeadObject, "province", values.province);
+    putIfBlank(updateObject, existingLeadObject, "zone", values.zone);
     putIfBlank(updateObject, existingLeadObject, "preferred_call_day", values.preferredCallDay);
     putIfBlank(updateObject, existingLeadObject, "preferred_call_time", values.preferredCallTime);
     putIfBlank(updateObject, existingLeadObject, "lead_status", values.leadStatus);
@@ -989,7 +1158,10 @@ app.post("/import/legacy", async (req, res) => {
                     };
                 }
 
-                if (!expectedHeaderKeys.has(googleSheets.normalizeHeaderName(rawHeader))) {
+                if (
+                    !expectedHeaderKeys.has(googleSheets.normalizeHeaderName(rawHeader)) &&
+                    !isLegacyAudioHeader(googleSheets.normalizeHeaderName(rawHeader))
+                ) {
                     return {
                         column,
                         header: rawHeader,
@@ -1022,6 +1194,11 @@ app.post("/import/legacy", async (req, res) => {
         let invalidDateCount = 0;
         let cleanedPreferredCallDayCount = 0;
         let cleanedPreferredCallTimeCount = 0;
+        let audioUrlsDetected = 0;
+        let audioActivitiesCreated = 0;
+        let audioUrlsSkipped = 0;
+        const audioSkipReasons = {};
+        const sampleAudioItems = [];
         const sampleResultItems = [];
         const pendingLeadCreates = [];
         const pendingLeadUpdates = [];
@@ -1043,6 +1220,26 @@ app.post("/import/legacy", async (req, res) => {
             set invalidDateCount(value) {
                 invalidDateCount = value;
             },
+            get audioUrlsDetected() {
+                return audioUrlsDetected;
+            },
+            set audioUrlsDetected(value) {
+                audioUrlsDetected = value;
+            },
+            get audioActivitiesCreated() {
+                return audioActivitiesCreated;
+            },
+            set audioActivitiesCreated(value) {
+                audioActivitiesCreated = value;
+            },
+            get audioUrlsSkipped() {
+                return audioUrlsSkipped;
+            },
+            set audioUrlsSkipped(value) {
+                audioUrlsSkipped = value;
+            },
+            audioSkipReasons,
+            sampleAudioItems,
         };
 
         for (let i = 2; i < leadsRows.length; i++) {
@@ -1085,7 +1282,6 @@ app.post("/import/legacy", async (req, res) => {
             const preferredCallTime = getLegacyValue(rowObject, googleSheets, "preferred_call_time");
             const classification = getLegacyValue(rowObject, googleSheets, "classification");
             const reason = getLegacyValue(rowObject, googleSheets, "reason");
-            const callRecording = getLegacyValue(rowObject, googleSheets, "call_recording");
             const numberOfDevicesBought = getLegacyValue(rowObject, googleSheets, "number_of_devices_bought");
             const whichPackage = getLegacyValue(rowObject, googleSheets, "which_package");
             const amountDue = getLegacyValue(rowObject, googleSheets, "amount_due");
@@ -1103,8 +1299,10 @@ app.post("/import/legacy", async (req, res) => {
             const cleanedSource = mapLegacySource(source, mappingRules);
             const cleanedLeadStatus = mapLegacyStatus(classification, mappingRules);
             const cleanedReason = mapLegacyReason(reason || classification, mappingRules);
+            const cleanedZone = normalizeLegacyZone(provinceResult.province, mappingRules);
             const parsedLeadInDate = parseLegacyDateValue(leadInDate);
-            const updatedAt = formatDateTimeForSheet(new Date());
+            const updatedAt = formatLegacyDateForSheet(new Date());
+            const audioUrls = getLegacyAudioUrls(rowObject, debugCounters);
 
             if (provinceResult.province) {
                 normalizedProvinceCount++;
@@ -1217,7 +1415,7 @@ app.post("/import/legacy", async (req, res) => {
                 rowObject,
                 googleSheets,
                 leadId,
-                callRecording,
+                audioUrls,
                 debugCounters
             );
 
@@ -1246,6 +1444,7 @@ app.post("/import/legacy", async (req, res) => {
                         reason: cleanedReason,
                         sales_owner: salesperson,
                         province: provinceResult.province,
+                        zone: cleanedZone,
                         raw_province: provinceResult.rawProvince,
                         customer_type_or_raw_corporate_preview: corporateName,
                         preferred_call_day: cleanedPreferredCallDay,
@@ -1275,6 +1474,7 @@ app.post("/import/legacy", async (req, res) => {
                         salesperson,
                         name,
                         province: provinceResult.province,
+                        zone: cleanedZone,
                         rawProvince: provinceResult.rawProvince,
                         corporateName,
                         preferredCallDay: cleanedPreferredCallDay,
@@ -1455,6 +1655,11 @@ app.post("/import/legacy", async (req, res) => {
             cleaned_preferred_call_time_count: cleanedPreferredCallTimeCount,
             mapping_rules_loaded: mappingRules.loadedCount,
             mapping_rule_types_loaded: mappingRules.ruleTypes,
+            audio_urls_detected: audioUrlsDetected,
+            audio_activities_created: audioActivitiesCreated,
+            audio_urls_skipped: audioUrlsSkipped,
+            audio_skip_reasons: audioSkipReasons,
+            sample_audio_items: sampleAudioItems,
             sample_result_items: sampleResultItems,
         });
     } catch (err) {

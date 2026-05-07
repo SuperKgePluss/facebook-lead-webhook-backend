@@ -114,12 +114,13 @@ function findLatestLeadAudioFile_(phone) {
   if (!normalizedPhone) return null;
 
   const prefix = 'LEAD_' + normalizedPhone + '_';
+  const fileNamePattern = new RegExp('^LEAD_' + normalizedPhone + '_\\d{8}_\\d{2}_\\d{2}\\.(mp3|m4a|wav|ogg|mp4)$', 'i');
   const rootFolder = DriveApp.getFolderById(AUDIO_ROOT_FOLDER_ID);
 
-  return findLatestLeadAudioFileInFolder_(rootFolder, prefix, null);
+  return findLatestLeadAudioFileInFolder_(rootFolder, prefix, fileNamePattern, null);
 }
 
-function findLatestLeadAudioFileInFolder_(folder, prefix, latestFile) {
+function findLatestLeadAudioFileInFolder_(folder, prefix, fileNamePattern, latestFile) {
   let currentLatestFile = latestFile;
   const files = folder.getFiles();
 
@@ -129,6 +130,7 @@ function findLatestLeadAudioFileInFolder_(folder, prefix, latestFile) {
 
     if (
       fileName.indexOf(prefix) === 0 &&
+      fileNamePattern.test(fileName) &&
       AUDIO_FILE_EXTENSION_PATTERN.test(fileName) &&
       (!currentLatestFile || file.getLastUpdated() > currentLatestFile.getLastUpdated())
     ) {
@@ -139,7 +141,7 @@ function findLatestLeadAudioFileInFolder_(folder, prefix, latestFile) {
   const folders = folder.getFolders();
 
   while (folders.hasNext()) {
-    currentLatestFile = findLatestLeadAudioFileInFolder_(folders.next(), prefix, currentLatestFile);
+    currentLatestFile = findLatestLeadAudioFileInFolder_(folders.next(), prefix, fileNamePattern, currentLatestFile);
   }
 
   return currentLatestFile;

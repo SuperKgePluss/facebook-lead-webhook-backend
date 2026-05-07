@@ -116,6 +116,10 @@ function setupLeadMainUi() {
   refreshLeadMainActionCheckboxes();
 }
 
+function refreshLeadMainImportCheckboxes() {
+  refreshLeadMainActionCheckboxes();
+}
+
 function navigateToLatestMatch_(targetSheetName, matchHeader, matchValue) {
   const value = String(matchValue || '').trim();
   if (!value) return false;
