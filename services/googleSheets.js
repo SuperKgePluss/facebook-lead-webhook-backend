@@ -364,6 +364,8 @@ function buildLeadMainObject(leadId, lead, existingLead = null) {
         customer_type: existingLead?.customer_type || lead.customer_type || "",
         province: lead.province || existingLead?.province || "",
         zone: existingLead?.zone || lead.zone || "",
+        preferred_call_day: existingLead?.preferred_call_day || lead.preferred_call_day || "",
+        preferred_call_time: existingLead?.preferred_call_time || lead.preferred_call_time || "",
         lead_status: existingLead?.lead_status || lead.status || "New",
         reason: existingLead?.reason || lead.reason || "",
         sales_owner: existingLead?.sales_owner || lead.sales_owner || "",
@@ -378,6 +380,8 @@ function buildLeadMainUpdateObject(existingLead, lead) {
         phone: normalizePhone(lead.phone || existingLead.phone),
         source: lead.source || existingLead.source || "Facebook",
         province: lead.province || existingLead.province || "",
+        preferred_call_day: existingLead.preferred_call_day || lead.preferred_call_day || "",
+        preferred_call_time: existingLead.preferred_call_time || lead.preferred_call_time || "",
         updated_at: formatDateTimeForSheet(new Date()),
     };
 }

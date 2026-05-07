@@ -190,6 +190,7 @@ function parseFacebookLead(leadData) {
     const preferred_call_day = normalizePreferredCallValues(
         getValues(
             "วันที่สะดวกให้ติดต่อกลับ",
+            "วันที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
             "preferred_call_day"
         ),
         [
@@ -202,6 +203,9 @@ function parseFacebookLead(leadData) {
     const preferred_call_time = normalizePreferredCallValues(
         getValues(
             "ช่วงเวลาที่สะดวกให้เจ้าหน้าที่ติดต่อกลับ",
+            "เวลาที่สะดวกให้โทรสาย",
+            "เวลาที่สะดวกโทรกลับ",
+            "ช่วงเวลาที่สะดวกให้ติดต่อกลับ",
             "preferred_call_time"
         ),
         [
