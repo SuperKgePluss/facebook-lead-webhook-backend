@@ -461,6 +461,10 @@ app.get("/sync/facebook-leads", async (req, res) => {
             skipped_existing: batchResult.skipped_existing,
             skipped_empty: skipped_empty + batchResult.skipped_empty,
             failed,
+            affected_rows: batchResult.affected_rows || [],
+            incremental_cleanup_attempted: batchResult.incremental_cleanup_attempted || false,
+            incremental_cleanup_rows: batchResult.incremental_cleanup_rows || 0,
+            full_cleanup_required: batchResult.full_cleanup_required || false,
             failed_items: failedItems.slice(0, 30),
             batch_skipped_empty_items: batchResult.skipped_empty_items.slice(0, 30),
         });

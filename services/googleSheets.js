@@ -431,6 +431,7 @@ async function appendLeadToSheet(lead) {
             action: "created",
             lead_id: result.created_items[0]?.lead_id || "",
             deal_id: result.created_items[0]?.deal_id || "",
+            affected_rows: result.affected_rows || [],
         };
     }
 
@@ -439,6 +440,7 @@ async function appendLeadToSheet(lead) {
             action: "updated_existing",
             lead_id: result.updated_items[0]?.lead_id || "",
             deal_id: result.updated_items[0]?.deal_id || "",
+            affected_rows: result.affected_rows || [],
         };
     }
 
@@ -478,6 +480,7 @@ async function appendLeadsToSheetBatch(leads) {
     const newDetailObjects = [];
     const newDealObjects = [];
     const updateData = [];
+    const affectedRows = new Set();
 
     const inMemoryLeadRows = leadsRows.map(row => [...row]);
     const inMemoryDetailRows = detailsRows.map(row => [...row]);
@@ -529,6 +532,7 @@ async function appendLeadsToSheetBatch(leads) {
         if (!existingLead) {
             const leadId = generateId("LEAD");
             const dealId = generateId("DEAL");
+            const leadRowNumber = nextLeadRow;
             const leadObject = buildLeadMainObject(leadId, lead);
             const detailObject = buildLeadDetailObject(leadId, lead);
             const dealObject = buildDealObject(dealId, leadId, lead);
@@ -544,10 +548,12 @@ async function appendLeadsToSheetBatch(leads) {
             nextDetailRow++;
             nextDealRow++;
             seenLeadgenIds.add(leadgenId);
+            affectedRows.add(leadRowNumber);
 
             createdItems.push({
                 lead_id: leadId,
                 deal_id: dealId,
+                lead_row_number: leadRowNumber,
                 facebook_leadgen_id: leadgenId,
                 phone: normalizedPhone,
                 name: lead.name || "",
@@ -557,6 +563,7 @@ async function appendLeadsToSheetBatch(leads) {
         }
 
         const leadId = existingLead.lead_id;
+        affectedRows.add(existingLead.rowNumber);
         const latestDeal = findLatestDealByLeadId(dealHeaders, inMemoryDealRows, leadId);
         const shouldCreateDeal = isCompletedLead(existingLead) || !latestDeal;
         const detailObject = buildLeadDetailObject(leadId, lead);
@@ -588,6 +595,7 @@ async function appendLeadsToSheetBatch(leads) {
         updatedItems.push({
             lead_id: leadId,
             deal_id: dealId,
+            lead_row_number: existingLead.rowNumber,
             facebook_leadgen_id: leadgenId,
             action: shouldCreateDeal
                 ? "created_new_deal_for_completed_or_missing_deal"
@@ -652,6 +660,10 @@ async function appendLeadsToSheetBatch(leads) {
         updated_existing: updatedItems.length,
         skipped_existing: skippedExistingItems.length,
         skipped_empty: skippedEmptyItems.length,
+        affected_rows: Array.from(affectedRows).sort((a, b) => a - b),
+        incremental_cleanup_attempted: false,
+        incremental_cleanup_rows: 0,
+        full_cleanup_required: false,
         created_items: createdItems,
         updated_items: updatedItems,
         skipped_existing_items: skippedExistingItems,
