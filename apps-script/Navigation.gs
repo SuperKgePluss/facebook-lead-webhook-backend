@@ -53,6 +53,12 @@ function handleSaveFollowUpEdit_(e, sheet, row) {
   if (!saveFollowUpColumn) return;
 
   sheet.getRange(row, saveFollowUpColumn).setValue(false);
+
+  try {
+    saveLeadFollowUp_(sheet, row);
+  } catch (err) {
+    writeFollowUpSaveStatus_(sheet, row, 'Follow-up save failed: ' + err.message);
+  }
 }
 
 function refreshLeadMainActionCheckboxes() {
