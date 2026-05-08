@@ -18,6 +18,7 @@ const {
 } = require("./importUtils");
 
 const DEFAULT_CRM1_SOURCE_BLOCK = "Priority Leads";
+const DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN = 100;
 
 const CRM1_PRIORITY_LEADS_HEADERS = {
     customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name"],
@@ -556,6 +557,50 @@ function logCrm1ActivityWrite(headers, object, record) {
     console.log("activity followup_count:", record.followUpCount);
 }
 
+function getCrm1MaxActivitiesPerRun(req) {
+    const raw = req.query.max_activities || process.env.CRM1_MAX_ACTIVITIES_PER_RUN || DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN;
+    const parsed = Number.parseInt(raw, 10);
+
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN;
+}
+
+function columnToLetter(columnNumber) {
+    let column = columnNumber;
+    let letter = "";
+
+    while (column > 0) {
+        const remainder = (column - 1) % 26;
+        letter = String.fromCharCode(65 + remainder) + letter;
+        column = Math.floor((column - 1) / 26);
+    }
+
+    return letter;
+}
+
+function getNextCrm1DataRow(rows) {
+    for (let i = rows.length - 1; i >= 2; i--) {
+        if (rowHasAnyValue(rows[i])) return i + 2;
+    }
+
+    return 3;
+}
+
+async function appendCrm1ActivityRows(sheets, spreadsheetId, activityRows, activityHeaders, entries) {
+    if (!entries.length) return;
+
+    const startRow = getNextCrm1DataRow(activityRows);
+    const endRow = startRow + entries.length - 1;
+    const endColumn = columnToLetter(Math.max(activityHeaders.length, 1));
+    const values = entries.map(entry => googleSheets.objectToRow(activityHeaders, entry.object));
+
+    await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `ACTIVITY_LOG!A${startRow}:${endColumn}${endRow}`,
+        valueInputOption: "USER_ENTERED",
+        requestBody: { values },
+    });
+}
+
 function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     if (!existingLeadObject) {
         return {
@@ -662,6 +707,7 @@ async function handleLegacyCrm1Import(req, res) {
     const dryRun = parseDryRunParam(req);
     const requestedLayoutId = String(req.query.layout || "").trim();
     const requestedSheetName = String(req.query.sheet_name || req.query.source_sheet || "").trim();
+    const maxActivitiesPerRun = getCrm1MaxActivitiesPerRun(req);
 
     try {
         const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
@@ -726,6 +772,7 @@ async function handleLegacyCrm1Import(req, res) {
         let updatedExistingLeads = 0;
         let createdActivities = 0;
         let skippedDuplicateActivities = 0;
+        let skippedActivityLimit = 0;
 
         if (missingRequiredHeaders.length) {
             return res.status(400).json({
@@ -1029,10 +1076,15 @@ async function handleLegacyCrm1Import(req, res) {
 
                         if (existingActivitySignatures.has(signature)) {
                             skippedDuplicateActivities++;
+                        } else if (activityCreates.length >= maxActivitiesPerRun) {
+                            skippedActivityLimit++;
                         } else {
                             activityCreates.push({ object: activityObject, record });
                             existingActivitySignatures.add(signature);
                             createdActivities++;
+                            if (createdActivities % 25 === 0) {
+                                console.log("Processed activities:", createdActivities);
+                            }
                         }
                     }
 
@@ -1116,16 +1168,11 @@ async function handleLegacyCrm1Import(req, res) {
                     for (const entry of activityCreatesToWrite) {
                         logCrm1ActivityWrite(activityHeaders, entry.object, entry.record);
                     }
-                    await googleSheets.appendObjects("ACTIVITY_LOG", activityCreatesToWrite.map(entry => entry.object));
+                    await appendCrm1ActivityRows(sheets, spreadsheetId, activityRows, activityHeaders, activityCreatesToWrite);
+                    console.log("Processed activities:", activityCreatesToWrite.length);
                 } catch (err) {
-                    for (const entry of activityCreatesToWrite) {
-                        try {
-                            await googleSheets.appendObjects("ACTIVITY_LOG", [entry.object]);
-                        } catch (rowErr) {
-                            failedRows++;
-                            createdActivities--;
-                        }
-                    }
+                    failedRows += activityCreatesToWrite.length;
+                    createdActivities -= activityCreatesToWrite.length;
                 }
             }
         }
@@ -1180,6 +1227,8 @@ async function handleLegacyCrm1Import(req, res) {
             updated_existing_leads: updatedExistingLeads,
             created_activities: createdActivities,
             skipped_duplicate_activities: skippedDuplicateActivities,
+            skipped_activity_limit: skippedActivityLimit,
+            max_activities_per_run: maxActivitiesPerRun,
             skipped_invalid_phone: rowsMissingPhone,
             mapping_rules_loaded: mappingRules.loadedCount,
             mapping_rule_types_loaded: mappingRules.ruleTypes,
