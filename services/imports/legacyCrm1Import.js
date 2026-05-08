@@ -22,7 +22,7 @@ const DEFAULT_CRM1_SOURCE_BLOCK = "Priority Leads";
 const DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN = 100;
 const DEFAULT_CRM1_TIMEOUT_MS = 60000;
 const DEBUG_CRM1_TIMEOUT_MS = 10000;
-const CRM1_WRITE_SCOPES = new Set(["leads_only", "details_only", "activities_only", "all"]);
+const CRM1_WRITE_SCOPES = new Set(["leads_only", "details_only", "activities_only", "installations_only", "all"]);
 const CRM1_ROW_1_MARKER_PATTERNS = ["link close won", "close won", "open lead", "lead"];
 
 const CRM1_PRIORITY_LEADS_HEADERS = {
@@ -104,6 +104,19 @@ const CRM1_LAYOUT_3_HEADERS = {
     week: ["Week"],
 };
 
+const CRM1_LAYOUT_4_HEADERS = {
+    product_model: ["ผลิตภัณฑ์"],
+    quantity: ["จำนวนเครื่องติดตั้ง"],
+    install_date: ["วันที่ติดตั้ง"],
+    time_slot: ["ช่วงเวลา"],
+    technician: ["ชื่อทีมช่าง"],
+    install_status: ["สถานะ"],
+    cancel_reason: ["เหตุผลยกเลิก"],
+    note: ["Note"],
+    phone: ["เบอร์ติดต่อ (Tel.)", "Tel.", "Phone", "เบอร์ติดต่อ"],
+    customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name", "ชื่อลูกค้า"],
+};
+
 const CRM1_LAYOUTS = [
     {
         id: "crm1_priority_leads",
@@ -134,6 +147,19 @@ const CRM1_LAYOUTS = [
         headers: CRM1_LAYOUT_3_HEADERS,
         requiredFields: ["customer_name", "phone"],
         realImportEnabled: true,
+    },
+    {
+        id: "crm1_layout_4",
+        sheetName: "IMPORT_RAW_CRM1",
+        structureMode: "row1_header",
+        defaultSourceBlock: "CRM1 Layout 4 Installation",
+        defaultSource: "Legacy Import",
+        headers: CRM1_LAYOUT_4_HEADERS,
+        requiredFields: ["product_model", "install_date", "install_status"],
+        realImportEnabled: true,
+        updateExistingLeadOnly: true,
+        skipLeadDetails: true,
+        skipDeals: true,
     },
     {
         id: "crm1_lead_new",
@@ -244,7 +270,7 @@ function detectCrm1Row1HeaderOffsetMarker(value) {
 function detectCrm1HeaderLayout(allRows, layout) {
     const rowOne = allRows.at(0) || [];
     const rowOneColumnA = String(rowOne[0] || "").trim();
-    const rowOneMarker = layout?.id === "crm1_layout_3"
+    const rowOneMarker = ["crm1_layout_3", "crm1_layout_4"].includes(layout?.id)
         ? null
         : detectCrm1Row1HeaderOffsetMarker(rowOneColumnA);
     const headerRowDetected = rowOneMarker ? 2 : 1;
@@ -832,6 +858,14 @@ function getCrm1Layout3LeadStatus(installStatus, sourceMarker = "") {
     return "";
 }
 
+function getCrm1Layout4LeadStatus(installationStatus) {
+    const status = String(installationStatus || "").trim().toLowerCase();
+
+    if (status === "installed") return "Closed";
+    if (status === "cancelled") return "Not Interested";
+    return "";
+}
+
 function shouldUpdateCrm1ExistingStatus(existingLeadObject) {
     const current = String(existingLeadObject?.lead_status || existingLeadObject?.status || "").trim().toLowerCase();
     return !current || current === "new";
@@ -1076,6 +1110,14 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
         }
     };
 
+    if (record.layoutId === "crm1_layout_4") {
+        if (shouldUpdateCrm1ExistingStatus(existingLeadObject)) {
+            putIfPresent("lead_status", finalLeadStatus);
+            putIfPresent("status", finalLeadStatus);
+        }
+        return object;
+    }
+
     putIfExistingBlank("customer_name", record.customerName);
     putIfExistingBlank("lead_id", leadId);
     putIfExistingBlank("phone", record.normalizedPhone);
@@ -1146,6 +1188,26 @@ function buildCrm1DealObject(record, leadId, dealId) {
     };
 }
 
+function buildCrm1InstallationObject(record, leadId, installId) {
+    return {
+        install_id: installId,
+        lead_id: leadId,
+        product_model: record.productModel,
+        quantity: record.quantity,
+        install_date: record.installDate,
+        install_time: record.timeSlot,
+        time_slot: record.timeSlot,
+        technician: record.technician,
+        install_status: record.installationStatus,
+        installation_status: record.installationStatus,
+        cancel_reason: record.cancelReason,
+        note: record.note,
+        created_at: record.now,
+        updated_at: record.now,
+        import_source: "CRM1 Legacy Import",
+    };
+}
+
 function buildCrm1ActivityObject(record, leadId) {
     const activityType = record.activityType || "Import Note";
     const activityDate = record.lastContactDate || record.now;
@@ -1170,6 +1232,25 @@ function buildCrm1ActivityObject(record, leadId) {
 }
 
 function buildCrm1ActivityObjects(record, leadId) {
+    if (record.layoutId === "crm1_layout_4") {
+        return [{
+            activity_id: generateImportId("ACT"),
+            lead_id: leadId,
+            action_type: "Installation",
+            activity_type: "Installation",
+            result: record.installationStatus,
+            activity_result: record.installationStatus,
+            note: [
+                record.timeSlot ? `Time slot: ${record.timeSlot}` : "",
+                record.technician ? `Technician: ${record.technician}` : "",
+                record.note,
+            ].filter(Boolean).join("\n"),
+            created_at: record.now,
+            activity_date: record.installDate || record.now,
+            created_by: "CRM1 Import",
+        }];
+    }
+
     if (record.layoutId !== "crm1_layout_3") {
         return [buildCrm1ActivityObject(record, leadId)];
     }
@@ -1317,6 +1398,13 @@ async function handleLegacyCrm1Import(req, res) {
         );
         logCrm1Step(diagnostics, "after reading DEALS", { rows: dealRows.length });
         const dealHeaders = dealRows[0] || [];
+        const installationRows = await withCrm1Timeout(
+            googleSheets.getSheetRows("INSTALLATIONS"),
+            diagnostics,
+            "read INSTALLATIONS"
+        );
+        logCrm1Step(diagnostics, "after reading INSTALLATIONS", { rows: installationRows.length });
+        const installationHeaders = installationRows[0] || [];
         const activityRows = await withCrm1Timeout(
             googleSheets.getSheetRows("ACTIVITY_LOG"),
             diagnostics,
@@ -1442,6 +1530,8 @@ async function handleLegacyCrm1Import(req, res) {
             existingActivitySignatures.add(getActivitySignature(activityObject));
         }
 
+        const isLayout4 = layout.id === "crm1_layout_4";
+
         for (const block of parsedBlocks) {
             const { headerMap } = buildHeaderMapForLayout(block.headers, layout);
 
@@ -1468,17 +1558,23 @@ async function handleLegacyCrm1Import(req, res) {
                     const stage = getCrm1Value(dataRow.row, headerMap, "stage") || stageRaw;
                     const rawReason = getCrm1Value(dataRow.row, headerMap, "reason_raw") || getCrm1Value(dataRow.row, headerMap, "reason");
                     const cleanReason = getCrm1Value(dataRow.row, headerMap, "reason") || rawReason;
-                    const note = buildCrm1Notes(dataRow.row, headerMap);
+                    const note = isLayout4
+                        ? getCrm1Value(dataRow.row, headerMap, "note")
+                        : buildCrm1Notes(dataRow.row, headerMap);
                     const rawProvince = getCrm1Value(dataRow.row, headerMap, "province");
                     const rawZone = getCrm1Value(dataRow.row, headerMap, "zone");
                     const productModel = getCrm1Value(dataRow.row, headerMap, "product_model");
                     const deviceCount = getCrm1Value(dataRow.row, headerMap, "device_count");
+                    const quantity = getCrm1Value(dataRow.row, headerMap, "quantity") || deviceCount;
                     const paymentDateRaw = getCrm1Value(dataRow.row, headerMap, "payment_date");
                     const paymentSlipUrl = getCrm1Value(dataRow.row, headerMap, "payment_slip_url");
                     const price = getCrm1Value(dataRow.row, headerMap, "price");
                     const installDateRaw = getCrm1Value(dataRow.row, headerMap, "install_date");
-                    const installTime = "";
+                    const installTime = getCrm1Value(dataRow.row, headerMap, "install_time");
+                    const timeSlot = getCrm1Value(dataRow.row, headerMap, "time_slot") || installTime;
                     const installStatusRaw = getCrm1Value(dataRow.row, headerMap, "install_status");
+                    const technician = getCrm1Value(dataRow.row, headerMap, "technician");
+                    const cancelReason = getCrm1Value(dataRow.row, headerMap, "cancel_reason");
                     const address = getCrm1Value(dataRow.row, headerMap, "address");
                     const lastContactDateRaw = getCrm1Value(dataRow.row, headerMap, "last_contact_date");
                     const nextStepDateRaw = getCrm1Value(dataRow.row, headerMap, "next_follow_up");
@@ -1494,7 +1590,7 @@ async function handleLegacyCrm1Import(req, res) {
                     const audioLink = getCrm1Value(dataRow.row, headerMap, "audio_link");
                     const normalizedPhone = normalizeCrm1Phone(phone);
 
-                    if (!normalizedPhone) {
+                    if (!normalizedPhone && !isLayout4) {
                         rowsMissingPhone++;
                         if (failedRowSamples.length < 10) {
                             failedRowSamples.push({
@@ -1506,7 +1602,7 @@ async function handleLegacyCrm1Import(req, res) {
                         continue;
                     }
 
-                    rowsWithValidPhone++;
+                    if (normalizedPhone) rowsWithValidPhone++;
 
                     const provinceResult = normalizeLegacyProvince(rawProvince, mappingRules);
                     const explicitZone = normalizeByMappingRules(mappingRules, "zone", rawZone);
@@ -1523,15 +1619,16 @@ async function handleLegacyCrm1Import(req, res) {
                     const paymentStatus = normalizeCrm1PaymentStatus(installStatusRaw, mappingRules);
                     const installationStatus = normalizeCrm1InstallationStatus(installStatusRaw, mappingRules);
                     const layout3Status = layout.id === "crm1_layout_3" ? getCrm1Layout3LeadStatus(installStatusRaw, block.marker) : "";
-                    const leadStatus = layout3Status || normalizeLegacyLeadStatusValue(stage, mappingRules, {
+                    const layout4Status = isLayout4 ? getCrm1Layout4LeadStatus(installationStatus) : "";
+                    const leadStatus = layout4Status || layout3Status || normalizeLegacyLeadStatusValue(stage, mappingRules, {
                         closedDate,
                         installStatus: installStatusRaw,
                         paymentStatus,
                         sourceMarker: block.marker,
                     });
                     const audioItems = detectCrm1Audio(dataRow.row, headerMap, block.marker, dataRow.rowNumber, normalizedPhone);
-                    const hasDealData = hasAnyValue({ productModel, deviceCount, paymentDate, paymentSlipUrl, price });
-                    const hasInstallationData = hasAnyValue({ installDate, installTime, installationStatus, address, zone });
+                    const hasDealData = !layout.skipDeals && hasAnyValue({ productModel, deviceCount, paymentDate, paymentSlipUrl, price });
+                    const hasInstallationData = hasAnyValue({ productModel, quantity, installDate, timeSlot, technician, installationStatus, cancelReason, note });
                     const hasLayout3ActivityData = layout.id === "crm1_layout_3" && hasAnyValue({
                         price,
                         paymentDate,
@@ -1544,15 +1641,15 @@ async function handleLegacyCrm1Import(req, res) {
                         formNotiDate,
                         formStatus,
                     });
-                    const hasActivityData = hasLayout3ActivityData || hasAnyValue({ contactMethod, lastContactDate, nextStepDate, note, followUpCount }) || audioItems.length > 0;
-                    const existingLeadObject = knownLeadsByPhone.get(normalizedPhone);
+                    const hasActivityData = isLayout4 || hasLayout3ActivityData || hasAnyValue({ contactMethod, lastContactDate, nextStepDate, note, followUpCount }) || audioItems.length > 0;
+                    const existingLeadObject = normalizedPhone ? knownLeadsByPhone.get(normalizedPhone) : null;
                     const duplicateQueued = queuedPhones.has(normalizedPhone);
-                    const wouldUpdate = Boolean(existingLeadObject || duplicateQueued);
+                    const wouldUpdate = Boolean(normalizedPhone && (existingLeadObject || duplicateQueued));
 
                     if (wouldUpdate) wouldUpdateExistingLead++;
-                    else {
+                    else if (!layout.updateExistingLeadOnly) {
                         wouldCreateLead++;
-                        queuedPhones.add(normalizedPhone);
+                        if (normalizedPhone) queuedPhones.add(normalizedPhone);
                     }
 
                     if (hasDealData) wouldCreateDeal++;
@@ -1577,7 +1674,10 @@ async function handleLegacyCrm1Import(req, res) {
                         normalizedSource,
                         leadStatus,
                         finalLeadStatus: leadStatus,
-                        statusUpdateOnlyIfBlankOrNew: layout.id === "crm1_layout_3" && !layout3Status,
+                        statusUpdateOnlyIfBlankOrNew: isLayout4 || (layout.id === "crm1_layout_3" && !layout3Status),
+                        updateExistingLeadOnly: Boolean(layout.updateExistingLeadOnly),
+                        skipLeadDetails: Boolean(layout.skipLeadDetails),
+                        skipDeals: Boolean(layout.skipDeals),
                         rawCustomerType,
                         stageRaw,
                         stage,
@@ -1598,6 +1698,7 @@ async function handleLegacyCrm1Import(req, res) {
                         zone,
                         productModel,
                         deviceCount,
+                        quantity,
                         price,
                         paymentDate,
                         paymentSlipUrl,
@@ -1607,6 +1708,9 @@ async function handleLegacyCrm1Import(req, res) {
                         closedDate,
                         installDate,
                         installStatusRaw,
+                        timeSlot,
+                        technician,
+                        cancelReason,
                         paymentStatus,
                         installationStatus,
                         afterSales30Days,
@@ -1663,9 +1767,13 @@ async function handleLegacyCrm1Import(req, res) {
                             payment_status: paymentStatus,
                             closed_date: closedDate,
                             install_date: installDate,
+                            time_slot: timeSlot,
+                            technician,
                             install_status: installationStatus,
                             install_status_raw: installStatusRaw,
                             device_count: deviceCount,
+                            quantity,
+                            cancel_reason: cancelReason,
                             outstanding_amount: outstandingAmount,
                             payment_slip_url: paymentSlipUrl,
                             after_sales_30_days: afterSales30Days,
@@ -1736,6 +1844,7 @@ async function handleLegacyCrm1Import(req, res) {
         const detailUpdates = [];
         const dealCreates = [];
         const dealUpdates = [];
+        const installationCreates = [];
         const activityCreates = [];
 
         if (!dryRun || debugOnly) {
@@ -1745,11 +1854,10 @@ async function handleLegacyCrm1Import(req, res) {
                 assertCrm1TimeRemaining(diagnostics, "compute rows to write");
                 try {
                     let leadId = record.existingLeadObject?.lead_id || "";
-                    const currentLead = knownLeadsByPhone.get(record.normalizedPhone);
+                    const currentLead = record.normalizedPhone ? knownLeadsByPhone.get(record.normalizedPhone) : null;
                     const existingLead = currentLead?.rowNumber ? currentLead : record.existingLeadObject;
 
                     if (!leadId && currentLead?.lead_id) leadId = currentLead.lead_id;
-                    if (!leadId) leadId = generateImportId("LEAD");
 
                     if (existingLead?.rowNumber) {
                         leadUpdates.push({
@@ -1760,7 +1868,7 @@ async function handleLegacyCrm1Import(req, res) {
                         });
                     } else if (currentLead && !currentLead.rowNumber) {
                         leadId = currentLead.lead_id;
-                    } else {
+                    } else if (!record.updateExistingLeadOnly && record.normalizedPhone) {
                         leadId = generateImportId("LEAD");
                         const leadObject = buildCrm1LeadObject(record, leadId);
                         leadCreates.push({ object: leadObject, record });
@@ -1768,20 +1876,22 @@ async function handleLegacyCrm1Import(req, res) {
                         insertedLeads++;
                     }
 
-                    const detailObject = buildCrm1LeadDetailObject(record, leadId);
-                    const existingDetail = knownLeadDetailsByLeadId.get(leadId);
-                    if (existingDetail?.rowNumber) {
-                        detailUpdates.push({
-                            rowNumber: existingDetail.rowNumber,
-                            object: detailObject,
-                            existingObject: existingDetail,
-                        });
-                    } else if (!existingDetail) {
-                        detailCreates.push(detailObject);
-                        knownLeadDetailsByLeadId.set(leadId, { ...detailObject, rowNumber: null });
+                    if (!record.skipLeadDetails && leadId) {
+                        const detailObject = buildCrm1LeadDetailObject(record, leadId);
+                        const existingDetail = knownLeadDetailsByLeadId.get(leadId);
+                        if (existingDetail?.rowNumber) {
+                            detailUpdates.push({
+                                rowNumber: existingDetail.rowNumber,
+                                object: detailObject,
+                                existingObject: existingDetail,
+                            });
+                        } else if (!existingDetail) {
+                            detailCreates.push(detailObject);
+                            knownLeadDetailsByLeadId.set(leadId, { ...detailObject, rowNumber: null });
+                        }
                     }
 
-                    if (String(record.productModel || "").trim()) {
+                    if (!record.skipDeals && String(record.productModel || "").trim()) {
                         const dealSignature = getCrm1DealSignature(
                             leadId,
                             record.productModel,
@@ -1807,6 +1917,19 @@ async function handleLegacyCrm1Import(req, res) {
                         } else {
                             dealsSkippedDuplicate++;
                         }
+                    }
+
+                    if (record.layoutId === "crm1_layout_4" && hasAnyValue({
+                        productModel: record.productModel,
+                        quantity: record.quantity,
+                        installDate: record.installDate,
+                        timeSlot: record.timeSlot,
+                        technician: record.technician,
+                        installationStatus: record.installationStatus,
+                        cancelReason: record.cancelReason,
+                        note: record.note,
+                    })) {
+                        installationCreates.push(buildCrm1InstallationObject(record, leadId, generateImportId("INST")));
                     }
 
                     if (record.hasActivityData) {
@@ -1859,6 +1982,7 @@ async function handleLegacyCrm1Import(req, res) {
                 details_to_update: detailUpdates.length,
                 deals_to_create: dealCreates.length,
                 deals_to_update: dealUpdates.length,
+                installations_to_create: installationCreates.length,
                 activities_to_write: activityCreates.length,
                 skipped_duplicate_activities: skippedDuplicateActivities,
                 skipped_activity_limit: skippedActivityLimit,
@@ -1922,6 +2046,7 @@ async function handleLegacyCrm1Import(req, res) {
                     deals_to_create: dealCreates.length,
                     deals_updated: 0,
                     deals_skipped_duplicate: dealsSkippedDuplicate,
+                    installations_to_create: installationCreates.length,
                     closed_won_leads: closedWonLeads,
                     details_to_write: detailCreates.length + detailUpdates.length,
                     activities_to_write: activityCreates.length,
@@ -2113,6 +2238,26 @@ async function handleLegacyCrm1Import(req, res) {
                 });
             }
 
+            const installationCreatesToWrite = installationCreates.filter(installation => !installation.lead_id || !failedCreatedLeadIds.has(installation.lead_id));
+            if (canWriteCrm1Scope(writeScope, "installations_only") && installationCreatesToWrite.length) {
+                logCrm1Step(diagnostics, "before writing INSTALLATIONS", {
+                    creates: installationCreatesToWrite.length,
+                });
+                try {
+                    await withCrm1Timeout(
+                        googleSheets.appendObjects("INSTALLATIONS", installationCreatesToWrite),
+                        diagnostics,
+                        "write INSTALLATIONS creates"
+                    );
+                    logCrm1Step(diagnostics, "after writing INSTALLATIONS", {
+                        creates: installationCreatesToWrite.length,
+                    });
+                } catch (err) {
+                    if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
+                    failedRows += installationCreatesToWrite.length;
+                }
+            }
+
             const activityCreatesToWrite = activityCreates.filter(entry => !failedCreatedLeadIds.has(entry.object.lead_id));
             if (canWriteCrm1Scope(writeScope, "activities_only") && activityCreatesToWrite.length) {
                 logCrm1Step(diagnostics, "before writing ACTIVITY_LOG", {
@@ -2207,6 +2352,7 @@ async function handleLegacyCrm1Import(req, res) {
             deals_to_create: dryRun && !debugOnly ? wouldCreateDeal : dealsToCreate,
             deals_updated: dealsUpdated,
             deals_skipped_duplicate: dealsSkippedDuplicate,
+            installations_to_create: dryRun && !debugOnly ? wouldCreateInstallation : installationCreates.length,
             closed_won_leads: closedWonLeads,
             debug_only: debugOnly,
             write_scope: writeScope,
