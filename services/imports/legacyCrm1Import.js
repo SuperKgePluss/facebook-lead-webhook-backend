@@ -22,6 +22,7 @@ const DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN = 100;
 const DEFAULT_CRM1_TIMEOUT_MS = 60000;
 const DEBUG_CRM1_TIMEOUT_MS = 10000;
 const CRM1_WRITE_SCOPES = new Set(["leads_only", "details_only", "activities_only", "all"]);
+const CRM1_ROW_1_MARKER_PATTERNS = ["link close won", "close won", "open lead", "lead"];
 
 const CRM1_PRIORITY_LEADS_HEADERS = {
     customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name"],
@@ -217,8 +218,26 @@ const CRM1_FALLBACK_FIELD_ALIASES = {
 
 function normalizeCrm1MarkerText(value) {
     return normalizeImportText(value)
+        .replace(/[_-]+/g, " ")
         .replace(/[\u0300-\u036f]/g, "")
         .replace(/\s+/g, " ");
+}
+
+function detectCrm1Row1HeaderOffsetMarker(value) {
+    const normalized = normalizeCrm1MarkerText(value);
+    if (!normalized) return null;
+
+    const matched = CRM1_ROW_1_MARKER_PATTERNS.find(pattern => normalized.includes(pattern));
+    return matched
+        ? {
+            matchedAs: value,
+            normalizedMarker: normalized,
+            matchReason: "row_1_marker_contains",
+            matchedPattern: matched,
+            confidence: 0.95,
+            type: "import",
+        }
+        : null;
 }
 
 function normalizeHeaderForMatch(value) {
@@ -428,6 +447,8 @@ function buildMarkerDetectionDebug(rows) {
 
         const normalizedMarker = normalizeCrm1MarkerText(marker);
         const markerMatch = matchCrm1AnyMarker(marker);
+        const row1HeaderOffsetMatch = i === 0 ? detectCrm1Row1HeaderOffsetMarker(marker) : null;
+        const detectedMatch = markerMatch || row1HeaderOffsetMatch;
 
         debug.push({
             row: i + 1,
@@ -435,13 +456,13 @@ function buildMarkerDetectionDebug(rows) {
             raw_marker: marker,
             normalized_col_a: normalizedMarker,
             normalized_marker: normalizedMarker,
-            detected_marker: Boolean(markerMatch),
-            import_marker: markerMatch?.type === "import",
-            skipped_marker: markerMatch?.type === "skip",
-            matched_as: markerMatch?.matchedAs || "",
-            match_reason: markerMatch?.matchReason || "",
-            marker_match_strategy: markerMatch?.matchReason || "none",
-            marker_match_confidence: markerMatch?.confidence || 0,
+            detected_marker: Boolean(detectedMatch),
+            import_marker: detectedMatch?.type === "import",
+            skipped_marker: detectedMatch?.type === "skip",
+            matched_as: detectedMatch?.matchedAs || "",
+            match_reason: detectedMatch?.matchReason || "",
+            marker_match_strategy: detectedMatch?.matchReason || "none",
+            marker_match_confidence: detectedMatch?.confidence || 0,
         });
     }
 
@@ -452,24 +473,29 @@ function buildCrm1Blocks(rows, layout) {
     const markerDetectionDebug = buildMarkerDetectionDebug(rows);
     const firstCell = String(rows[0]?.[0] || "").trim();
     const firstCellMarker = matchCrm1AnyMarker(firstCell);
+    const row1HeaderOffsetMarker = detectCrm1Row1HeaderOffsetMarker(firstCell);
 
     if (layout?.structureMode === "row1_header" || !firstCellMarker) {
+        const headerIndex = row1HeaderOffsetMarker ? 1 : 0;
+        const dataStartIndex = headerIndex + 1;
+        const defaultMarker = layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK;
+
         return {
             parsedBlocks: [{
-                marker: layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK,
-                normalizedMarker: layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK,
-                markerMatch: { matchedAs: layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK, matchReason: "default_row_1_header", confidence: 1, type: "import" },
-                markerRow: null,
-                headerRow: 1,
-                headers: rows[0] || [],
-                dataRows: rows.slice(1).map((row, index) => ({
-                    rowNumber: index + 2,
+                marker: row1HeaderOffsetMarker ? firstCell : defaultMarker,
+                normalizedMarker: row1HeaderOffsetMarker?.normalizedMarker || defaultMarker,
+                markerMatch: row1HeaderOffsetMarker || { matchedAs: defaultMarker, matchReason: "default_row_1_header", confidence: 1, type: "import" },
+                markerRow: row1HeaderOffsetMarker ? 1 : null,
+                headerRow: headerIndex + 1,
+                headers: rows[headerIndex] || [],
+                dataRows: rows.slice(dataStartIndex).map((row, index) => ({
+                    rowNumber: dataStartIndex + index + 1,
                     row: row || [],
                 })),
             }],
             skippedBlocks: [],
             markerDetectionDebug,
-            structureMode: "row_1_header",
+            structureMode: row1HeaderOffsetMarker ? "row_1_marker_row_2_header" : "row_1_header",
         };
     }
 
@@ -738,10 +764,13 @@ function normalizeCrm1CustomerType(value) {
     return raw;
 }
 
-function normalizeCrm1PaymentStatus(value) {
+function normalizeCrm1PaymentStatus(value, mappingRules) {
     const raw = String(value || "").trim();
     const lower = raw.toLowerCase();
+    const mapped = normalizeByMappingRules(mappingRules, "payment_status", raw)
+        || normalizeByMappingRules(mappingRules, "payment", raw);
 
+    if (mapped) return mapped;
     if (!raw) return "unknown";
     if (raw.includes("ชำระครบแล้ว")) return "paid";
     if (raw.includes("มัดจำ")) return "partial";
@@ -750,20 +779,25 @@ function normalizeCrm1PaymentStatus(value) {
     return "unknown";
 }
 
-function normalizeCrm1InstallationStatus(value) {
+function normalizeCrm1InstallationStatus(value, mappingRules) {
     const raw = String(value || "").trim();
     const lower = raw.toLowerCase();
+    const mapped = normalizeByMappingRules(mappingRules, "installation_status", raw)
+        || normalizeByMappingRules(mappingRules, "install_status", raw);
 
+    if (mapped) return mapped;
     if (!raw) return "unknown";
     if (raw.includes("ยกเลิก") || lower.includes("cancel")) return "cancelled";
-    if (lower.includes("pre-order") || raw.includes("รอ") || raw.includes("มัดจำ")) return "pending";
+    if (lower.includes("pre-order") || raw.includes("รอ") || raw.includes("มัดจำ") || raw.includes("วางบิล")) return "pending";
     if (raw.includes("ติดตั้ง") || raw.includes("ชำระครบแล้ว") || lower.includes("installed") || lower.includes("setup complete")) return "installed";
     return "unknown";
 }
 
-function getCrm1Layout3LeadStatus(installStatus) {
+function getCrm1Layout3LeadStatus(installStatus, sourceMarker = "") {
     const raw = String(installStatus || "").trim();
+    const marker = normalizeCrm1MarkerText(sourceMarker);
 
+    if (marker.includes("link close won") || marker.includes("close won")) return "Closed";
     if (raw.includes("ชำระครบแล้ว")) return "Closed";
     if (raw.includes("ยกเลิก")) return "Not Interested";
     return "";
@@ -1427,9 +1461,9 @@ async function handleLegacyCrm1Import(req, res) {
                     const nextStepDate = parseLegacyDateValue(nextStepDateRaw).value;
                     const closedDate = parseLegacyDateValue(closedDateRaw).value;
                     const formNotiDate = parseLegacyDateValue(formNotiDateRaw).value;
-                    const paymentStatus = normalizeCrm1PaymentStatus(installStatusRaw);
-                    const installationStatus = normalizeCrm1InstallationStatus(installStatusRaw);
-                    const layout3Status = layout.id === "crm1_layout_3" ? getCrm1Layout3LeadStatus(installStatusRaw) : "";
+                    const paymentStatus = normalizeCrm1PaymentStatus(installStatusRaw, mappingRules);
+                    const installationStatus = normalizeCrm1InstallationStatus(installStatusRaw, mappingRules);
+                    const layout3Status = layout.id === "crm1_layout_3" ? getCrm1Layout3LeadStatus(installStatusRaw, block.marker) : "";
                     const leadStatus = layout3Status || (closedDate ? "Closed Won" : "Legacy Import");
                     const audioItems = detectCrm1Audio(dataRow.row, headerMap, block.marker, dataRow.rowNumber, normalizedPhone);
                     const hasDealData = hasAnyValue({ productModel, deviceCount, paymentDate, paymentSlipUrl, price });
