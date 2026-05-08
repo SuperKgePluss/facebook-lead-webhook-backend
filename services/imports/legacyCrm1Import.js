@@ -483,6 +483,20 @@ function normalizeCrm1Priority(value) {
     return /^[123]$/.test(raw) ? Number(raw) : "";
 }
 
+function logCrm1LeadMainWrite(headers, object, record, action, rowNumber = "") {
+    const rowData = googleSheets.objectToRow(headers, object);
+
+    console.log("CRM1 WRITE ROW:", rowData);
+    console.log("customer_type:", record.customerType);
+    console.log("followup_count:", record.followUpCount);
+    console.log("CRM1 WRITE META:", {
+        action,
+        rowNumber,
+        lead_id: object.lead_id || "",
+        phone: object.phone || record.normalizedPhone || "",
+    });
+}
+
 function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     if (!existingLeadObject) {
         return {
@@ -492,8 +506,9 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
             customer_name: record.customerName,
             phone: record.normalizedPhone,
             source: record.normalizedSource || "Facebook",
-            lead_status: record.leadStatus,
-            status: record.leadStatus,
+            lead_status: "Legacy Import",
+            status: "Legacy Import",
+            customer_type: record.customerType,
             latest_audio_link: record.audioLink,
             last_contact_date: record.lastContactDate,
             next_follow_up: record.nextStepDate,
@@ -518,8 +533,9 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     putIfExistingBlank("lead_id", leadId);
     putIfExistingBlank("phone", record.normalizedPhone);
     putIfExistingBlank("source", record.normalizedSource || "Facebook");
-    putIfExistingBlank("lead_status", record.leadStatus);
-    putIfExistingBlank("status", record.leadStatus);
+    putIfPresent("lead_status", "Legacy Import");
+    putIfPresent("status", "Legacy Import");
+    putIfPresent("customer_type", record.customerType);
     putIfPresent("latest_audio_link", record.audioLink);
     putIfPresent("last_contact_date", record.lastContactDate);
     putIfPresent("next_follow_up", record.nextStepDate);
@@ -877,6 +893,7 @@ async function handleLegacyCrm1Import(req, res) {
                         leadUpdates.push({
                             rowNumber: existingLead.rowNumber,
                             object: buildCrm1LeadObject(record, leadId, existingLead),
+                            record,
                         });
                         updatedExistingLeads++;
                     } else if (currentLead && !currentLead.rowNumber) {
@@ -884,7 +901,7 @@ async function handleLegacyCrm1Import(req, res) {
                     } else {
                         leadId = generateImportId("LEAD");
                         const leadObject = buildCrm1LeadObject(record, leadId);
-                        leadCreates.push(leadObject);
+                        leadCreates.push({ object: leadObject, record });
                         knownLeadsByPhone.set(record.normalizedPhone, { ...leadObject, rowNumber: null });
                         insertedLeads++;
                     }
@@ -935,15 +952,18 @@ async function handleLegacyCrm1Import(req, res) {
 
             if (leadCreates.length) {
                 try {
-                    await googleSheets.appendObjects("LEADS_MAIN", leadCreates);
+                    for (const entry of leadCreates) {
+                        logCrm1LeadMainWrite(leadHeaders, entry.object, entry.record, "insert");
+                    }
+                    await googleSheets.appendObjects("LEADS_MAIN", leadCreates.map(entry => entry.object));
                 } catch (err) {
-                    for (const leadObject of leadCreates) {
+                    for (const entry of leadCreates) {
                         try {
-                            await googleSheets.appendObjects("LEADS_MAIN", [leadObject]);
+                            await googleSheets.appendObjects("LEADS_MAIN", [entry.object]);
                         } catch (rowErr) {
                             failedRows++;
                             insertedLeads--;
-                            failedCreatedLeadIds.add(leadObject.lead_id);
+                            failedCreatedLeadIds.add(entry.object.lead_id);
                         }
                     }
                 }
@@ -951,6 +971,7 @@ async function handleLegacyCrm1Import(req, res) {
 
             for (const update of leadUpdates) {
                 try {
+                    logCrm1LeadMainWrite(leadHeaders, update.object, update.record, "update", update.rowNumber);
                     await googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.object);
                 } catch (err) {
                     failedRows++;
