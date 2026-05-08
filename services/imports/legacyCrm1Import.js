@@ -497,6 +497,7 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
             latest_audio_link: record.audioLink,
             last_contact_date: record.lastContactDate,
             next_follow_up: record.nextStepDate,
+            rated_follow_up_no: record.followUpCount,
             note: record.note,
             created_at: record.now,
             updated_at: record.now,
@@ -522,6 +523,7 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     putIfPresent("latest_audio_link", record.audioLink);
     putIfPresent("last_contact_date", record.lastContactDate);
     putIfPresent("next_follow_up", record.nextStepDate);
+    putIfPresent("rated_follow_up_no", record.followUpCount);
     putIfPresent("note", record.note);
 
     return object;
