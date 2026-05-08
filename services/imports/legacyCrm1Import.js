@@ -497,6 +497,13 @@ function logCrm1LeadMainWrite(headers, object, record, action, rowNumber = "") {
     });
 }
 
+function logCrm1ActivityWrite(headers, object, record) {
+    const activityRowData = googleSheets.objectToRow(headers, object);
+
+    console.log("CRM1 ACTIVITY ROW:", activityRowData);
+    console.log("activity followup_count:", record.followUpCount);
+}
+
 function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     if (!existingLeadObject) {
         return {
@@ -574,6 +581,9 @@ function buildCrm1ActivityObject(record, leadId) {
     return {
         activity_id: generateImportId("ACT"),
         lead_id: leadId,
+        follow_up_no: record.followUpCount || "",
+        followup_no: record.followUpCount || "",
+        rated_follow_up_no: record.followUpCount || "",
         action_type: activityType,
         activity_type: activityType,
         result: record.leadStatus,
@@ -922,7 +932,7 @@ async function handleLegacyCrm1Import(req, res) {
                         if (existingActivitySignatures.has(signature)) {
                             skippedDuplicateActivities++;
                         } else {
-                            activityCreates.push(activityObject);
+                            activityCreates.push({ object: activityObject, record });
                             existingActivitySignatures.add(signature);
                             createdActivities++;
                         }
@@ -1002,14 +1012,17 @@ async function handleLegacyCrm1Import(req, res) {
                 }
             }
 
-            const activityCreatesToWrite = activityCreates.filter(activity => !failedCreatedLeadIds.has(activity.lead_id));
+            const activityCreatesToWrite = activityCreates.filter(entry => !failedCreatedLeadIds.has(entry.object.lead_id));
             if (activityCreatesToWrite.length) {
                 try {
-                    await googleSheets.appendObjects("ACTIVITY_LOG", activityCreatesToWrite);
+                    for (const entry of activityCreatesToWrite) {
+                        logCrm1ActivityWrite(activityHeaders, entry.object, entry.record);
+                    }
+                    await googleSheets.appendObjects("ACTIVITY_LOG", activityCreatesToWrite.map(entry => entry.object));
                 } catch (err) {
-                    for (const activityObject of activityCreatesToWrite) {
+                    for (const entry of activityCreatesToWrite) {
                         try {
-                            await googleSheets.appendObjects("ACTIVITY_LOG", [activityObject]);
+                            await googleSheets.appendObjects("ACTIVITY_LOG", [entry.object]);
                         } catch (rowErr) {
                             failedRows++;
                             createdActivities--;
