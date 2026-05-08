@@ -682,6 +682,27 @@ function normalizeCrm1ComparableValue(value) {
     return String(value ?? "").trim();
 }
 
+function normalizeCrm1CustomerType(value) {
+    const raw = String(value || "").trim();
+    const lower = raw.toLowerCase();
+
+    if (lower === "b2c") return "B2C";
+    if (lower === "b2b") return "B2B";
+    return raw;
+}
+
+function getCrm1FinalLeadStatus(record) {
+    return record.closedDate ? "Closed Won" : "Legacy Import";
+}
+
+function getCrm1DealSignature(leadId, productModel, closedDate) {
+    return [
+        String(leadId || "").trim(),
+        String(productModel || "").trim().toLowerCase(),
+        String(closedDate || "").trim(),
+    ].join("|");
+}
+
 function buildCrm1LeadUpdatePlan(headers, update) {
     const changedKeys = new Set();
     const object = update.object || {};
@@ -842,6 +863,8 @@ async function batchUpdateCrm1ObjectRows(sheets, spreadsheetId, plans) {
 }
 
 function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
+    const finalLeadStatus = getCrm1FinalLeadStatus(record);
+
     if (!existingLeadObject) {
         return {
             lead_id: leadId,
@@ -850,8 +873,9 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
             customer_name: record.customerName,
             phone: record.normalizedPhone,
             source: record.normalizedSource || "Facebook",
-            lead_status: "Legacy Import",
-            status: "Legacy Import",
+            lead_status: finalLeadStatus,
+            status: finalLeadStatus,
+            sales_owner: record.adminName,
             customer_type: record.customerType,
             latest_audio_link: record.audioLink,
             last_contact_date: record.lastContactDate,
@@ -877,8 +901,9 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     putIfExistingBlank("lead_id", leadId);
     putIfExistingBlank("phone", record.normalizedPhone);
     putIfExistingBlank("source", record.normalizedSource || "Facebook");
-    putIfPresent("lead_status", "Legacy Import");
-    putIfPresent("status", "Legacy Import");
+    putIfPresent("lead_status", finalLeadStatus);
+    putIfPresent("status", finalLeadStatus);
+    putIfPresent("sales_owner", record.adminName);
     putIfPresent("customer_type", record.customerType);
     putIfPresent("latest_audio_link", record.audioLink);
     putIfPresent("last_contact_date", record.lastContactDate);
@@ -907,6 +932,20 @@ function buildCrm1LeadDetailObject(record, leadId) {
         source_block: record.sourceBlock,
         legacy_notes: record.note,
         raw_data_json: JSON.stringify(record.rawObject),
+        import_source: "CRM1 Legacy Import",
+    };
+}
+
+function buildCrm1DealObject(record, leadId, dealId) {
+    return {
+        deal_id: dealId,
+        lead_id: leadId,
+        product_model: record.productModel,
+        product: record.productModel,
+        closed_date: record.closedDate,
+        close_won_date: record.closedDate,
+        updated_at: record.now,
+        created_at: record.now,
         import_source: "CRM1 Legacy Import",
     };
 }
@@ -1004,6 +1043,13 @@ async function handleLegacyCrm1Import(req, res) {
         );
         logCrm1Step(diagnostics, "after reading LEAD_DETAILS", { rows: detailRows.length });
         const detailHeaders = detailRows[0] || [];
+        const dealRows = await withCrm1Timeout(
+            googleSheets.getSheetRows("DEALS"),
+            diagnostics,
+            "read DEALS"
+        );
+        logCrm1Step(diagnostics, "after reading DEALS", { rows: dealRows.length });
+        const dealHeaders = dealRows[0] || [];
         const activityRows = await withCrm1Timeout(
             googleSheets.getSheetRows("ACTIVITY_LOG"),
             diagnostics,
@@ -1044,6 +1090,7 @@ async function handleLegacyCrm1Import(req, res) {
         const failedRowSamples = [];
         const parsedRecords = [];
         const knownLeadDetailsByLeadId = new Map();
+        const knownDealsBySignature = new Map();
         const existingActivitySignatures = new Set();
 
         let totalRows = 0;
@@ -1072,6 +1119,10 @@ async function handleLegacyCrm1Import(req, res) {
         let detailsSkippedUnchanged = 0;
         let detailUpdateBatches = 0;
         let skippedDetailUpdateLimit = 0;
+        let dealsToCreate = 0;
+        let dealsUpdated = 0;
+        let dealsSkippedDuplicate = 0;
+        let closedWonLeads = 0;
 
         if (missingRequiredHeaders.length) {
             return res.status(400).json({
@@ -1109,6 +1160,15 @@ async function handleLegacyCrm1Import(req, res) {
             knownLeadDetailsByLeadId.set(leadId, { ...detailObject, rowNumber: i + 1 });
         }
 
+        for (let i = 2; i < dealRows.length; i++) {
+            const dealObject = googleSheets.rowToObject(dealHeaders, dealRows[i]);
+            const leadId = String(dealObject.lead_id || "").trim();
+            const productModel = dealObject.product_model || dealObject.product || "";
+            const closedDate = dealObject.closed_date || dealObject.close_won_date || "";
+            if (!leadId || !String(productModel || "").trim()) continue;
+            knownDealsBySignature.set(getCrm1DealSignature(leadId, productModel, closedDate), { ...dealObject, rowNumber: i + 1 });
+        }
+
         for (let i = 2; i < activityRows.length; i++) {
             const activityObject = googleSheets.rowToObject(activityHeaders, activityRows[i]);
             existingActivitySignatures.add(getActivitySignature(activityObject));
@@ -1128,7 +1188,8 @@ async function handleLegacyCrm1Import(req, res) {
                     const formLink = getCrm1Value(dataRow.row, headerMap, "form_link");
                     const adminName = getCrm1Value(dataRow.row, headerMap, "admin_name");
                     const source = getCrm1Value(dataRow.row, headerMap, "source");
-                    const customerType = getCrm1Value(dataRow.row, headerMap, "customer_type");
+                    const rawCustomerType = getCrm1Value(dataRow.row, headerMap, "customer_type");
+                    const customerType = normalizeCrm1CustomerType(rawCustomerType);
                     const locationType = getCrm1Value(dataRow.row, headerMap, "location_type");
                     const rooms = getCrm1Value(dataRow.row, headerMap, "rooms");
                     const areaSqm = getCrm1Value(dataRow.row, headerMap, "area_sqm");
@@ -1179,12 +1240,12 @@ async function handleLegacyCrm1Import(req, res) {
                     const derivedZone = normalizeLegacyZone(provinceResult.province, mappingRules);
                     const zone = explicitZone || derivedZone;
                     const normalizedSource = mapLegacySource(source || layout.defaultSource || block.normalizedMarker || block.marker, mappingRules);
-                    const leadStatus = normalizeCrm1Status(stage, mappingRules);
                     const reason = mapLegacyReason(cleanReason || stage, mappingRules);
                     const installDate = parseLegacyDateValue(installDateRaw).value;
                     const lastContactDate = parseLegacyDateValue(lastContactDateRaw).value;
                     const nextStepDate = parseLegacyDateValue(nextStepDateRaw).value;
                     const closedDate = parseLegacyDateValue(closedDateRaw).value;
+                    const leadStatus = closedDate ? "Closed Won" : "Legacy Import";
                     const audioItems = detectCrm1Audio(dataRow.row, headerMap, block.marker, dataRow.rowNumber, normalizedPhone);
                     const hasDealData = hasAnyValue({ productModel, deviceCount, paymentDate, paymentSlipUrl, price });
                     const hasInstallationData = hasAnyValue({ installDate, installTime, installStatus, address, zone });
@@ -1200,6 +1261,7 @@ async function handleLegacyCrm1Import(req, res) {
                     }
 
                     if (hasDealData) wouldCreateDeal++;
+                    if (closedDate) closedWonLeads++;
                     if (hasInstallationData) wouldCreateInstallation++;
                     if (hasActivityData) wouldCreateActivity++;
 
@@ -1219,6 +1281,7 @@ async function handleLegacyCrm1Import(req, res) {
                         adminName,
                         normalizedSource,
                         leadStatus,
+                        rawCustomerType,
                         stageRaw,
                         stage,
                         reasonRaw: rawReason,
@@ -1264,11 +1327,14 @@ async function handleLegacyCrm1Import(req, res) {
                             customer_name: customerName,
                             form_link: formLink,
                             admin_name: adminName,
+                            sales_owner_preview: adminName,
                             lead_status: leadStatus,
+                            lead_status_final: leadStatus,
                             source: normalizedSource,
                             province: provinceResult.province,
                             zone,
                             customer_type: customerType,
+                            normalized_customer_type: customerType,
                             activity_type: contactMethod,
                             last_contact_date: lastContactDate,
                             followup_count: followUpCount,
@@ -1337,6 +1403,8 @@ async function handleLegacyCrm1Import(req, res) {
         const leadUpdates = [];
         const detailCreates = [];
         const detailUpdates = [];
+        const dealCreates = [];
+        const dealUpdates = [];
         const activityCreates = [];
 
         if (!dryRun || debugOnly) {
@@ -1380,6 +1448,27 @@ async function handleLegacyCrm1Import(req, res) {
                     } else if (!existingDetail) {
                         detailCreates.push(detailObject);
                         knownLeadDetailsByLeadId.set(leadId, { ...detailObject, rowNumber: null });
+                    }
+
+                    if (String(record.productModel || "").trim()) {
+                        const dealSignature = getCrm1DealSignature(leadId, record.productModel, record.closedDate);
+                        const existingDeal = knownDealsBySignature.get(dealSignature);
+                        const dealId = existingDeal?.deal_id || generateImportId("DEAL");
+                        const dealObject = buildCrm1DealObject(record, leadId, dealId);
+
+                        if (existingDeal?.rowNumber) {
+                            dealUpdates.push({
+                                rowNumber: existingDeal.rowNumber,
+                                object: dealObject,
+                                existingObject: existingDeal,
+                            });
+                        } else if (!existingDeal) {
+                            dealCreates.push(dealObject);
+                            knownDealsBySignature.set(dealSignature, { ...dealObject, rowNumber: null });
+                            dealsToCreate++;
+                        } else {
+                            dealsSkippedDuplicate++;
+                        }
                     }
 
                     if (record.hasActivityData) {
@@ -1427,6 +1516,8 @@ async function handleLegacyCrm1Import(req, res) {
                 leads_to_update: leadUpdates.length,
                 details_to_create: detailCreates.length,
                 details_to_update: detailUpdates.length,
+                deals_to_create: dealCreates.length,
+                deals_to_update: dealUpdates.length,
                 activities_to_write: activityCreates.length,
                 skipped_duplicate_activities: skippedDuplicateActivities,
                 skipped_activity_limit: skippedActivityLimit,
@@ -1454,6 +1545,10 @@ async function handleLegacyCrm1Import(req, res) {
             const detailUpdatePlansToWrite = maxDetailUpdates === null
                 ? detailUpdatePlans
                 : detailUpdatePlans.slice(0, maxDetailUpdates);
+            const dealUpdatePlans = dealUpdates
+                .map(update => buildCrm1ObjectUpdatePlan("DEALS", dealHeaders, update))
+                .filter(Boolean);
+            dealsSkippedDuplicate += dealUpdates.length - dealUpdatePlans.length;
 
             if (debugOnly) {
                 logCrm1Step(diagnostics, "before response", { debug_only: true });
@@ -1483,6 +1578,10 @@ async function handleLegacyCrm1Import(req, res) {
                     detail_update_batches: 0,
                     skipped_detail_update_limit: skippedDetailUpdateLimit,
                     max_detail_updates: maxDetailUpdates,
+                    deals_to_create: dealCreates.length,
+                    deals_updated: 0,
+                    deals_skipped_duplicate: dealsSkippedDuplicate,
+                    closed_won_leads: closedWonLeads,
                     details_to_write: detailCreates.length + detailUpdates.length,
                     activities_to_write: activityCreates.length,
                     skipped_duplicates: skippedDuplicateActivities,
@@ -1628,6 +1727,51 @@ async function handleLegacyCrm1Import(req, res) {
                 });
             }
 
+            if (writeScope === "all" && (dealCreates.length || dealUpdatePlans.length)) {
+                logCrm1Step(diagnostics, "before writing DEALS", {
+                    creates: dealCreates.length,
+                    updates: dealUpdatePlans.length,
+                    skipped_duplicate: dealsSkippedDuplicate,
+                });
+
+                if (dealCreates.length) {
+                    try {
+                        await withCrm1Timeout(
+                            googleSheets.appendObjects("DEALS", dealCreates),
+                            diagnostics,
+                            "write DEALS creates"
+                        );
+                    } catch (err) {
+                        if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
+                        failedRows += dealCreates.length;
+                        dealsToCreate -= dealCreates.length;
+                    }
+                }
+
+                const chunkSize = 25;
+                for (let i = 0; i < dealUpdatePlans.length; i += chunkSize) {
+                    assertCrm1TimeRemaining(diagnostics, "write DEALS update batch");
+                    const chunk = dealUpdatePlans.slice(i, i + chunkSize);
+                    try {
+                        await withCrm1Timeout(
+                            batchUpdateCrm1ObjectRows(sheets, spreadsheetId, chunk),
+                            diagnostics,
+                            "write DEALS update batch"
+                        );
+                        dealsUpdated += chunk.length;
+                    } catch (err) {
+                        if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
+                        failedRows += chunk.length;
+                    }
+                }
+
+                logCrm1Step(diagnostics, "after writing DEALS", {
+                    creates: dealCreates.length,
+                    updates: dealsUpdated,
+                    skipped_duplicate: dealsSkippedDuplicate,
+                });
+            }
+
             const activityCreatesToWrite = activityCreates.filter(entry => !failedCreatedLeadIds.has(entry.object.lead_id));
             if (canWriteCrm1Scope(writeScope, "activities_only") && activityCreatesToWrite.length) {
                 logCrm1Step(diagnostics, "before writing ACTIVITY_LOG", {
@@ -1719,6 +1863,10 @@ async function handleLegacyCrm1Import(req, res) {
             skipped_duplicate_activities: skippedDuplicateActivities,
             skipped_activity_limit: skippedActivityLimit,
             max_activities_per_run: maxActivitiesPerRun,
+            deals_to_create: dryRun && !debugOnly ? wouldCreateDeal : dealsToCreate,
+            deals_updated: dealsUpdated,
+            deals_skipped_duplicate: dealsSkippedDuplicate,
+            closed_won_leads: closedWonLeads,
             debug_only: debugOnly,
             write_scope: writeScope,
             skipped_invalid_phone: rowsMissingPhone,
