@@ -86,7 +86,7 @@ const CRM1_LAYOUTS = [
     },
     {
         id: "crm1_layout_2",
-        sheetName: "IMPORT_RAW_CRM1_LAYOUT_2",
+        sheetName: "IMPORT_RAW_CRM1",
         structureMode: "row1_header",
         defaultSourceBlock: "CRM1 Layout 2",
         defaultSource: "Facebook",
