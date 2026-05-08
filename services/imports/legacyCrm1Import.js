@@ -4,11 +4,9 @@ const {
     normalizeImportText,
     normalizeByMappingRules,
     mapLegacySource,
-    mapLegacyStatus,
     mapLegacyReason,
     normalizeLegacyProvince,
     normalizeLegacyZone,
-    normalizeLegacyImportPhone,
     parseLegacyDateValue,
     loadMappingRules,
     readFirstAvailableSheet,
@@ -18,6 +16,71 @@ const {
 } = require("./importUtils");
 
 const DEFAULT_CRM1_SOURCE_BLOCK = "Priority Leads";
+
+const CRM1_PRIORITY_LEADS_HEADERS = {
+    customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name"],
+    phone: ["เบอร์ติดต่อ (Tel.)", "Tel."],
+    source: ["ช่องทางการขาย (Sales Channel)", "Sales Channel"],
+    customer_type: ["ประเภทลูกค้า (Customer type)", "Customer type"],
+    location_type: ["ประเภทสถานที่ (Location type)", "Location type"],
+    rooms: ["ห้องที่ใช้งาน (Rooms)", "Rooms"],
+    area_sqm: ["พื้นที่ กี่ ตรม. (sq m.)", "sq m."],
+    room_count: ["จำนวนกี่ห้อง"],
+    floor_type: ["ประเภทพื้นอาคาร (Floor type)", "Floor type"],
+    activity_type: ["วิธีการติดต่อ"],
+    last_contact_date: ["วันที่ติดตามล่าสุด"],
+    followup_count: ["จำนวนการติดตาม (ต้องครบ 3 ครั้ง)"],
+    next_follow_up: ["Next_Step_Date"],
+    next_step_note: ["Next_Step"],
+    status: ["Stage"],
+    closed_date: ["Close won Date"],
+    product_model: ["Product_Model"],
+    reason: ["Reason"],
+    audio_link: ["ไฟล์เสียง"],
+    priority: ["Priority 1-3"],
+    notes: ["Notes"],
+    extra_note: ["Column 23"],
+    month: ["Month"],
+};
+
+const CRM1_LAYOUTS = [
+    {
+        id: "crm1_priority_leads",
+        sheetName: "IMPORT_RAW_CRM1",
+        structureMode: "row1_header",
+        defaultSourceBlock: DEFAULT_CRM1_SOURCE_BLOCK,
+        defaultSource: "Facebook",
+        headers: CRM1_PRIORITY_LEADS_HEADERS,
+        requiredFields: ["customer_name", "phone"],
+    },
+    {
+        id: "crm1_lead_new",
+        sheetName: "IMPORT_RAW_CRM1_LEAD_NEW",
+        structureMode: "row1_header",
+        defaultSourceBlock: "Lead New",
+        defaultSource: "Facebook",
+        headers: CRM1_PRIORITY_LEADS_HEADERS,
+        requiredFields: ["customer_name", "phone"],
+    },
+    {
+        id: "crm1_close_won",
+        sheetName: "IMPORT_RAW_CRM1_CLOSE_WON",
+        structureMode: "row1_header",
+        defaultSourceBlock: "Close Won & ส่งแบบสอบถาม",
+        defaultSource: "Facebook",
+        headers: CRM1_PRIORITY_LEADS_HEADERS,
+        requiredFields: ["customer_name", "phone"],
+    },
+    {
+        id: "crm1_installation",
+        sheetName: "IMPORT_RAW_CRM1_INSTALLATION",
+        structureMode: "row1_header",
+        defaultSourceBlock: "งานติดตั้ง",
+        defaultSource: "Facebook",
+        headers: CRM1_PRIORITY_LEADS_HEADERS,
+        requiredFields: ["customer_name", "phone"],
+    },
+];
 
 const CRM1_IMPORT_MARKERS = [
     { canonical: "Priority Leads", aliases: ["priority leads", "piority leads"] },
@@ -37,7 +100,7 @@ const CRM1_SKIP_MARKER_PATTERNS = [
     "config",
 ];
 
-const CRM1_FIELD_ALIASES = {
+const CRM1_FALLBACK_FIELD_ALIASES = {
     customer_name: ["ชื่อลูกค้า", "Customer name", "ชื่อ LINE", "ชื่อ LINE / FB", "ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Name"],
     phone: ["เบอร์ติดต่อ", "Tel", "Tel.", "Phone", "เบอร์ติดต่อ (Tel.)"],
     source: ["ช่องทางการขาย", "Sales Channel", "Sales channel"],
@@ -139,8 +202,8 @@ function headerMatchesAlias(headerText, alias) {
     return header === aliasText || header.includes(aliasText) || aliasText.includes(header);
 }
 
-function findHeaderMatches(headers, fieldName) {
-    const aliases = CRM1_FIELD_ALIASES[fieldName] || [];
+function findHeaderMatches(headers, fieldName, layout) {
+    const aliases = layout?.headers?.[fieldName] || CRM1_FALLBACK_FIELD_ALIASES[fieldName] || [];
     const matches = [];
 
     headers.forEach((headerText, index) => {
@@ -150,30 +213,41 @@ function findHeaderMatches(headers, fieldName) {
         const matchedAlias = aliases.find(alias => headerMatchesAlias(text, alias));
         if (!matchedAlias) return;
 
+        const normalizedHeader = normalizeHeaderForMatch(text);
+        const normalizedAlias = normalizeHeaderForMatch(matchedAlias);
+
         matches.push({
             field_name: fieldName,
             column_index: index + 1,
             zero_based_index: index,
             header_text: text,
             matched_alias: matchedAlias,
+            match_type: normalizedHeader === normalizedAlias ? "exact" : "contains",
         });
     });
 
-    return matches;
+    return matches.sort((a, b) => {
+        if (a.match_type === b.match_type) return a.column_index - b.column_index;
+        return a.match_type === "exact" ? -1 : 1;
+    });
 }
 
 function buildHeaderMap(headers) {
+    return buildHeaderMapForLayout(headers, { headers: CRM1_FALLBACK_FIELD_ALIASES });
+}
+
+function buildHeaderMapForLayout(headers, layout) {
     const mappedHeaders = [];
     const headerMap = {};
 
-    for (const fieldName of Object.keys(CRM1_FIELD_ALIASES)) {
-        const matches = findHeaderMatches(headers, fieldName);
+    for (const fieldName of Object.keys(layout.headers || {})) {
+        const matches = findHeaderMatches(headers, fieldName, layout);
         if (!matches.length) continue;
 
         headerMap[fieldName] = matches[0];
         mappedHeaders.push(matches[0]);
 
-        if (fieldName === "audio") {
+        if (fieldName === "audio" || fieldName === "audio_link") {
             headerMap.audio_all = matches;
         }
     }
@@ -185,6 +259,37 @@ function getCrm1Value(row, headerMap, fieldName) {
     const match = headerMap[fieldName];
     if (!match) return "";
     return String(row?.[match.zero_based_index] || "").trim();
+}
+
+function normalizeCrm1Phone(rawPhone) {
+    const digits = String(rawPhone || "").replace(/\D/g, "");
+    if (/^0\d{9}$/.test(digits)) return digits;
+    if (/^[689]\d{8}$/.test(digits)) return `0${digits}`;
+    return "";
+}
+
+function buildCrm1Notes(row, headerMap) {
+    const noteFields = [
+        ["Next Step", "next_step_note"],
+        ["Notes", "notes"],
+        ["Column 23", "extra_note"],
+        ["Customer Type", "customer_type"],
+        ["Location Type", "location_type"],
+        ["Rooms", "rooms"],
+        ["Area sqm", "area_sqm"],
+        ["Room Count", "room_count"],
+        ["Floor Type", "floor_type"],
+        ["Follow-up Count", "followup_count"],
+        ["Month", "month"],
+    ];
+    const parts = [];
+
+    for (const [label, fieldName] of noteFields) {
+        const value = getCrm1Value(row, headerMap, fieldName);
+        if (value) parts.push(`${label}: ${value}`);
+    }
+
+    return parts.join("\n");
 }
 
 function findNextNonEmptyRowIndex(rows, startIndex) {
@@ -224,17 +329,17 @@ function buildMarkerDetectionDebug(rows) {
     return debug;
 }
 
-function buildCrm1Blocks(rows) {
+function buildCrm1Blocks(rows, layout) {
     const markerDetectionDebug = buildMarkerDetectionDebug(rows);
     const firstCell = String(rows[0]?.[0] || "").trim();
     const firstCellMarker = matchCrm1AnyMarker(firstCell);
 
-    if (!firstCellMarker) {
+    if (layout?.structureMode === "row1_header" || !firstCellMarker) {
         return {
             parsedBlocks: [{
-                marker: DEFAULT_CRM1_SOURCE_BLOCK,
-                normalizedMarker: DEFAULT_CRM1_SOURCE_BLOCK,
-                markerMatch: { matchedAs: DEFAULT_CRM1_SOURCE_BLOCK, matchReason: "default_row_1_header", confidence: 1, type: "import" },
+                marker: layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK,
+                normalizedMarker: layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK,
+                markerMatch: { matchedAs: layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK, matchReason: "default_row_1_header", confidence: 1, type: "import" },
                 markerRow: null,
                 headerRow: 1,
                 headers: rows[0] || [],
@@ -351,18 +456,36 @@ function detectedHeaderDebug(headerMap, fieldName) {
     };
 }
 
+function normalizeCrm1Status(status, mappingRules) {
+    const raw = String(status || "").trim();
+    if (!raw) return "New";
+    return normalizeByMappingRules(mappingRules, "lead_status", raw) || raw;
+}
+
 async function handleLegacyCrm1Import(req, res) {
     const dryRun = parseDryRunParam(req);
+    const requestedLayoutId = String(req.query.layout || "").trim();
 
     try {
         const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
-        const rawSheet = await readFirstAvailableSheet(googleSheets, sheets, spreadsheetId, ["IMPORT_RAW_CRM1"]);
+        const candidateLayouts = requestedLayoutId
+            ? CRM1_LAYOUTS.filter(layout => layout.id === requestedLayoutId)
+            : CRM1_LAYOUTS;
+        const candidateSheetNames = candidateLayouts.map(layout => layout.sheetName);
+        const rawSheet = await readFirstAvailableSheet(googleSheets, sheets, spreadsheetId, candidateSheetNames);
+        const layout = candidateLayouts.find(item => item.sheetName === rawSheet.sheetName) || CRM1_LAYOUTS[0];
         const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
         const leadHeaders = leadsRows[0] || [];
         const mappingRules = await loadMappingRules(googleSheets);
-        const { parsedBlocks, skippedBlocks, markerDetectionDebug, structureMode } = buildCrm1Blocks(rawSheet.rows);
+        const { parsedBlocks, skippedBlocks, markerDetectionDebug, structureMode } = buildCrm1Blocks(rawSheet.rows, layout);
         const primaryBlock = parsedBlocks[0] || null;
-        const primaryHeaderInfo = primaryBlock ? buildHeaderMap(primaryBlock.headers) : { headerMap: {}, mappedHeaders: [] };
+        const primaryHeaderInfo = primaryBlock ? buildHeaderMapForLayout(primaryBlock.headers, layout) : { headerMap: {}, mappedHeaders: [] };
+        const missingRequiredHeaders = (layout.requiredFields || [])
+            .filter(fieldName => !primaryHeaderInfo.headerMap[fieldName])
+            .map(fieldName => ({
+                field_name: fieldName,
+                accepted_headers: layout.headers[fieldName] || [],
+            }));
         const sourceSheetRowCount = rawSheet.rows.length;
         const sourceSheetColCount = rawSheet.rows.reduce((max, row) => Math.max(max, Array.isArray(row) ? row.length : 0), 0);
         const first20ColAValues = rawSheet.rows.slice(0, 20).map((row, index) => ({
@@ -392,15 +515,37 @@ async function handleLegacyCrm1Import(req, res) {
         let audioFileNamesDetected = 0;
         let failedRows = 0;
 
+        if (missingRequiredHeaders.length) {
+            return res.status(400).json({
+                success: false,
+                dry_run: dryRun,
+                parsed_dry_run: dryRun,
+                crm1_layout_id: layout.id,
+                source_sheet_name: rawSheet.sheetName,
+                source_sheet_found: true,
+                structure_mode: structureMode,
+                header_row_detected: primaryBlock?.headerRow || null,
+                mapped_headers: primaryHeaderInfo.mappedHeaders,
+                header_map_debug: primaryHeaderInfo.mappedHeaders,
+                missing_required_headers: missingRequiredHeaders,
+                customer_name_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "customer_name"),
+                phone_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "phone"),
+                source_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "source"),
+                note_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "notes") || detectedHeaderDebug(primaryHeaderInfo.headerMap, "next_step_note"),
+                audio_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "audio_link"),
+                error: "Missing required CRM1 headers",
+            });
+        }
+
         for (let i = 2; i < leadsRows.length; i++) {
             const leadObject = googleSheets.rowToObject(leadHeaders, leadsRows[i]);
-            const existingPhone = normalizeLegacyImportPhone(leadObject.phone, googleSheets);
+            const existingPhone = normalizeCrm1Phone(leadObject.phone);
             if (!existingPhone) continue;
             knownLeadsByPhone.set(existingPhone, { ...leadObject, rowNumber: i + 1 });
         }
 
         for (const block of parsedBlocks) {
-            const { headerMap } = buildHeaderMap(block.headers);
+            const { headerMap } = buildHeaderMapForLayout(block.headers, layout);
 
             for (const dataRow of block.dataRows) {
                 if (!rowHasAnyValue(dataRow.row)) continue;
@@ -412,25 +557,27 @@ async function handleLegacyCrm1Import(req, res) {
                     const phone = getCrm1Value(dataRow.row, headerMap, "phone");
                     const source = getCrm1Value(dataRow.row, headerMap, "source");
                     const customerType = getCrm1Value(dataRow.row, headerMap, "customer_type");
-                    const stage = getCrm1Value(dataRow.row, headerMap, "stage");
-                    const rawReason = getCrm1Value(dataRow.row, headerMap, "reason") || getCrm1Value(dataRow.row, headerMap, "cancel_reason");
-                    const note = getCrm1Value(dataRow.row, headerMap, "note") || getCrm1Value(dataRow.row, headerMap, "next_step");
+                    const stage = getCrm1Value(dataRow.row, headerMap, "status");
+                    const rawReason = getCrm1Value(dataRow.row, headerMap, "reason");
+                    const note = buildCrm1Notes(dataRow.row, headerMap);
                     const rawProvince = getCrm1Value(dataRow.row, headerMap, "province");
                     const rawZone = getCrm1Value(dataRow.row, headerMap, "zone");
                     const productModel = getCrm1Value(dataRow.row, headerMap, "product_model");
-                    const deviceCount = getCrm1Value(dataRow.row, headerMap, "device_count");
+                    const deviceCount = "";
                     const paymentDate = getCrm1Value(dataRow.row, headerMap, "payment_date");
                     const paymentSlipUrl = getCrm1Value(dataRow.row, headerMap, "payment_slip_url");
-                    const price = getCrm1Value(dataRow.row, headerMap, "price");
-                    const installDateRaw = getCrm1Value(dataRow.row, headerMap, "install_date");
-                    const installTime = getCrm1Value(dataRow.row, headerMap, "install_time");
-                    const installStatus = getCrm1Value(dataRow.row, headerMap, "install_status");
-                    const address = getCrm1Value(dataRow.row, headerMap, "address");
+                    const price = "";
+                    const installDateRaw = "";
+                    const installTime = "";
+                    const installStatus = "";
+                    const address = "";
                     const lastContactDateRaw = getCrm1Value(dataRow.row, headerMap, "last_contact_date");
-                    const nextStepDateRaw = getCrm1Value(dataRow.row, headerMap, "next_step_date");
-                    const contactMethod = getCrm1Value(dataRow.row, headerMap, "contact_method");
-                    const followUpCount = getCrm1Value(dataRow.row, headerMap, "follow_up_count");
-                    const normalizedPhone = normalizeLegacyImportPhone(phone, googleSheets);
+                    const nextStepDateRaw = getCrm1Value(dataRow.row, headerMap, "next_follow_up");
+                    const contactMethod = getCrm1Value(dataRow.row, headerMap, "activity_type");
+                    const followUpCount = getCrm1Value(dataRow.row, headerMap, "followup_count");
+                    const priority = getCrm1Value(dataRow.row, headerMap, "priority");
+                    const audioLink = getCrm1Value(dataRow.row, headerMap, "audio_link");
+                    const normalizedPhone = normalizeCrm1Phone(phone);
 
                     if (!normalizedPhone) {
                         rowsMissingPhone++;
@@ -450,8 +597,8 @@ async function handleLegacyCrm1Import(req, res) {
                     const explicitZone = normalizeByMappingRules(mappingRules, "zone", rawZone);
                     const derivedZone = normalizeLegacyZone(provinceResult.province, mappingRules);
                     const zone = explicitZone || derivedZone;
-                    const normalizedSource = mapLegacySource(source || block.normalizedMarker || block.marker, mappingRules);
-                    const leadStatus = mapLegacyStatus(stage || block.normalizedMarker || block.marker, mappingRules);
+                    const normalizedSource = mapLegacySource(source || layout.defaultSource || block.normalizedMarker || block.marker, mappingRules);
+                    const leadStatus = normalizeCrm1Status(stage, mappingRules);
                     const reason = mapLegacyReason(rawReason || stage, mappingRules);
                     const installDate = parseLegacyDateValue(installDateRaw).value;
                     const lastContactDate = parseLegacyDateValue(lastContactDateRaw).value;
@@ -484,6 +631,7 @@ async function handleLegacyCrm1Import(req, res) {
                         samplePreviewItems.push({
                             source_block: block.marker,
                             source_row: dataRow.rowNumber,
+                            original_phone: phone,
                             normalized_phone: normalizedPhone,
                             customer_name: customerName,
                             lead_status: leadStatus,
@@ -496,6 +644,9 @@ async function handleLegacyCrm1Import(req, res) {
                             install_status: installStatus,
                             stage,
                             reason,
+                            next_follow_up: nextStepDate,
+                            audio_link: audioLink,
+                            priority,
                             note_preview: note,
                             would_create_lead: !wouldUpdate,
                             would_create_deal: hasDealData,
@@ -520,6 +671,7 @@ async function handleLegacyCrm1Import(req, res) {
             success: dryRun,
             dry_run: dryRun,
             parsed_dry_run: dryRun,
+            crm1_layout_id: layout.id,
             source_sheet_name: rawSheet.sheetName,
             source_sheet_found: true,
             source_sheet_row_count: sourceSheetRowCount,
@@ -531,11 +683,12 @@ async function handleLegacyCrm1Import(req, res) {
             header_row_detected: primaryBlock?.headerRow || null,
             header_map_debug: primaryHeaderInfo.mappedHeaders,
             mapped_headers: primaryHeaderInfo.mappedHeaders,
+            missing_required_headers: missingRequiredHeaders,
             customer_name_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "customer_name"),
             phone_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "phone"),
             source_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "source"),
-            note_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "note"),
-            audio_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "audio"),
+            note_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "notes") || detectedHeaderDebug(primaryHeaderInfo.headerMap, "next_step_note"),
+            audio_header_detected: detectedHeaderDebug(primaryHeaderInfo.headerMap, "audio_link"),
             real_import_implemented: false,
             message: dryRun ? undefined : "CRM1 real import is not implemented yet. Re-run with dry_run=true for preview only.",
             total_blocks_detected: parsedBlocks.length + skippedBlocks.length,
