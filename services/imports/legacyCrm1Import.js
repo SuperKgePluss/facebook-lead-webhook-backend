@@ -574,6 +574,13 @@ function getCrm1MaxLeadUpdates(req) {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function getCrm1MaxDetailUpdates(req) {
+    const raw = String(req.query.max_detail_updates || "").trim();
+    const parsed = Number.parseInt(raw, 10);
+
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function parseCrm1BooleanQuery(value) {
     return String(value || "").trim().toLowerCase() === "true";
 }
@@ -756,6 +763,84 @@ async function batchUpdateCrm1LeadRows(sheets, spreadsheetId, plans) {
     });
 }
 
+function buildCrm1ObjectUpdatePlan(sheetName, headers, update) {
+    const changedKeys = new Set();
+    const object = update.object || {};
+    const existingObject = update.existingObject || {};
+
+    for (const header of headers) {
+        const key = googleSheets.normalizeHeaderName(header);
+        if (!key || !Object.prototype.hasOwnProperty.call(object, key)) continue;
+
+        const currentValue = normalizeCrm1ComparableValue(existingObject[key]);
+        const nextValue = normalizeCrm1ComparableValue(object[key]);
+        if (currentValue !== nextValue) changedKeys.add(key);
+    }
+
+    if (!changedKeys.size) return null;
+
+    const ranges = [];
+    let currentGroup = null;
+
+    headers.forEach((header, index) => {
+        const key = googleSheets.normalizeHeaderName(header);
+        if (!changedKeys.has(key)) {
+            if (currentGroup) {
+                ranges.push(currentGroup);
+                currentGroup = null;
+            }
+            return;
+        }
+
+        const value = object[key] ?? "";
+        if (!currentGroup) {
+            currentGroup = {
+                startIndex: index,
+                endIndex: index,
+                values: [value],
+            };
+            return;
+        }
+
+        if (index === currentGroup.endIndex + 1) {
+            currentGroup.endIndex = index;
+            currentGroup.values.push(value);
+            return;
+        }
+
+        ranges.push(currentGroup);
+        currentGroup = {
+            startIndex: index,
+            endIndex: index,
+            values: [value],
+        };
+    });
+
+    if (currentGroup) ranges.push(currentGroup);
+
+    return {
+        rowNumber: update.rowNumber,
+        update,
+        ranges: ranges.map(group => ({
+            range: `${sheetName}!${columnToLetter(group.startIndex + 1)}${update.rowNumber}:${columnToLetter(group.endIndex + 1)}${update.rowNumber}`,
+            values: [group.values],
+        })),
+    };
+}
+
+async function batchUpdateCrm1ObjectRows(sheets, spreadsheetId, plans) {
+    const data = plans.flatMap(plan => plan.ranges);
+    if (!data.length) return;
+
+    await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+            valueInputOption: "USER_ENTERED",
+            data,
+        },
+    });
+}
+
 function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     if (!existingLeadObject) {
         return {
@@ -864,6 +949,7 @@ async function handleLegacyCrm1Import(req, res) {
     const requestedSheetName = String(req.query.sheet_name || req.query.source_sheet || "").trim();
     const maxActivitiesPerRun = getCrm1MaxActivitiesPerRun(req);
     const maxLeadUpdates = getCrm1MaxLeadUpdates(req);
+    const maxDetailUpdates = getCrm1MaxDetailUpdates(req);
     const debugOnly = parseCrm1BooleanQuery(req.query.debug_only);
     const writeScope = getCrm1WriteScope(req);
     const timeoutMs = debugOnly ? DEBUG_CRM1_TIMEOUT_MS : DEFAULT_CRM1_TIMEOUT_MS;
@@ -879,6 +965,7 @@ async function handleLegacyCrm1Import(req, res) {
             write_scope: writeScope,
             max_activities_per_run: maxActivitiesPerRun,
             max_lead_updates: maxLeadUpdates,
+            max_detail_updates: maxDetailUpdates,
         });
 
         const { sheets, spreadsheetId } = await withCrm1Timeout(
@@ -980,6 +1067,11 @@ async function handleLegacyCrm1Import(req, res) {
         let leadsUpdated = 0;
         let leadUpdateBatches = 0;
         let skippedLeadUpdateLimit = 0;
+        let detailUpdateCandidates = 0;
+        let detailsUpdated = 0;
+        let detailsSkippedUnchanged = 0;
+        let detailUpdateBatches = 0;
+        let skippedDetailUpdateLimit = 0;
 
         if (missingRequiredHeaders.length) {
             return res.status(400).json({
@@ -1280,7 +1372,11 @@ async function handleLegacyCrm1Import(req, res) {
                     const detailObject = buildCrm1LeadDetailObject(record, leadId);
                     const existingDetail = knownLeadDetailsByLeadId.get(leadId);
                     if (existingDetail?.rowNumber) {
-                        detailUpdates.push({ rowNumber: existingDetail.rowNumber, object: detailObject });
+                        detailUpdates.push({
+                            rowNumber: existingDetail.rowNumber,
+                            object: detailObject,
+                            existingObject: existingDetail,
+                        });
                     } else if (!existingDetail) {
                         detailCreates.push(detailObject);
                         knownLeadDetailsByLeadId.set(leadId, { ...detailObject, rowNumber: null });
@@ -1347,6 +1443,17 @@ async function handleLegacyCrm1Import(req, res) {
             const leadUpdatePlansToWrite = maxLeadUpdates === null
                 ? leadUpdatePlans
                 : leadUpdatePlans.slice(0, maxLeadUpdates);
+            const detailUpdatePlans = detailUpdates
+                .map(update => buildCrm1ObjectUpdatePlan("LEAD_DETAILS", detailHeaders, update))
+                .filter(Boolean);
+            detailUpdateCandidates = detailUpdates.length;
+            detailsSkippedUnchanged = detailUpdates.length - detailUpdatePlans.length;
+            skippedDetailUpdateLimit = maxDetailUpdates === null
+                ? 0
+                : Math.max(0, detailUpdatePlans.length - maxDetailUpdates);
+            const detailUpdatePlansToWrite = maxDetailUpdates === null
+                ? detailUpdatePlans
+                : detailUpdatePlans.slice(0, maxDetailUpdates);
 
             if (debugOnly) {
                 logCrm1Step(diagnostics, "before response", { debug_only: true });
@@ -1370,6 +1477,12 @@ async function handleLegacyCrm1Import(req, res) {
                     lead_update_batches: 0,
                     skipped_lead_update_limit: skippedLeadUpdateLimit,
                     max_lead_updates: maxLeadUpdates,
+                    detail_update_candidates: detailUpdateCandidates,
+                    details_updated: 0,
+                    details_skipped_unchanged: detailsSkippedUnchanged,
+                    detail_update_batches: 0,
+                    skipped_detail_update_limit: skippedDetailUpdateLimit,
+                    max_detail_updates: maxDetailUpdates,
                     details_to_write: detailCreates.length + detailUpdates.length,
                     activities_to_write: activityCreates.length,
                     skipped_duplicates: skippedDuplicateActivities,
@@ -1482,22 +1595,36 @@ async function handleLegacyCrm1Import(req, res) {
             }
 
             if (canWriteCrm1Scope(writeScope, "details_only")) {
-                for (const update of detailUpdates) {
-                    assertCrm1TimeRemaining(diagnostics, "write LEAD_DETAILS updates");
+                logCrm1Step(diagnostics, "before writing LEAD_DETAILS updates", {
+                    candidates: detailUpdateCandidates,
+                    changed: detailUpdatePlans.length,
+                    to_write: detailUpdatePlansToWrite.length,
+                    skipped_unchanged: detailsSkippedUnchanged,
+                    skipped_limit: skippedDetailUpdateLimit,
+                });
+
+                const chunkSize = 25;
+                for (let i = 0; i < detailUpdatePlansToWrite.length; i += chunkSize) {
+                    assertCrm1TimeRemaining(diagnostics, "write LEAD_DETAILS update batch");
+                    const chunk = detailUpdatePlansToWrite.slice(i, i + chunkSize);
                     try {
                         await withCrm1Timeout(
-                            googleSheets.updateObjectRow("LEAD_DETAILS", update.rowNumber, update.object),
+                            batchUpdateCrm1ObjectRows(sheets, spreadsheetId, chunk),
                             diagnostics,
-                            "write LEAD_DETAILS update"
+                            "write LEAD_DETAILS update batch"
                         );
+                        detailsUpdated += chunk.length;
+                        detailUpdateBatches++;
                     } catch (err) {
                         if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
-                        failedRows++;
+                        failedRows += chunk.length;
                     }
                 }
                 logCrm1Step(diagnostics, "after writing LEAD_DETAILS", {
                     creates: detailCreatesToWrite.length,
-                    updates: detailUpdates.length,
+                    updates: detailsUpdated,
+                    skipped_unchanged: detailsSkippedUnchanged,
+                    batches: detailUpdateBatches,
                 });
             }
 
@@ -1582,6 +1709,12 @@ async function handleLegacyCrm1Import(req, res) {
             lead_update_batches: leadUpdateBatches,
             skipped_lead_update_limit: skippedLeadUpdateLimit,
             max_lead_updates: maxLeadUpdates,
+            detail_update_candidates: detailUpdateCandidates,
+            details_updated: detailsUpdated,
+            details_skipped_unchanged: detailsSkippedUnchanged,
+            detail_update_batches: detailUpdateBatches,
+            skipped_detail_update_limit: skippedDetailUpdateLimit,
+            max_detail_updates: maxDetailUpdates,
             created_activities: createdActivities,
             skipped_duplicate_activities: skippedDuplicateActivities,
             skipped_activity_limit: skippedActivityLimit,
