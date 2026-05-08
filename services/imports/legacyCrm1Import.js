@@ -5,6 +5,7 @@ const {
     normalizeByMappingRules,
     mapLegacySource,
     mapLegacyReason,
+    normalizeLegacyLeadStatusValue,
     normalizeLegacyProvince,
     normalizeLegacyZone,
     parseLegacyDateValue,
@@ -632,9 +633,7 @@ function detectedHeaderDebug(headerMap, fieldName) {
 }
 
 function normalizeCrm1Status(status, mappingRules) {
-    const raw = String(status || "").trim();
-    if (!raw) return "New";
-    return normalizeByMappingRules(mappingRules, "lead_status", raw) || raw;
+    return normalizeLegacyLeadStatusValue(status, mappingRules);
 }
 
 function normalizeCrm1Priority(value) {
@@ -840,7 +839,7 @@ function shouldUpdateCrm1ExistingStatus(existingLeadObject) {
 
 function getCrm1FinalLeadStatus(record) {
     if (record.finalLeadStatus) return record.finalLeadStatus;
-    return record.closedDate ? "Closed Won" : "Legacy Import";
+    return record.closedDate ? "Closed" : "New";
 }
 
 function normalizeCrm1DealDateKey(value) {
@@ -1052,7 +1051,7 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
             save_follow_up: false,
             customer_name: record.customerName,
             phone: record.normalizedPhone,
-            source: record.normalizedSource || "Facebook",
+            source: record.normalizedSource || "Legacy Import",
             lead_status: finalLeadStatus,
             status: finalLeadStatus,
             sales_owner: record.adminName,
@@ -1080,7 +1079,7 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     putIfExistingBlank("customer_name", record.customerName);
     putIfExistingBlank("lead_id", leadId);
     putIfExistingBlank("phone", record.normalizedPhone);
-    putIfExistingBlank("source", record.normalizedSource || "Facebook");
+    putIfExistingBlank("source", record.normalizedSource || "Legacy Import");
     if (!record.statusUpdateOnlyIfBlankOrNew || shouldUpdateCrm1ExistingStatus(existingLeadObject)) {
         putIfPresent("lead_status", finalLeadStatus);
         putIfPresent("status", finalLeadStatus);
@@ -1513,7 +1512,7 @@ async function handleLegacyCrm1Import(req, res) {
                     const explicitZone = normalizeByMappingRules(mappingRules, "zone", rawZone);
                     const derivedZone = normalizeLegacyZone(provinceResult.province, mappingRules);
                     const zone = explicitZone || derivedZone;
-                    const normalizedSource = mapLegacySource(source || layout.defaultSource || block.normalizedMarker || block.marker, mappingRules);
+                    const normalizedSource = mapLegacySource(source, mappingRules);
                     const reason = mapLegacyReason(cleanReason || stage, mappingRules);
                     const installDate = parseLegacyDateValue(installDateRaw).value;
                     const paymentDate = parseLegacyDateValue(paymentDateRaw).value;
@@ -1524,7 +1523,12 @@ async function handleLegacyCrm1Import(req, res) {
                     const paymentStatus = normalizeCrm1PaymentStatus(installStatusRaw, mappingRules);
                     const installationStatus = normalizeCrm1InstallationStatus(installStatusRaw, mappingRules);
                     const layout3Status = layout.id === "crm1_layout_3" ? getCrm1Layout3LeadStatus(installStatusRaw, block.marker) : "";
-                    const leadStatus = layout3Status || (closedDate ? "Closed Won" : "Legacy Import");
+                    const leadStatus = layout3Status || normalizeLegacyLeadStatusValue(stage, mappingRules, {
+                        closedDate,
+                        installStatus: installStatusRaw,
+                        paymentStatus,
+                        sourceMarker: block.marker,
+                    });
                     const audioItems = detectCrm1Audio(dataRow.row, headerMap, block.marker, dataRow.rowNumber, normalizedPhone);
                     const hasDealData = hasAnyValue({ productModel, deviceCount, paymentDate, paymentSlipUrl, price });
                     const hasInstallationData = hasAnyValue({ installDate, installTime, installationStatus, address, zone });
@@ -1552,7 +1556,7 @@ async function handleLegacyCrm1Import(req, res) {
                     }
 
                     if (hasDealData) wouldCreateDeal++;
-                    if (closedDate) closedWonLeads++;
+                    if (leadStatus === "Closed") closedWonLeads++;
                     if (hasInstallationData) wouldCreateInstallation++;
                     if (hasActivityData) wouldCreateActivity++;
 

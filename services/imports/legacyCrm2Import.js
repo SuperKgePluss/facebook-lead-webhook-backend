@@ -12,7 +12,7 @@ const {
     normalizeLegacyZone,
     normalizeMultiByMappingRules,
     mapLegacySource,
-    mapLegacyStatus,
+    normalizeLegacyLeadStatusValue,
     mapLegacyReason,
     parseLegacyDateValue,
     formatLegacyDateForSheet,
@@ -349,7 +349,9 @@ async function handleLegacyCrm2Import(req, res) {
             const cleanedPreferredCallDay = normalizeMultiByMappingRules(mappingRules, "preferred_call_day", preferredCallDay);
             const cleanedPreferredCallTime = normalizeMultiByMappingRules(mappingRules, "preferred_call_time", preferredCallTime);
             const cleanedSource = mapLegacySource(source, mappingRules);
-            const cleanedLeadStatus = mapLegacyStatus(classification, mappingRules);
+            const cleanedLeadStatus = normalizeLegacyLeadStatusValue(classification, mappingRules, {
+                paid: Boolean(String(amountPaid || "").trim()),
+            });
             const cleanedReason = mapLegacyReason(reason || classification, mappingRules);
             const cleanedZone = normalizeLegacyZone(provinceResult.province, mappingRules);
             const parsedLeadInDate = parseLegacyDateValue(leadInDate);

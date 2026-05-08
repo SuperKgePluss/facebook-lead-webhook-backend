@@ -128,28 +128,72 @@ function normalizeMultiByMappingRules(mappingRules, ruleType, rawValue) {
 }
 
 function mapLegacySource(source, mappingRules) {
-    if (hasMappingRule(mappingRules, "source", source) || isInvalidByMappingRules(mappingRules, source)) {
-        return normalizeByMappingRules(mappingRules, "source", source);
-    }
+    return normalizeLegacySourceValue(source, mappingRules);
+}
 
-    const value = String(source || "").trim().toLowerCase();
+function normalizeLegacySourceValue(source, mappingRules = null) {
+    const mapped = mappingRules && (hasMappingRule(mappingRules, "source", source) || isInvalidByMappingRules(mappingRules, source))
+        ? normalizeByMappingRules(mappingRules, "source", source)
+        : "";
+    const raw = String(mapped || source || "").trim();
+    const value = raw.toLowerCase();
+
+    if (!raw) return LEGACY_IMPORT_STATUS;
 
     if (value.includes("lead gen")) return "Facebook";
     if (value.includes("leadgen")) return "Facebook";
     if (value.includes("facebook")) return "Facebook";
-    if (value.includes("fb chat")) return "Messenger";
-    if (value.includes("messenger")) return "Messenger";
-    if (value.includes("website")) return "Website";
+    if (value === "fb" || value.includes("fb chat")) return "Facebook";
+    if (value.includes("line")) return "LINE";
+    if (value.includes("manual")) return "Manual";
+    if (value.includes("cold call") || value.includes("coldcall")) return "Cold call";
 
-    return "Legacy Import";
+    if (["facebook", "line", "manual", "cold call"].includes(value)) return raw;
+
+    return LEGACY_IMPORT_STATUS;
 }
 
 function mapLegacyStatus(classification, mappingRules) {
-    if (hasMappingRule(mappingRules, "lead_status", classification) || isInvalidByMappingRules(mappingRules, classification)) {
-        return normalizeByMappingRules(mappingRules, "lead_status", classification);
+    return normalizeLegacyLeadStatusValue(classification, mappingRules);
+}
+
+function normalizeLegacyLeadStatusValue(status, mappingRules = null, signals = {}) {
+    const mapped = mappingRules && (hasMappingRule(mappingRules, "lead_status", status) || isInvalidByMappingRules(mappingRules, status))
+        ? normalizeByMappingRules(mappingRules, "lead_status", status)
+        : "";
+    const explicit = String(mapped || status || "").trim();
+    const signalText = [
+        explicit,
+        signals.stage,
+        signals.result,
+        signals.installStatus,
+        signals.paymentStatus,
+        signals.sourceMarker,
+        signals.closedDate ? "closed" : "",
+        signals.paid ? "paid" : "",
+    ].filter(Boolean).join(" ");
+    const value = signalText.toLowerCase();
+
+    if (value.includes("not interested") || value.includes("cancel") || value.includes("ยกเลิก")) {
+        return "Not Interested";
     }
 
-    return LEGACY_IMPORT_STATUS;
+    if (
+        value.includes("close won")
+        || value.includes("closed")
+        || value.includes("paid")
+        || value.includes("ชำระครบแล้ว")
+        || signals.closedDate
+    ) {
+        return "Closed";
+    }
+
+    if (value.includes("follow")) return "Follow-up";
+    if (value.includes("pending") || value.includes("รอ")) return "Pending";
+
+    if (explicit && explicit !== LEGACY_IMPORT_STATUS) return explicit;
+
+    return "New";
 }
 
 function mapLegacyReason(reason, mappingRules) {
@@ -344,6 +388,8 @@ module.exports = {
     normalizeImportText,
     normalizeByMappingRules,
     normalizeMultiByMappingRules,
+    normalizeLegacySourceValue,
+    normalizeLegacyLeadStatusValue,
     mapLegacySource,
     mapLegacyStatus,
     mapLegacyReason,
