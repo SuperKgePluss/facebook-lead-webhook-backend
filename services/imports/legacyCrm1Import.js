@@ -843,13 +843,44 @@ function getCrm1FinalLeadStatus(record) {
     return record.closedDate ? "Closed Won" : "Legacy Import";
 }
 
-function getCrm1DealSignature(leadId, productModel, dateValue, price = "") {
+function normalizeCrm1DealDateKey(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+
+    const parsed = parseLegacyDateValue(raw).value;
+    const normalized = parsed || raw;
+    const isoMatch = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+
+    if (!isoMatch) return "";
+
     return [
-        String(leadId || "").trim(),
-        String(productModel || "").trim().toLowerCase(),
-        String(dateValue || "").trim(),
-        String(price || "").trim(),
-    ].join("|");
+        isoMatch[1],
+        String(isoMatch[2]).padStart(2, "0"),
+        String(isoMatch[3]).padStart(2, "0"),
+    ].join("-");
+}
+
+function normalizeCrm1DealPriceKey(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+
+    const cleaned = raw.replace(/,/g, "").replace(/[^\d.-]/g, "");
+    const parsed = Number.parseFloat(cleaned);
+
+    return Number.isFinite(parsed) ? String(parsed) : "";
+}
+
+function getCrm1DealSignature(leadId, productModel, dateValue, price = "") {
+    const normalizedLeadId = String(leadId || "").trim();
+    const normalizedProduct = String(productModel || "").trim().toLowerCase();
+    const normalizedDate = normalizeCrm1DealDateKey(dateValue);
+    const normalizedPrice = normalizeCrm1DealPriceKey(price);
+
+    if (!normalizedDate) {
+        return `${normalizedLeadId}|${normalizedProduct}|${normalizedPrice}`;
+    }
+
+    return `${normalizedLeadId}|${normalizedProduct}|${normalizedDate}|${normalizedPrice}`;
 }
 
 function buildCrm1LeadUpdatePlan(headers, update) {
