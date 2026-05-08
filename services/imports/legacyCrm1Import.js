@@ -107,14 +107,14 @@ const CRM1_LAYOUT_3_HEADERS = {
 const CRM1_LAYOUT_4_HEADERS = {
     product_model: ["ผลิตภัณฑ์"],
     quantity: ["จำนวนเครื่องติดตั้ง"],
-    install_date: ["วันที่ติดตั้ง", "วันติดตั้ง"],
+    install_date: ["วันนัดติดตั้ง", "วันที่ติดตั้ง", "วันติดตั้ง", "Set up date", "setup date"],
     time_slot: ["ช่วงเวลา"],
     technician: ["ชื่อทีมช่าง"],
     install_status: ["สถานะ"],
     cancel_reason: ["เหตุผลยกเลิก"],
     note: ["Note"],
     phone: ["เบอร์ติดต่อ (Tel.)", "Tel.", "Phone", "เบอร์ติดต่อ"],
-    customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name", "ชื่อลูกค้า"],
+    customer_name: ["ชื่อลูกค้า (ใส่ชื่อ LINE / FB)", "ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name", "ชื่อลูกค้า"],
 };
 
 const CRM1_LAYOUTS = [
@@ -864,6 +864,19 @@ function getCrm1Layout4LeadStatus(installationStatus) {
     if (status === "installed") return "Closed";
     if (status === "cancelled") return "Not Interested";
     return "";
+}
+
+function normalizeCrm1Layout4InstallationStatus(value) {
+    const raw = String(value || "").trim();
+
+    if (!raw) return "";
+    if (raw.includes("ติดตั้งเรียบร้อย")) return "installed";
+    if (raw.includes("ยกเลิก")) return "cancelled";
+    if (raw.includes("รอคอนเฟิร์ม")) return "pending";
+    if (raw.includes("คอนเฟิร์มแล้ว")) return "confirmed";
+    if (raw.includes("เลื่อนวัน")) return "rescheduled";
+
+    return raw;
 }
 
 function shouldUpdateCrm1ExistingStatus(existingLeadObject) {
@@ -1617,7 +1630,9 @@ async function handleLegacyCrm1Import(req, res) {
                     const closedDate = parseLegacyDateValue(closedDateRaw).value;
                     const formNotiDate = parseLegacyDateValue(formNotiDateRaw).value;
                     const paymentStatus = normalizeCrm1PaymentStatus(installStatusRaw, mappingRules);
-                    const installationStatus = normalizeCrm1InstallationStatus(installStatusRaw, mappingRules);
+                    const installationStatus = isLayout4
+                        ? normalizeCrm1Layout4InstallationStatus(installStatusRaw)
+                        : normalizeCrm1InstallationStatus(installStatusRaw, mappingRules);
                     const layout3Status = layout.id === "crm1_layout_3" ? getCrm1Layout3LeadStatus(installStatusRaw, block.marker) : "";
                     const layout4Status = isLayout4 ? getCrm1Layout4LeadStatus(installationStatus) : "";
                     const leadStatus = layout4Status || layout3Status || normalizeLegacyLeadStatusValue(stage, mappingRules, {
