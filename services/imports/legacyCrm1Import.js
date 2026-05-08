@@ -240,16 +240,19 @@ function detectCrm1Row1HeaderOffsetMarker(value) {
         : null;
 }
 
-function detectCrm1HeaderLayout(rows) {
-    const rowOneColumnA = String(rows?.[0]?.[0] || "").trim();
+function detectCrm1HeaderLayout(allRows) {
+    const rowOne = allRows.at(0) || [];
+    const rowOneColumnA = String(rowOne[0] || "").trim();
     const rowOneMarker = detectCrm1Row1HeaderOffsetMarker(rowOneColumnA);
     const headerRowDetected = rowOneMarker ? 2 : 1;
     const headerIndex = headerRowDetected - 1;
     const dataStartIndex = headerIndex + 1;
+    const headerRow = allRows[headerIndex] || [];
 
     return {
         headerRowDetected,
         headerIndex,
+        headerRow,
         dataStartIndex,
         rowOneColumnA,
         rowOneMarker,
@@ -486,14 +489,17 @@ function buildMarkerDetectionDebug(rows) {
 }
 
 function buildCrm1Blocks(rows, layout) {
-    const markerDetectionDebug = buildMarkerDetectionDebug(rows);
-    const headerLayout = detectCrm1HeaderLayout(rows);
+    const allRows = rows || [];
+    const markerDetectionDebug = buildMarkerDetectionDebug(allRows);
+    const headerLayout = detectCrm1HeaderLayout(allRows);
     const firstCell = headerLayout.rowOneColumnA;
     const firstCellMarker = matchCrm1AnyMarker(firstCell);
 
     if (layout?.structureMode === "row1_header" || !firstCellMarker) {
-        const { headerIndex, dataStartIndex, rowOneMarker } = headerLayout;
+        const { headerIndex, headerRow, dataStartIndex, rowOneMarker } = headerLayout;
         const defaultMarker = layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK;
+
+        console.log("HEADER ROW:", headerRow);
 
         return {
             parsedBlocks: [{
@@ -504,8 +510,8 @@ function buildCrm1Blocks(rows, layout) {
                 headerRow: headerLayout.headerRowDetected,
                 headerIndex,
                 dataStartIndex,
-                headers: rows[headerIndex] || [],
-                dataRows: rows.slice(dataStartIndex).map((row, index) => ({
+                headers: headerRow,
+                dataRows: allRows.slice(dataStartIndex).map((row, index) => ({
                     rowNumber: dataStartIndex + index + 1,
                     row: row || [],
                 })),
@@ -519,12 +525,12 @@ function buildCrm1Blocks(rows, layout) {
     const parsedBlocks = [];
     const skippedBlocks = [];
 
-    for (let i = 0; i < rows.length; i++) {
-        const marker = String(rows[i]?.[0] || "").trim();
+    for (let i = 0; i < allRows.length; i++) {
+        const marker = String(allRows[i]?.[0] || "").trim();
         const markerMatch = matchCrm1AnyMarker(marker);
         if (!markerMatch) continue;
 
-        const headerIndex = findNextNonEmptyRowIndex(rows, i + 1);
+        const headerIndex = findNextNonEmptyRowIndex(allRows, i + 1);
 
         if (headerIndex === -1) {
             skippedBlocks.push({
@@ -535,6 +541,9 @@ function buildCrm1Blocks(rows, layout) {
             break;
         }
 
+        const headerRow = allRows[headerIndex] || [];
+        console.log("HEADER ROW:", headerRow);
+
         const block = {
             marker,
             normalizedMarker: markerMatch.matchedAs,
@@ -543,17 +552,17 @@ function buildCrm1Blocks(rows, layout) {
             headerRow: headerIndex + 1,
             headerIndex,
             dataStartIndex: headerIndex + 1,
-            headers: rows[headerIndex] || [],
+            headers: headerRow,
             dataRows: [],
         };
 
         let j = headerIndex + 1;
-        for (; j < rows.length; j++) {
-            const nextMarker = String(rows[j]?.[0] || "").trim();
+        for (; j < allRows.length; j++) {
+            const nextMarker = String(allRows[j]?.[0] || "").trim();
             if (nextMarker && matchCrm1AnyMarker(nextMarker)) break;
             block.dataRows.push({
                 rowNumber: j + 1,
-                row: rows[j] || [],
+                row: allRows[j] || [],
             });
         }
 
