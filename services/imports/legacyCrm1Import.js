@@ -240,10 +240,12 @@ function detectCrm1Row1HeaderOffsetMarker(value) {
         : null;
 }
 
-function detectCrm1HeaderLayout(allRows) {
+function detectCrm1HeaderLayout(allRows, layout) {
     const rowOne = allRows.at(0) || [];
     const rowOneColumnA = String(rowOne[0] || "").trim();
-    const rowOneMarker = detectCrm1Row1HeaderOffsetMarker(rowOneColumnA);
+    const rowOneMarker = layout?.id === "crm1_layout_3"
+        ? null
+        : detectCrm1Row1HeaderOffsetMarker(rowOneColumnA);
     const headerRowDetected = rowOneMarker ? 2 : 1;
     const headerIndex = headerRowDetected - 1;
     const dataStartIndex = headerIndex + 1;
@@ -491,7 +493,7 @@ function buildMarkerDetectionDebug(rows) {
 function buildCrm1Blocks(rows, layout) {
     const allRows = rows || [];
     const markerDetectionDebug = buildMarkerDetectionDebug(allRows);
-    const headerLayout = detectCrm1HeaderLayout(allRows);
+    const headerLayout = detectCrm1HeaderLayout(allRows, layout);
     const firstCell = headerLayout.rowOneColumnA;
     const firstCellMarker = matchCrm1AnyMarker(firstCell);
 
