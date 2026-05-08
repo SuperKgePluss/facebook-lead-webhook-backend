@@ -240,6 +240,22 @@ function detectCrm1Row1HeaderOffsetMarker(value) {
         : null;
 }
 
+function detectCrm1HeaderLayout(rows) {
+    const rowOneColumnA = String(rows?.[0]?.[0] || "").trim();
+    const rowOneMarker = detectCrm1Row1HeaderOffsetMarker(rowOneColumnA);
+    const headerRowDetected = rowOneMarker ? 2 : 1;
+    const headerIndex = headerRowDetected - 1;
+    const dataStartIndex = headerIndex + 1;
+
+    return {
+        headerRowDetected,
+        headerIndex,
+        dataStartIndex,
+        rowOneColumnA,
+        rowOneMarker,
+    };
+}
+
 function normalizeHeaderForMatch(value) {
     return normalizeImportText(value)
         .replace(/[\r\n]+/g, " ")
@@ -471,22 +487,23 @@ function buildMarkerDetectionDebug(rows) {
 
 function buildCrm1Blocks(rows, layout) {
     const markerDetectionDebug = buildMarkerDetectionDebug(rows);
-    const firstCell = String(rows[0]?.[0] || "").trim();
+    const headerLayout = detectCrm1HeaderLayout(rows);
+    const firstCell = headerLayout.rowOneColumnA;
     const firstCellMarker = matchCrm1AnyMarker(firstCell);
-    const row1HeaderOffsetMarker = detectCrm1Row1HeaderOffsetMarker(firstCell);
 
     if (layout?.structureMode === "row1_header" || !firstCellMarker) {
-        const headerIndex = row1HeaderOffsetMarker ? 1 : 0;
-        const dataStartIndex = headerIndex + 1;
+        const { headerIndex, dataStartIndex, rowOneMarker } = headerLayout;
         const defaultMarker = layout?.defaultSourceBlock || DEFAULT_CRM1_SOURCE_BLOCK;
 
         return {
             parsedBlocks: [{
-                marker: row1HeaderOffsetMarker ? firstCell : defaultMarker,
-                normalizedMarker: row1HeaderOffsetMarker?.normalizedMarker || defaultMarker,
-                markerMatch: row1HeaderOffsetMarker || { matchedAs: defaultMarker, matchReason: "default_row_1_header", confidence: 1, type: "import" },
-                markerRow: row1HeaderOffsetMarker ? 1 : null,
-                headerRow: headerIndex + 1,
+                marker: rowOneMarker ? firstCell : defaultMarker,
+                normalizedMarker: rowOneMarker?.normalizedMarker || defaultMarker,
+                markerMatch: rowOneMarker || { matchedAs: defaultMarker, matchReason: "default_row_1_header", confidence: 1, type: "import" },
+                markerRow: rowOneMarker ? 1 : null,
+                headerRow: headerLayout.headerRowDetected,
+                headerIndex,
+                dataStartIndex,
                 headers: rows[headerIndex] || [],
                 dataRows: rows.slice(dataStartIndex).map((row, index) => ({
                     rowNumber: dataStartIndex + index + 1,
@@ -495,7 +512,7 @@ function buildCrm1Blocks(rows, layout) {
             }],
             skippedBlocks: [],
             markerDetectionDebug,
-            structureMode: row1HeaderOffsetMarker ? "row_1_marker_row_2_header" : "row_1_header",
+            structureMode: rowOneMarker ? "row_1_marker_row_2_header" : "row_1_header",
         };
     }
 
@@ -524,6 +541,8 @@ function buildCrm1Blocks(rows, layout) {
             markerMatch,
             markerRow: i + 1,
             headerRow: headerIndex + 1,
+            headerIndex,
+            dataStartIndex: headerIndex + 1,
             headers: rows[headerIndex] || [],
             dataRows: [],
         };
