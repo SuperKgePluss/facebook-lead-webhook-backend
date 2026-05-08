@@ -92,7 +92,7 @@ const CRM1_LAYOUTS = [
         defaultSource: "Facebook",
         headers: CRM1_LAYOUT_2_HEADERS,
         requiredFields: ["customer_name", "phone"],
-        realImportEnabled: false,
+        realImportEnabled: true,
     },
     {
         id: "crm1_lead_new",
