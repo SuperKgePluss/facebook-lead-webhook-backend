@@ -107,7 +107,7 @@ const CRM1_LAYOUT_3_HEADERS = {
 const CRM1_LAYOUT_4_HEADERS = {
     product_model: ["ผลิตภัณฑ์"],
     quantity: ["จำนวนเครื่องติดตั้ง"],
-    install_date: ["วันที่ติดตั้ง"],
+    install_date: ["วันที่ติดตั้ง", "วันติดตั้ง"],
     time_slot: ["ช่วงเวลา"],
     technician: ["ชื่อทีมช่าง"],
     install_status: ["สถานะ"],
