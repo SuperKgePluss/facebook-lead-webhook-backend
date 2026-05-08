@@ -19,6 +19,9 @@ const {
 
 const DEFAULT_CRM1_SOURCE_BLOCK = "Priority Leads";
 const DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN = 100;
+const DEFAULT_CRM1_TIMEOUT_MS = 60000;
+const DEBUG_CRM1_TIMEOUT_MS = 10000;
+const CRM1_WRITE_SCOPES = new Set(["leads_only", "details_only", "activities_only", "all"]);
 
 const CRM1_PRIORITY_LEADS_HEADERS = {
     customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name"],
@@ -564,6 +567,66 @@ function getCrm1MaxActivitiesPerRun(req) {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN;
 }
 
+function parseCrm1BooleanQuery(value) {
+    return String(value || "").trim().toLowerCase() === "true";
+}
+
+function getCrm1WriteScope(req) {
+    const scope = String(req.query.write_scope || "all").trim().toLowerCase();
+    return CRM1_WRITE_SCOPES.has(scope) ? scope : "all";
+}
+
+function canWriteCrm1Scope(writeScope, target) {
+    return writeScope === "all" || writeScope === target;
+}
+
+function createCrm1Diagnostics(timeoutMs) {
+    return {
+        timeout_ms: timeoutMs,
+        started_at: new Date().toISOString(),
+        steps: [],
+    };
+}
+
+function logCrm1Step(diagnostics, step, extra = {}) {
+    const elapsedMs = Date.now() - diagnostics.startedAtMs;
+    const entry = { step, elapsed_ms: elapsedMs, ...extra };
+
+    diagnostics.steps.push(entry);
+    console.log("CRM1 IMPORT STEP:", entry);
+}
+
+function assertCrm1TimeRemaining(diagnostics, step) {
+    const elapsedMs = Date.now() - diagnostics.startedAtMs;
+    if (elapsedMs >= diagnostics.timeout_ms) {
+        const err = new Error(`CRM1 import timed out at step: ${step}`);
+        err.code = "CRM1_IMPORT_TIMEOUT";
+        err.step = step;
+        throw err;
+    }
+}
+
+async function withCrm1Timeout(promise, diagnostics, step) {
+    assertCrm1TimeRemaining(diagnostics, step);
+
+    const remainingMs = Math.max(1, diagnostics.timeout_ms - (Date.now() - diagnostics.startedAtMs));
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            const err = new Error(`CRM1 import timed out at step: ${step}`);
+            err.code = "CRM1_IMPORT_TIMEOUT";
+            err.step = step;
+            reject(err);
+        }, remainingMs);
+    });
+
+    try {
+        return await Promise.race([promise, timeout]);
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 function columnToLetter(columnNumber) {
     let column = columnNumber;
     let letter = "";
@@ -708,9 +771,27 @@ async function handleLegacyCrm1Import(req, res) {
     const requestedLayoutId = String(req.query.layout || "").trim();
     const requestedSheetName = String(req.query.sheet_name || req.query.source_sheet || "").trim();
     const maxActivitiesPerRun = getCrm1MaxActivitiesPerRun(req);
+    const debugOnly = parseCrm1BooleanQuery(req.query.debug_only);
+    const writeScope = getCrm1WriteScope(req);
+    const timeoutMs = debugOnly ? DEBUG_CRM1_TIMEOUT_MS : DEFAULT_CRM1_TIMEOUT_MS;
+    const diagnostics = createCrm1Diagnostics(timeoutMs);
+    diagnostics.startedAtMs = Date.now();
+    diagnostics.debug_only = debugOnly;
+    diagnostics.write_scope = writeScope;
 
     try {
-        const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
+        logCrm1Step(diagnostics, "start import", {
+            dry_run: dryRun,
+            debug_only: debugOnly,
+            write_scope: writeScope,
+            max_activities_per_run: maxActivitiesPerRun,
+        });
+
+        const { sheets, spreadsheetId } = await withCrm1Timeout(
+            googleSheets.createSheetsClient(),
+            diagnostics,
+            "create sheets client"
+        );
         let candidateLayouts = requestedLayoutId
             ? CRM1_LAYOUTS.filter(layout => layout.id === requestedLayoutId)
             : CRM1_LAYOUTS;
@@ -718,15 +799,42 @@ async function handleLegacyCrm1Import(req, res) {
             candidateLayouts = candidateLayouts.map(layout => ({ ...layout, sheetName: requestedSheetName }));
         }
         const candidateSheetNames = candidateLayouts.map(layout => layout.sheetName);
-        const rawSheet = await readFirstAvailableSheet(googleSheets, sheets, spreadsheetId, candidateSheetNames);
+        const rawSheet = await withCrm1Timeout(
+            readFirstAvailableSheet(googleSheets, sheets, spreadsheetId, candidateSheetNames),
+            diagnostics,
+            "read source sheet"
+        );
+        logCrm1Step(diagnostics, "after reading source sheet", {
+            source_sheet_name: rawSheet.sheetName,
+            source_rows: rawSheet.rows.length,
+        });
         const layout = candidateLayouts.find(item => item.sheetName === rawSheet.sheetName) || CRM1_LAYOUTS[0];
-        const leadsRows = await googleSheets.getSheetRows("LEADS_MAIN");
+        const leadsRows = await withCrm1Timeout(
+            googleSheets.getSheetRows("LEADS_MAIN"),
+            diagnostics,
+            "read LEADS_MAIN"
+        );
+        logCrm1Step(diagnostics, "after reading LEADS_MAIN", { rows: leadsRows.length });
         const leadHeaders = leadsRows[0] || [];
-        const detailRows = await googleSheets.getSheetRows("LEAD_DETAILS");
+        const detailRows = await withCrm1Timeout(
+            googleSheets.getSheetRows("LEAD_DETAILS"),
+            diagnostics,
+            "read LEAD_DETAILS"
+        );
+        logCrm1Step(diagnostics, "after reading LEAD_DETAILS", { rows: detailRows.length });
         const detailHeaders = detailRows[0] || [];
-        const activityRows = await googleSheets.getSheetRows("ACTIVITY_LOG");
+        const activityRows = await withCrm1Timeout(
+            googleSheets.getSheetRows("ACTIVITY_LOG"),
+            diagnostics,
+            "read ACTIVITY_LOG"
+        );
+        logCrm1Step(diagnostics, "after reading ACTIVITY_LOG", { rows: activityRows.length });
         const activityHeaders = activityRows[0] || [];
-        const mappingRules = await loadMappingRules(googleSheets);
+        const mappingRules = await withCrm1Timeout(
+            loadMappingRules(googleSheets),
+            diagnostics,
+            "load MAPPING_RULES"
+        );
         const { parsedBlocks, skippedBlocks, markerDetectionDebug, structureMode } = buildCrm1Blocks(rawSheet.rows, layout);
         const primaryBlock = parsedBlocks[0] || null;
         const primaryHeaderInfo = primaryBlock ? buildHeaderMapForLayout(primaryBlock.headers, layout) : { headerMap: {}, mappedHeaders: [] };
@@ -1005,6 +1113,13 @@ async function handleLegacyCrm1Import(req, res) {
             }
         }
 
+        logCrm1Step(diagnostics, "after parsing rows", {
+            total_rows: totalRows,
+            rows_with_valid_phone: rowsWithValidPhone,
+            rows_missing_phone: rowsMissingPhone,
+            parsed_records: parsedRecords.length,
+        });
+
         if (!dryRun && layout.realImportEnabled === false) {
             return res.status(501).json({
                 success: false,
@@ -1027,15 +1142,17 @@ async function handleLegacyCrm1Import(req, res) {
             });
         }
 
-        if (!dryRun) {
-            const leadCreates = [];
-            const leadUpdates = [];
-            const detailCreates = [];
-            const detailUpdates = [];
-            const activityCreates = [];
+        const leadCreates = [];
+        const leadUpdates = [];
+        const detailCreates = [];
+        const detailUpdates = [];
+        const activityCreates = [];
+
+        if (!dryRun || debugOnly) {
             const failedCreatedLeadIds = new Set();
 
             for (const record of parsedRecords) {
+                assertCrm1TimeRemaining(diagnostics, "compute rows to write");
                 try {
                     let leadId = record.existingLeadObject?.lead_id || "";
                     const currentLead = knownLeadsByPhone.get(record.normalizedPhone);
@@ -1110,17 +1227,68 @@ async function handleLegacyCrm1Import(req, res) {
                 }
             }
 
-            if (leadCreates.length) {
+            logCrm1Step(diagnostics, "after computing rows to write", {
+                leads_to_insert: leadCreates.length,
+                leads_to_update: leadUpdates.length,
+                details_to_create: detailCreates.length,
+                details_to_update: detailUpdates.length,
+                activities_to_write: activityCreates.length,
+                skipped_duplicate_activities: skippedDuplicateActivities,
+                skipped_activity_limit: skippedActivityLimit,
+            });
+
+            if (debugOnly) {
+                logCrm1Step(diagnostics, "before response", { debug_only: true });
+                return res.status(200).json({
+                    success: true,
+                    dry_run: dryRun,
+                    parsed_dry_run: dryRun,
+                    debug_only: true,
+                    crm1_layout_id: layout.id,
+                    source_sheet_name: rawSheet.sheetName,
+                    structure_mode: structureMode,
+                    header_row_detected: primaryBlock?.headerRow || null,
+                    total_rows: totalRows,
+                    rows_with_valid_phone: rowsWithValidPhone,
+                    skipped_invalid_phone: rowsMissingPhone,
+                    leads_to_insert: leadCreates.length,
+                    leads_to_update: leadUpdates.length,
+                    details_to_write: detailCreates.length + detailUpdates.length,
+                    activities_to_write: activityCreates.length,
+                    skipped_duplicates: skippedDuplicateActivities,
+                    skipped_activity_limit: skippedActivityLimit,
+                    failed_rows: failedRows,
+                    sample_imported_items: sampleImportedItems,
+                    failed_row_samples: failedRowSamples,
+                    diagnostics,
+                });
+            }
+
+            if (canWriteCrm1Scope(writeScope, "leads_only") && leadCreates.length) {
+                logCrm1Step(diagnostics, "before writing LEADS_MAIN", {
+                    inserts: leadCreates.length,
+                    updates: leadUpdates.length,
+                });
                 try {
                     for (const entry of leadCreates) {
                         logCrm1LeadMainWrite(leadHeaders, entry.object, entry.record, "insert");
                     }
-                    await googleSheets.appendObjects("LEADS_MAIN", leadCreates.map(entry => entry.object));
+                    await withCrm1Timeout(
+                        googleSheets.appendObjects("LEADS_MAIN", leadCreates.map(entry => entry.object)),
+                        diagnostics,
+                        "write LEADS_MAIN inserts"
+                    );
                 } catch (err) {
+                    if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
                     for (const entry of leadCreates) {
                         try {
-                            await googleSheets.appendObjects("LEADS_MAIN", [entry.object]);
+                            await withCrm1Timeout(
+                                googleSheets.appendObjects("LEADS_MAIN", [entry.object]),
+                                diagnostics,
+                                "write LEADS_MAIN insert fallback"
+                            );
                         } catch (rowErr) {
+                            if (rowErr.code === "CRM1_IMPORT_TIMEOUT") throw rowErr;
                             failedRows++;
                             insertedLeads--;
                             failedCreatedLeadIds.add(entry.object.lead_id);
@@ -1129,54 +1297,104 @@ async function handleLegacyCrm1Import(req, res) {
                 }
             }
 
-            for (const update of leadUpdates) {
-                try {
-                    logCrm1LeadMainWrite(leadHeaders, update.object, update.record, "update", update.rowNumber);
-                    await googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.object);
-                } catch (err) {
-                    failedRows++;
-                    updatedExistingLeads--;
+            if (canWriteCrm1Scope(writeScope, "leads_only")) {
+                for (const update of leadUpdates) {
+                    assertCrm1TimeRemaining(diagnostics, "write LEADS_MAIN updates");
+                    try {
+                        logCrm1LeadMainWrite(leadHeaders, update.object, update.record, "update", update.rowNumber);
+                        await withCrm1Timeout(
+                            googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.object),
+                            diagnostics,
+                            "write LEADS_MAIN update"
+                        );
+                    } catch (err) {
+                        if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
+                        failedRows++;
+                        updatedExistingLeads--;
+                    }
                 }
+                logCrm1Step(diagnostics, "after writing LEADS_MAIN", {
+                    inserts: leadCreates.length,
+                    updates: leadUpdates.length,
+                });
             }
 
             const detailCreatesToWrite = detailCreates.filter(detail => !failedCreatedLeadIds.has(detail.lead_id));
-            if (detailCreatesToWrite.length) {
+            if (canWriteCrm1Scope(writeScope, "details_only") && detailCreatesToWrite.length) {
+                logCrm1Step(diagnostics, "before writing LEAD_DETAILS", {
+                    creates: detailCreatesToWrite.length,
+                    updates: detailUpdates.length,
+                });
                 try {
-                    await googleSheets.appendObjects("LEAD_DETAILS", detailCreatesToWrite);
+                    await withCrm1Timeout(
+                        googleSheets.appendObjects("LEAD_DETAILS", detailCreatesToWrite),
+                        diagnostics,
+                        "write LEAD_DETAILS creates"
+                    );
                 } catch (err) {
+                    if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
                     for (const detailObject of detailCreatesToWrite) {
                         try {
-                            await googleSheets.appendObjects("LEAD_DETAILS", [detailObject]);
+                            await withCrm1Timeout(
+                                googleSheets.appendObjects("LEAD_DETAILS", [detailObject]),
+                                diagnostics,
+                                "write LEAD_DETAILS create fallback"
+                            );
                         } catch (rowErr) {
+                            if (rowErr.code === "CRM1_IMPORT_TIMEOUT") throw rowErr;
                             failedRows++;
                         }
                     }
                 }
             }
 
-            for (const update of detailUpdates) {
-                try {
-                    await googleSheets.updateObjectRow("LEAD_DETAILS", update.rowNumber, update.object);
-                } catch (err) {
-                    failedRows++;
+            if (canWriteCrm1Scope(writeScope, "details_only")) {
+                for (const update of detailUpdates) {
+                    assertCrm1TimeRemaining(diagnostics, "write LEAD_DETAILS updates");
+                    try {
+                        await withCrm1Timeout(
+                            googleSheets.updateObjectRow("LEAD_DETAILS", update.rowNumber, update.object),
+                            diagnostics,
+                            "write LEAD_DETAILS update"
+                        );
+                    } catch (err) {
+                        if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
+                        failedRows++;
+                    }
                 }
+                logCrm1Step(diagnostics, "after writing LEAD_DETAILS", {
+                    creates: detailCreatesToWrite.length,
+                    updates: detailUpdates.length,
+                });
             }
 
             const activityCreatesToWrite = activityCreates.filter(entry => !failedCreatedLeadIds.has(entry.object.lead_id));
-            if (activityCreatesToWrite.length) {
+            if (canWriteCrm1Scope(writeScope, "activities_only") && activityCreatesToWrite.length) {
+                logCrm1Step(diagnostics, "before writing ACTIVITY_LOG", {
+                    activities: activityCreatesToWrite.length,
+                });
                 try {
                     for (const entry of activityCreatesToWrite) {
                         logCrm1ActivityWrite(activityHeaders, entry.object, entry.record);
                     }
-                    await appendCrm1ActivityRows(sheets, spreadsheetId, activityRows, activityHeaders, activityCreatesToWrite);
+                    await withCrm1Timeout(
+                        appendCrm1ActivityRows(sheets, spreadsheetId, activityRows, activityHeaders, activityCreatesToWrite),
+                        diagnostics,
+                        "write ACTIVITY_LOG"
+                    );
                     console.log("Processed activities:", activityCreatesToWrite.length);
+                    logCrm1Step(diagnostics, "after writing ACTIVITY_LOG", {
+                        activities: activityCreatesToWrite.length,
+                    });
                 } catch (err) {
+                    if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
                     failedRows += activityCreatesToWrite.length;
                     createdActivities -= activityCreatesToWrite.length;
                 }
             }
         }
 
+        logCrm1Step(diagnostics, "before response");
         return res.status(200).json({
             success: true,
             dry_run: dryRun,
@@ -1229,6 +1447,8 @@ async function handleLegacyCrm1Import(req, res) {
             skipped_duplicate_activities: skippedDuplicateActivities,
             skipped_activity_limit: skippedActivityLimit,
             max_activities_per_run: maxActivitiesPerRun,
+            debug_only: debugOnly,
+            write_scope: writeScope,
             skipped_invalid_phone: rowsMissingPhone,
             mapping_rules_loaded: mappingRules.loadedCount,
             mapping_rule_types_loaded: mappingRules.ruleTypes,
@@ -1237,15 +1457,27 @@ async function handleLegacyCrm1Import(req, res) {
             sample_audio_items: sampleAudioItems,
             skipped_block_details: skippedBlocks,
             failed_row_samples: failedRowSamples,
+            diagnostics,
         });
     } catch (err) {
-        return res.status(500).json({
+        const isTimeout = err.code === "CRM1_IMPORT_TIMEOUT";
+        logCrm1Step(diagnostics, isTimeout ? "timeout before response" : "error before response", {
+            error: err.message,
+            failed_step: err.step || "",
+        });
+
+        return res.status(isTimeout ? 504 : 500).json({
             success: false,
             dry_run: dryRun,
             parsed_dry_run: dryRun,
+            debug_only: debugOnly,
+            write_scope: writeScope,
             source_sheet_name: "IMPORT_RAW_CRM1",
             source_sheet_found: false,
+            timeout: isTimeout,
+            failed_step: err.step || "",
             error: err.message,
+            diagnostics,
         });
     }
 }
