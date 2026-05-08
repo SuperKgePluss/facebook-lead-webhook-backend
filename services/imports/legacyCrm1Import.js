@@ -77,6 +77,31 @@ const CRM1_LAYOUT_2_HEADERS = {
     month: ["Month"],
 };
 
+const CRM1_LAYOUT_3_HEADERS = {
+    form_link: ["Link_Close_won", "Link Close won", "Link_Close won"],
+    admin_name: ["ชื่อแอดมิน (Admin name)", "Admin name"],
+    customer_name: ["ชื่อลูกค้า + ชื่อ LINE / FB (Customer name)", "Customer name"],
+    phone: ["เบอร์ติดต่อ (Tel.)", "Tel."],
+    address: ["สถานที่ติดตั้ง + ลิงค์โลเคชั่น (Location)", "Location"],
+    source: ["ช่องทางการขาย (Sales Channel)", "Sales Channel"],
+    customer_type: ["ประเภทลูกค้า (Customer type)", "Customer type"],
+    location_type: ["ประเภทสถานที่ (Location type)", "Location type"],
+    product_model: ["ผลิตภัณฑ์ (Product Model)", "Product Model", "Product_Model"],
+    device_count: ["จำนวนเครื่องที่ติดตั้ง (Device for setup)", "Device for setup"],
+    install_date: ["วันที่ติดตั้ง (Set up date)", "Set up date"],
+    price: ["ยอดชำระ (Price)", "Price"],
+    payment_date: ["วันที่ชำระเงิน (Date Payment)", "Date Payment"],
+    install_status: ["สถานะติดตั้ง"],
+    outstanding_amount: ["ยอดที่ต้องชำระเพิ่ม (กรณีลูกค้าพรีออเดอร์)", "ยอดที่ต้องชำระเพิ่ม"],
+    payment_slip_url: ["หลักฐานการชำระ (Link Slip)", "Link Slip"],
+    after_sales_30_days: ["After sales 30 วัน", "After sales 30 days"],
+    form_noti_date: ["วันที่ต้องส่ง Noti แบบสอบถาม"],
+    form_status: ["Status การส่ง form"],
+    notes: ["Note", "Notes"],
+    month: ["Month"],
+    week: ["Week"],
+};
+
 const CRM1_LAYOUTS = [
     {
         id: "crm1_priority_leads",
@@ -95,6 +120,16 @@ const CRM1_LAYOUTS = [
         defaultSourceBlock: "CRM1 Layout 2",
         defaultSource: "Facebook",
         headers: CRM1_LAYOUT_2_HEADERS,
+        requiredFields: ["customer_name", "phone"],
+        realImportEnabled: true,
+    },
+    {
+        id: "crm1_layout_3",
+        sheetName: "IMPORT_RAW_CRM1",
+        structureMode: "row1_header",
+        defaultSourceBlock: "CRM1 Layout 3",
+        defaultSource: "Facebook",
+        headers: CRM1_LAYOUT_3_HEADERS,
         requiredFields: ["customer_name", "phone"],
         realImportEnabled: true,
     },
@@ -342,17 +377,29 @@ function buildCrm1Notes(row, headerMap) {
     const noteFields = [
         ["Form Link", "form_link"],
         ["Admin Name", "admin_name"],
+        ["Location", "address"],
         ["Next Step", "next_step_note"],
         ["Notes", "notes"],
         ["Column 23", "extra_note"],
         ["Customer Type", "customer_type"],
         ["Location Type", "location_type"],
+        ["Device Count", "device_count"],
+        ["Price", "price"],
+        ["Payment Date", "payment_date"],
+        ["Install Date", "install_date"],
+        ["Install Status", "install_status"],
+        ["Outstanding Amount", "outstanding_amount"],
+        ["Payment Slip", "payment_slip_url"],
+        ["After Sales 30 Days", "after_sales_30_days"],
+        ["Form Noti Date", "form_noti_date"],
+        ["Form Status", "form_status"],
         ["Rooms", "rooms"],
         ["Area sqm", "area_sqm"],
         ["Room Count", "room_count"],
         ["Floor Type", "floor_type"],
         ["Follow-up Count", "followup_count"],
         ["Month", "month"],
+        ["Week", "week"],
     ];
     const parts = [];
 
@@ -691,15 +738,54 @@ function normalizeCrm1CustomerType(value) {
     return raw;
 }
 
+function normalizeCrm1PaymentStatus(value) {
+    const raw = String(value || "").trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw) return "unknown";
+    if (raw.includes("ชำระครบแล้ว")) return "paid";
+    if (raw.includes("มัดจำ")) return "partial";
+    if (lower.includes("pre-order") || raw.includes("รอชำระส่วนต่าง")) return "partial";
+    if (raw.includes("ยกเลิก")) return "cancelled";
+    return "unknown";
+}
+
+function normalizeCrm1InstallationStatus(value) {
+    const raw = String(value || "").trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw) return "unknown";
+    if (raw.includes("ยกเลิก") || lower.includes("cancel")) return "cancelled";
+    if (lower.includes("pre-order") || raw.includes("รอ") || raw.includes("มัดจำ")) return "pending";
+    if (raw.includes("ติดตั้ง") || raw.includes("ชำระครบแล้ว") || lower.includes("installed") || lower.includes("setup complete")) return "installed";
+    return "unknown";
+}
+
+function getCrm1Layout3LeadStatus(installStatus) {
+    const raw = String(installStatus || "").trim();
+
+    if (raw.includes("ชำระครบแล้ว")) return "Closed";
+    if (raw.includes("ยกเลิก")) return "Not Interested";
+    return "";
+}
+
+function shouldUpdateCrm1ExistingStatus(existingLeadObject) {
+    const current = String(existingLeadObject?.lead_status || existingLeadObject?.status || "").trim().toLowerCase();
+    return !current || current === "new";
+}
+
 function getCrm1FinalLeadStatus(record) {
+    if (record.finalLeadStatus) return record.finalLeadStatus;
     return record.closedDate ? "Closed Won" : "Legacy Import";
 }
 
-function getCrm1DealSignature(leadId, productModel, closedDate) {
+function getCrm1DealSignature(leadId, productModel, dateValue, price = "", fallback = "") {
     return [
         String(leadId || "").trim(),
         String(productModel || "").trim().toLowerCase(),
-        String(closedDate || "").trim(),
+        String(dateValue || "").trim(),
+        String(price || "").trim(),
+        String(fallback || "").trim(),
     ].join("|");
 }
 
@@ -901,8 +987,10 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
     putIfExistingBlank("lead_id", leadId);
     putIfExistingBlank("phone", record.normalizedPhone);
     putIfExistingBlank("source", record.normalizedSource || "Facebook");
-    putIfPresent("lead_status", finalLeadStatus);
-    putIfPresent("status", finalLeadStatus);
+    if (!record.statusUpdateOnlyIfBlankOrNew || shouldUpdateCrm1ExistingStatus(existingLeadObject)) {
+        putIfPresent("lead_status", finalLeadStatus);
+        putIfPresent("status", finalLeadStatus);
+    }
     putIfPresent("sales_owner", record.adminName);
     putIfPresent("customer_type", record.customerType);
     putIfPresent("latest_audio_link", record.audioLink);
@@ -919,6 +1007,8 @@ function buildCrm1LeadDetailObject(record, leadId) {
         lead_id: leadId,
         customer_type: record.customerType,
         location_type: record.locationType,
+        address: record.address,
+        location: record.address,
         rooms: record.rooms,
         area_sqm: record.areaSqm,
         room_count: record.roomCount,
@@ -942,6 +1032,19 @@ function buildCrm1DealObject(record, leadId, dealId) {
         lead_id: leadId,
         product_model: record.productModel,
         product: record.productModel,
+        quantity: record.deviceCount,
+        device_count: record.deviceCount,
+        price: record.price,
+        payment_date: record.paymentDate,
+        payment_status: record.paymentStatus,
+        installation_status: record.installationStatus,
+        install_date: record.installDate,
+        setup_date: record.installDate,
+        outstanding_amount: record.outstandingAmount,
+        additional_payment: record.outstandingAmount,
+        payment_slip_url: record.paymentSlipUrl,
+        link_slip: record.paymentSlipUrl,
+        note: record.dealNote,
         closed_date: record.closedDate,
         close_won_date: record.closedDate,
         updated_at: record.now,
@@ -971,6 +1074,77 @@ function buildCrm1ActivityObject(record, leadId) {
         activity_date: activityDate,
         created_by: "CRM1 Import",
     };
+}
+
+function buildCrm1ActivityObjects(record, leadId) {
+    if (record.layoutId !== "crm1_layout_3") {
+        return [buildCrm1ActivityObject(record, leadId)];
+    }
+
+    const activities = [];
+    const base = {
+        lead_id: leadId,
+        follow_up_no: record.followUpCount || "",
+        followup_no: record.followUpCount || "",
+        rated_follow_up_no: record.followUpCount || "",
+        created_at: record.now,
+        created_by: "CRM1 Import",
+    };
+
+    if (hasAnyValue({ price: record.price, paymentDate: record.paymentDate, outstandingAmount: record.outstandingAmount, paymentSlipUrl: record.paymentSlipUrl })) {
+        activities.push({
+            ...base,
+            activity_id: generateImportId("ACT"),
+            action_type: "Payment",
+            activity_type: "Payment",
+            result: record.paymentStatus,
+            activity_result: record.paymentStatus,
+            note: [
+                record.price ? `Price: ${record.price}` : "",
+                record.paymentDate ? `Payment Date: ${record.paymentDate}` : "",
+                record.outstandingAmount ? `Outstanding: ${record.outstandingAmount}` : "",
+                record.installStatusRaw ? `Install Status: ${record.installStatusRaw}` : "",
+                record.paymentSlipUrl ? `Slip: ${record.paymentSlipUrl}` : "",
+            ].filter(Boolean).join("\n"),
+            activity_date: record.paymentDate || record.now,
+        });
+    }
+
+    if (hasAnyValue({ installDate: record.installDate, address: record.address, deviceCount: record.deviceCount })) {
+        activities.push({
+            ...base,
+            activity_id: generateImportId("ACT"),
+            action_type: "Installation",
+            activity_type: "Installation",
+            result: record.installationStatus,
+            activity_result: record.installationStatus,
+            note: [
+                record.installDate ? `Set up date: ${record.installDate}` : "",
+                record.address ? `Location: ${record.address}` : "",
+                record.deviceCount ? `Device Count: ${record.deviceCount}` : "",
+            ].filter(Boolean).join("\n"),
+            activity_date: record.installDate || record.now,
+        });
+    }
+
+    if (hasAnyValue({ afterSales30Days: record.afterSales30Days, formNotiDate: record.formNotiDate, formStatus: record.formStatus })) {
+        activities.push({
+            ...base,
+            activity_id: generateImportId("ACT"),
+            action_type: "After Sales / Form Notification",
+            activity_type: "After Sales / Form Notification",
+            result: record.formStatus || record.afterSales30Days,
+            activity_result: record.formStatus || record.afterSales30Days,
+            note: [
+                record.afterSales30Days ? `After sales 30 days: ${record.afterSales30Days}` : "",
+                record.formNotiDate ? `Form Noti Date: ${record.formNotiDate}` : "",
+                record.formStatus ? `Form Status: ${record.formStatus}` : "",
+            ].filter(Boolean).join("\n"),
+            activity_date: record.formNotiDate || record.now,
+        });
+    }
+
+    return activities;
 }
 
 function getActivitySignature(activityObject) {
@@ -1164,9 +1338,10 @@ async function handleLegacyCrm1Import(req, res) {
             const dealObject = googleSheets.rowToObject(dealHeaders, dealRows[i]);
             const leadId = String(dealObject.lead_id || "").trim();
             const productModel = dealObject.product_model || dealObject.product || "";
-            const closedDate = dealObject.closed_date || dealObject.close_won_date || "";
+            const closedDate = dealObject.payment_date || dealObject.closed_date || dealObject.close_won_date || "";
+            const price = dealObject.price || "";
             if (!leadId || !String(productModel || "").trim()) continue;
-            knownDealsBySignature.set(getCrm1DealSignature(leadId, productModel, closedDate), { ...dealObject, rowNumber: i + 1 });
+            knownDealsBySignature.set(getCrm1DealSignature(leadId, productModel, closedDate, price), { ...dealObject, rowNumber: i + 1 });
         }
 
         for (let i = 2; i < activityRows.length; i++) {
@@ -1204,17 +1379,22 @@ async function handleLegacyCrm1Import(req, res) {
                     const rawProvince = getCrm1Value(dataRow.row, headerMap, "province");
                     const rawZone = getCrm1Value(dataRow.row, headerMap, "zone");
                     const productModel = getCrm1Value(dataRow.row, headerMap, "product_model");
-                    const deviceCount = "";
-                    const paymentDate = getCrm1Value(dataRow.row, headerMap, "payment_date");
+                    const deviceCount = getCrm1Value(dataRow.row, headerMap, "device_count");
+                    const paymentDateRaw = getCrm1Value(dataRow.row, headerMap, "payment_date");
                     const paymentSlipUrl = getCrm1Value(dataRow.row, headerMap, "payment_slip_url");
-                    const price = "";
-                    const installDateRaw = "";
+                    const price = getCrm1Value(dataRow.row, headerMap, "price");
+                    const installDateRaw = getCrm1Value(dataRow.row, headerMap, "install_date");
                     const installTime = "";
-                    const installStatus = "";
-                    const address = "";
+                    const installStatusRaw = getCrm1Value(dataRow.row, headerMap, "install_status");
+                    const address = getCrm1Value(dataRow.row, headerMap, "address");
                     const lastContactDateRaw = getCrm1Value(dataRow.row, headerMap, "last_contact_date");
                     const nextStepDateRaw = getCrm1Value(dataRow.row, headerMap, "next_follow_up");
                     const closedDateRaw = getCrm1Value(dataRow.row, headerMap, "closed_date");
+                    const outstandingAmount = getCrm1Value(dataRow.row, headerMap, "outstanding_amount");
+                    const afterSales30Days = getCrm1Value(dataRow.row, headerMap, "after_sales_30_days");
+                    const formNotiDateRaw = getCrm1Value(dataRow.row, headerMap, "form_noti_date");
+                    const formStatus = getCrm1Value(dataRow.row, headerMap, "form_status");
+                    const week = getCrm1Value(dataRow.row, headerMap, "week");
                     const contactMethod = getCrm1Value(dataRow.row, headerMap, "activity_type");
                     const followUpCount = getCrm1Value(dataRow.row, headerMap, "followup_count");
                     const priority = normalizeCrm1Priority(getCrm1Value(dataRow.row, headerMap, "priority"));
@@ -1242,14 +1422,31 @@ async function handleLegacyCrm1Import(req, res) {
                     const normalizedSource = mapLegacySource(source || layout.defaultSource || block.normalizedMarker || block.marker, mappingRules);
                     const reason = mapLegacyReason(cleanReason || stage, mappingRules);
                     const installDate = parseLegacyDateValue(installDateRaw).value;
+                    const paymentDate = parseLegacyDateValue(paymentDateRaw).value;
                     const lastContactDate = parseLegacyDateValue(lastContactDateRaw).value;
                     const nextStepDate = parseLegacyDateValue(nextStepDateRaw).value;
                     const closedDate = parseLegacyDateValue(closedDateRaw).value;
-                    const leadStatus = closedDate ? "Closed Won" : "Legacy Import";
+                    const formNotiDate = parseLegacyDateValue(formNotiDateRaw).value;
+                    const paymentStatus = normalizeCrm1PaymentStatus(installStatusRaw);
+                    const installationStatus = normalizeCrm1InstallationStatus(installStatusRaw);
+                    const layout3Status = layout.id === "crm1_layout_3" ? getCrm1Layout3LeadStatus(installStatusRaw) : "";
+                    const leadStatus = layout3Status || (closedDate ? "Closed Won" : "Legacy Import");
                     const audioItems = detectCrm1Audio(dataRow.row, headerMap, block.marker, dataRow.rowNumber, normalizedPhone);
                     const hasDealData = hasAnyValue({ productModel, deviceCount, paymentDate, paymentSlipUrl, price });
-                    const hasInstallationData = hasAnyValue({ installDate, installTime, installStatus, address, zone });
-                    const hasActivityData = hasAnyValue({ contactMethod, lastContactDate, nextStepDate, note, followUpCount }) || audioItems.length > 0;
+                    const hasInstallationData = hasAnyValue({ installDate, installTime, installationStatus, address, zone });
+                    const hasLayout3ActivityData = layout.id === "crm1_layout_3" && hasAnyValue({
+                        price,
+                        paymentDate,
+                        outstandingAmount,
+                        paymentSlipUrl,
+                        installDate,
+                        address,
+                        deviceCount,
+                        afterSales30Days,
+                        formNotiDate,
+                        formStatus,
+                    });
+                    const hasActivityData = hasLayout3ActivityData || hasAnyValue({ contactMethod, lastContactDate, nextStepDate, note, followUpCount }) || audioItems.length > 0;
                     const existingLeadObject = knownLeadsByPhone.get(normalizedPhone);
                     const duplicateQueued = queuedPhones.has(normalizedPhone);
                     const wouldUpdate = Boolean(existingLeadObject || duplicateQueued);
@@ -1281,6 +1478,8 @@ async function handleLegacyCrm1Import(req, res) {
                         adminName,
                         normalizedSource,
                         leadStatus,
+                        finalLeadStatus: leadStatus,
+                        statusUpdateOnlyIfBlankOrNew: layout.id === "crm1_layout_3" && !layout3Status,
                         rawCustomerType,
                         stageRaw,
                         stage,
@@ -1294,20 +1493,43 @@ async function handleLegacyCrm1Import(req, res) {
                         roomCount,
                         floorType,
                         month,
+                        week,
+                        address,
                         rawProvince,
                         province: provinceResult.province,
                         zone,
                         productModel,
+                        deviceCount,
+                        price,
                         paymentDate,
                         paymentSlipUrl,
+                        outstandingAmount,
                         lastContactDate,
                         nextStepDate,
                         closedDate,
+                        installDate,
+                        installStatusRaw,
+                        paymentStatus,
+                        installationStatus,
+                        afterSales30Days,
+                        formNotiDate,
+                        formStatus,
                         activityType: contactMethod,
                         followUpCount,
                         priority,
                         audioLink,
                         hasActivityData,
+                        layoutId: layout.id,
+                        dealNote: [
+                            deviceCount ? `Device Count: ${deviceCount}` : "",
+                            outstandingAmount ? `Outstanding: ${outstandingAmount}` : "",
+                            paymentSlipUrl ? `Payment Slip: ${paymentSlipUrl}` : "",
+                            installStatusRaw ? `Install Status: ${installStatusRaw}` : "",
+                            address ? `Location: ${address}` : "",
+                        ].filter(Boolean).join("\n"),
+                        dealDedupeDate: layout.id === "crm1_layout_3" ? paymentDate : closedDate,
+                        dealDedupePrice: layout.id === "crm1_layout_3" ? price : "",
+                        dealDedupeFallback: layout.id === "crm1_layout_3" && !paymentDate ? dataRow.rowNumber : "",
                         existingLeadObject,
                         wouldUpdate,
                         rawObject: {
@@ -1339,9 +1561,19 @@ async function handleLegacyCrm1Import(req, res) {
                             last_contact_date: lastContactDate,
                             followup_count: followUpCount,
                             product_model: productModel,
+                            price,
+                            payment_date: paymentDate,
+                            payment_status: paymentStatus,
                             closed_date: closedDate,
                             install_date: installDate,
-                            install_status: installStatus,
+                            install_status: installationStatus,
+                            install_status_raw: installStatusRaw,
+                            device_count: deviceCount,
+                            outstanding_amount: outstandingAmount,
+                            payment_slip_url: paymentSlipUrl,
+                            after_sales_30_days: afterSales30Days,
+                            form_noti_date: formNotiDate,
+                            form_status: formStatus,
                             stage_raw: stageRaw,
                             stage,
                             reason_raw: rawReason,
@@ -1350,6 +1582,8 @@ async function handleLegacyCrm1Import(req, res) {
                             audio_link: audioLink,
                             priority,
                             month,
+                            week,
+                            address,
                             note_preview: note,
                             would_create_lead: !wouldUpdate,
                             would_create_deal: hasDealData,
@@ -1451,7 +1685,13 @@ async function handleLegacyCrm1Import(req, res) {
                     }
 
                     if (String(record.productModel || "").trim()) {
-                        const dealSignature = getCrm1DealSignature(leadId, record.productModel, record.closedDate);
+                        const dealSignature = getCrm1DealSignature(
+                            leadId,
+                            record.productModel,
+                            record.dealDedupeDate,
+                            record.dealDedupePrice,
+                            record.dealDedupeFallback
+                        );
                         const existingDeal = knownDealsBySignature.get(dealSignature);
                         const dealId = existingDeal?.deal_id || generateImportId("DEAL");
                         const dealObject = buildCrm1DealObject(record, leadId, dealId);
@@ -1472,19 +1712,22 @@ async function handleLegacyCrm1Import(req, res) {
                     }
 
                     if (record.hasActivityData) {
-                        const activityObject = buildCrm1ActivityObject(record, leadId);
-                        const signature = getActivitySignature(activityObject);
+                        const activityObjects = buildCrm1ActivityObjects(record, leadId);
 
-                        if (existingActivitySignatures.has(signature)) {
-                            skippedDuplicateActivities++;
-                        } else if (activityCreates.length >= maxActivitiesPerRun) {
-                            skippedActivityLimit++;
-                        } else {
-                            activityCreates.push({ object: activityObject, record });
-                            existingActivitySignatures.add(signature);
-                            createdActivities++;
-                            if (createdActivities % 25 === 0) {
-                                console.log("Processed activities:", createdActivities);
+                        for (const activityObject of activityObjects) {
+                            const signature = getActivitySignature(activityObject);
+
+                            if (existingActivitySignatures.has(signature)) {
+                                skippedDuplicateActivities++;
+                            } else if (activityCreates.length >= maxActivitiesPerRun) {
+                                skippedActivityLimit++;
+                            } else {
+                                activityCreates.push({ object: activityObject, record });
+                                existingActivitySignatures.add(signature);
+                                createdActivities++;
+                                if (createdActivities % 25 === 0) {
+                                    console.log("Processed activities:", createdActivities);
+                                }
                             }
                         }
                     }
