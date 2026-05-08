@@ -843,13 +843,12 @@ function getCrm1FinalLeadStatus(record) {
     return record.closedDate ? "Closed Won" : "Legacy Import";
 }
 
-function getCrm1DealSignature(leadId, productModel, dateValue, price = "", fallback = "") {
+function getCrm1DealSignature(leadId, productModel, dateValue, price = "") {
     return [
         String(leadId || "").trim(),
         String(productModel || "").trim().toLowerCase(),
         String(dateValue || "").trim(),
         String(price || "").trim(),
-        String(fallback || "").trim(),
     ].join("|");
 }
 
@@ -1593,7 +1592,6 @@ async function handleLegacyCrm1Import(req, res) {
                         ].filter(Boolean).join("\n"),
                         dealDedupeDate: layout.id === "crm1_layout_3" ? paymentDate : closedDate,
                         dealDedupePrice: layout.id === "crm1_layout_3" ? price : "",
-                        dealDedupeFallback: layout.id === "crm1_layout_3" && !paymentDate ? dataRow.rowNumber : "",
                         existingLeadObject,
                         wouldUpdate,
                         rawObject: {
@@ -1753,14 +1751,15 @@ async function handleLegacyCrm1Import(req, res) {
                             leadId,
                             record.productModel,
                             record.dealDedupeDate,
-                            record.dealDedupePrice,
-                            record.dealDedupeFallback
+                            record.dealDedupePrice
                         );
                         const existingDeal = knownDealsBySignature.get(dealSignature);
                         const dealId = existingDeal?.deal_id || generateImportId("DEAL");
                         const dealObject = buildCrm1DealObject(record, leadId, dealId);
 
-                        if (existingDeal?.rowNumber) {
+                        if (existingDeal?.rowNumber && record.layoutId === "crm1_layout_3") {
+                            dealsSkippedDuplicate++;
+                        } else if (existingDeal?.rowNumber) {
                             dealUpdates.push({
                                 rowNumber: existingDeal.rowNumber,
                                 object: dealObject,
