@@ -567,6 +567,13 @@ function getCrm1MaxActivitiesPerRun(req) {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CRM1_MAX_ACTIVITIES_PER_RUN;
 }
 
+function getCrm1MaxLeadUpdates(req) {
+    const raw = String(req.query.max_lead_updates || "").trim();
+    const parsed = Number.parseInt(raw, 10);
+
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function parseCrm1BooleanQuery(value) {
     return String(value || "").trim().toLowerCase() === "true";
 }
@@ -661,6 +668,91 @@ async function appendCrm1ActivityRows(sheets, spreadsheetId, activityRows, activ
         range: `ACTIVITY_LOG!A${startRow}:${endColumn}${endRow}`,
         valueInputOption: "USER_ENTERED",
         requestBody: { values },
+    });
+}
+
+function normalizeCrm1ComparableValue(value) {
+    return String(value ?? "").trim();
+}
+
+function buildCrm1LeadUpdatePlan(headers, update) {
+    const changedKeys = new Set();
+    const object = update.object || {};
+    const existingObject = update.existingObject || {};
+
+    for (const header of headers) {
+        const key = googleSheets.normalizeHeaderName(header);
+        if (!key || key === "updated_at" || !Object.prototype.hasOwnProperty.call(object, key)) continue;
+
+        const currentValue = normalizeCrm1ComparableValue(existingObject[key]);
+        const nextValue = normalizeCrm1ComparableValue(object[key]);
+        if (currentValue !== nextValue) changedKeys.add(key);
+    }
+
+    if (!changedKeys.size) return null;
+    if (Object.prototype.hasOwnProperty.call(object, "updated_at")) {
+        changedKeys.add("updated_at");
+    }
+
+    const ranges = [];
+    let currentGroup = null;
+
+    headers.forEach((header, index) => {
+        const key = googleSheets.normalizeHeaderName(header);
+        if (!changedKeys.has(key)) {
+            if (currentGroup) {
+                ranges.push(currentGroup);
+                currentGroup = null;
+            }
+            return;
+        }
+
+        const value = object[key] ?? "";
+        if (!currentGroup) {
+            currentGroup = {
+                startIndex: index,
+                endIndex: index,
+                values: [value],
+            };
+            return;
+        }
+
+        if (index === currentGroup.endIndex + 1) {
+            currentGroup.endIndex = index;
+            currentGroup.values.push(value);
+            return;
+        }
+
+        ranges.push(currentGroup);
+        currentGroup = {
+            startIndex: index,
+            endIndex: index,
+            values: [value],
+        };
+    });
+
+    if (currentGroup) ranges.push(currentGroup);
+
+    return {
+        rowNumber: update.rowNumber,
+        update,
+        ranges: ranges.map(group => ({
+            range: `LEADS_MAIN!${columnToLetter(group.startIndex + 1)}${update.rowNumber}:${columnToLetter(group.endIndex + 1)}${update.rowNumber}`,
+            values: [group.values],
+        })),
+    };
+}
+
+async function batchUpdateCrm1LeadRows(sheets, spreadsheetId, plans) {
+    const data = plans.flatMap(plan => plan.ranges);
+    if (!data.length) return;
+
+    await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+            valueInputOption: "USER_ENTERED",
+            data,
+        },
     });
 }
 
@@ -771,6 +863,7 @@ async function handleLegacyCrm1Import(req, res) {
     const requestedLayoutId = String(req.query.layout || "").trim();
     const requestedSheetName = String(req.query.sheet_name || req.query.source_sheet || "").trim();
     const maxActivitiesPerRun = getCrm1MaxActivitiesPerRun(req);
+    const maxLeadUpdates = getCrm1MaxLeadUpdates(req);
     const debugOnly = parseCrm1BooleanQuery(req.query.debug_only);
     const writeScope = getCrm1WriteScope(req);
     const timeoutMs = debugOnly ? DEBUG_CRM1_TIMEOUT_MS : DEFAULT_CRM1_TIMEOUT_MS;
@@ -785,6 +878,7 @@ async function handleLegacyCrm1Import(req, res) {
             debug_only: debugOnly,
             write_scope: writeScope,
             max_activities_per_run: maxActivitiesPerRun,
+            max_lead_updates: maxLeadUpdates,
         });
 
         const { sheets, spreadsheetId } = await withCrm1Timeout(
@@ -881,6 +975,11 @@ async function handleLegacyCrm1Import(req, res) {
         let createdActivities = 0;
         let skippedDuplicateActivities = 0;
         let skippedActivityLimit = 0;
+        let leadsUpdateCandidates = 0;
+        let leadsSkippedUnchanged = 0;
+        let leadsUpdated = 0;
+        let leadUpdateBatches = 0;
+        let skippedLeadUpdateLimit = 0;
 
         if (missingRequiredHeaders.length) {
             return res.status(400).json({
@@ -1166,8 +1265,8 @@ async function handleLegacyCrm1Import(req, res) {
                             rowNumber: existingLead.rowNumber,
                             object: buildCrm1LeadObject(record, leadId, existingLead),
                             record,
+                            existingObject: existingLead,
                         });
-                        updatedExistingLeads++;
                     } else if (currentLead && !currentLead.rowNumber) {
                         leadId = currentLead.lead_id;
                     } else {
@@ -1237,6 +1336,18 @@ async function handleLegacyCrm1Import(req, res) {
                 skipped_activity_limit: skippedActivityLimit,
             });
 
+            const leadUpdatePlans = leadUpdates
+                .map(update => buildCrm1LeadUpdatePlan(leadHeaders, update))
+                .filter(Boolean);
+            leadsUpdateCandidates = leadUpdates.length;
+            leadsSkippedUnchanged = leadUpdates.length - leadUpdatePlans.length;
+            skippedLeadUpdateLimit = maxLeadUpdates === null
+                ? 0
+                : Math.max(0, leadUpdatePlans.length - maxLeadUpdates);
+            const leadUpdatePlansToWrite = maxLeadUpdates === null
+                ? leadUpdatePlans
+                : leadUpdatePlans.slice(0, maxLeadUpdates);
+
             if (debugOnly) {
                 logCrm1Step(diagnostics, "before response", { debug_only: true });
                 return res.status(200).json({
@@ -1253,6 +1364,12 @@ async function handleLegacyCrm1Import(req, res) {
                     skipped_invalid_phone: rowsMissingPhone,
                     leads_to_insert: leadCreates.length,
                     leads_to_update: leadUpdates.length,
+                    leads_update_candidates: leadsUpdateCandidates,
+                    leads_updated: 0,
+                    leads_skipped_unchanged: leadsSkippedUnchanged,
+                    lead_update_batches: 0,
+                    skipped_lead_update_limit: skippedLeadUpdateLimit,
+                    max_lead_updates: maxLeadUpdates,
                     details_to_write: detailCreates.length + detailUpdates.length,
                     activities_to_write: activityCreates.length,
                     skipped_duplicates: skippedDuplicateActivities,
@@ -1298,24 +1415,40 @@ async function handleLegacyCrm1Import(req, res) {
             }
 
             if (canWriteCrm1Scope(writeScope, "leads_only")) {
-                for (const update of leadUpdates) {
-                    assertCrm1TimeRemaining(diagnostics, "write LEADS_MAIN updates");
+                logCrm1Step(diagnostics, "before writing LEADS_MAIN updates", {
+                    candidates: leadsUpdateCandidates,
+                    changed: leadUpdatePlans.length,
+                    to_write: leadUpdatePlansToWrite.length,
+                    skipped_unchanged: leadsSkippedUnchanged,
+                    skipped_limit: skippedLeadUpdateLimit,
+                });
+
+                const chunkSize = 25;
+                for (let i = 0; i < leadUpdatePlansToWrite.length; i += chunkSize) {
+                    assertCrm1TimeRemaining(diagnostics, "write LEADS_MAIN update batch");
+                    const chunk = leadUpdatePlansToWrite.slice(i, i + chunkSize);
                     try {
-                        logCrm1LeadMainWrite(leadHeaders, update.object, update.record, "update", update.rowNumber);
+                        for (const plan of chunk) {
+                            logCrm1LeadMainWrite(leadHeaders, plan.update.object, plan.update.record, "update", plan.rowNumber);
+                        }
                         await withCrm1Timeout(
-                            googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.object),
+                            batchUpdateCrm1LeadRows(sheets, spreadsheetId, chunk),
                             diagnostics,
-                            "write LEADS_MAIN update"
+                            "write LEADS_MAIN update batch"
                         );
+                        leadsUpdated += chunk.length;
+                        updatedExistingLeads += chunk.length;
+                        leadUpdateBatches++;
                     } catch (err) {
                         if (err.code === "CRM1_IMPORT_TIMEOUT") throw err;
-                        failedRows++;
-                        updatedExistingLeads--;
+                        failedRows += chunk.length;
                     }
                 }
                 logCrm1Step(diagnostics, "after writing LEADS_MAIN", {
                     inserts: leadCreates.length,
-                    updates: leadUpdates.length,
+                    updates: leadsUpdated,
+                    skipped_unchanged: leadsSkippedUnchanged,
+                    batches: leadUpdateBatches,
                 });
             }
 
@@ -1443,6 +1576,12 @@ async function handleLegacyCrm1Import(req, res) {
             failed_rows: failedRows,
             inserted_leads: insertedLeads,
             updated_existing_leads: updatedExistingLeads,
+            leads_update_candidates: leadsUpdateCandidates,
+            leads_updated: leadsUpdated,
+            leads_skipped_unchanged: leadsSkippedUnchanged,
+            lead_update_batches: leadUpdateBatches,
+            skipped_lead_update_limit: skippedLeadUpdateLimit,
+            max_lead_updates: maxLeadUpdates,
             created_activities: createdActivities,
             skipped_duplicate_activities: skippedDuplicateActivities,
             skipped_activity_limit: skippedActivityLimit,
