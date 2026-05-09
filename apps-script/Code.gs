@@ -82,6 +82,7 @@ function onEdit(e) {
 
   const sheet = e.range.getSheet();
   if (sheet.getName() === 'DEALS') {
+    ensureDealsPaymentStatusDropdownForRow(e.range.getRow(), sheet);
     handleDealPaymentStatusEdit_(e);
     return;
   }

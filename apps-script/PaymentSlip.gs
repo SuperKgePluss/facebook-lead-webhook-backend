@@ -7,6 +7,9 @@
 const PAYMENT_SLIP_FOLDER_ID = '13ntH9hor9cYnTEL_exsIJZ2T7Y9wyRma';
 const PAYMENT_SLIP_MAX_FOLDERS_SCANNED = 50;
 const PAYMENT_SLIP_MAX_FILES_SCANNED = 500;
+const DEALS_PAYMENT_STATUS_VALUES = ['Unpaid', 'Paid', 'Cancelled'];
+const DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY = 'DEALS_PAYMENT_STATUS_REFRESH_NEXT_ROW';
+const DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE = 100;
 
 function handleDealPaymentStatusEdit_(e) {
   try {
@@ -22,11 +25,12 @@ function handleDealPaymentStatusEdit_(e) {
     const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
     const paymentStatusColumn = headerMap.payment_status;
     const paymentSlipUrlColumn = headerMap.payment_slip_url;
+    const paymentSlipSaveStatusColumn = headerMap.payment_slip_save_status;
     const leadIdColumn = headerMap.lead_id;
     const paymentDateColumn = headerMap.payment_date;
 
     Logger.log('Payment slip edited header=' + editedHeader);
-    Logger.log('Payment slip detected columns payment_status=' + paymentStatusColumn + ' payment_slip_url=' + paymentSlipUrlColumn + ' lead_id=' + leadIdColumn + ' payment_date=' + paymentDateColumn);
+    Logger.log('Payment slip detected columns payment_status=' + paymentStatusColumn + ' payment_slip_url=' + paymentSlipUrlColumn + ' payment_slip_save_status=' + paymentSlipSaveStatusColumn + ' lead_id=' + leadIdColumn + ' payment_date=' + paymentDateColumn);
 
     if (!paymentStatusColumn || !paymentSlipUrlColumn || !leadIdColumn) {
       Logger.log('Payment slip automation skipped: DEALS required headers missing.');
@@ -37,6 +41,8 @@ function handleDealPaymentStatusEdit_(e) {
       Logger.log('Payment slip automation skipped: edited column is not Payment Status.');
       return;
     }
+
+    ensureDealsPaymentStatusDropdownForRow(e.range.getRow(), sheet);
 
     const currentPaymentStatus = String(e.range.getValue() || e.value || '').trim();
     Logger.log('Payment slip detected payment status=' + currentPaymentStatus);
@@ -49,6 +55,7 @@ function handleDealPaymentStatusEdit_(e) {
     const existingSlipUrl = String(sheet.getRange(row, paymentSlipUrlColumn).getValue() || '').trim();
     if (existingSlipUrl) {
       Logger.log('Payment slip automation skipped: Payment Slip URL already exists on row ' + row);
+      writePaymentSlipSaveStatus_(sheet, row, 'มีลิงก์สลิปแล้ว');
       return;
     }
 
@@ -59,20 +66,195 @@ function handleDealPaymentStatusEdit_(e) {
     Logger.log('Payment slip folder id=' + PAYMENT_SLIP_FOLDER_ID);
     if (!leadId) {
       Logger.log('Payment slip automation skipped: Lead ID missing on row ' + row);
+      writePaymentSlipSaveStatus_(sheet, row, 'ไม่พบรหัสลูกค้า');
       return;
     }
 
     const file = findPaymentSlipFile(leadId, paymentDate);
     if (!file) {
       Logger.log('Payment slip automation: no matching payment slip found for Lead ID ' + leadId);
+      writePaymentSlipSaveStatus_(sheet, row, 'ไม่พบไฟล์สลิป');
       return;
     }
 
     sheet.getRange(row, paymentSlipUrlColumn).setValue(buildDriveFileUrl(file.getId()));
+    writePaymentSlipSaveStatus_(sheet, row, 'บันทึกลิงก์สลิปแล้ว');
     Logger.log('Payment slip automation: wrote slip URL for Lead ID ' + leadId + ' from file ' + file.getName());
   } catch (err) {
     Logger.log('Payment slip automation failed safely: ' + err.message);
+    if (e && e.range && e.range.getSheet && e.range.getSheet().getName() === 'DEALS') {
+      writePaymentSlipSaveStatus_(e.range.getSheet(), e.range.getRow(), 'บันทึกสลิปไม่สำเร็จ');
+    }
   }
+}
+
+function writePaymentSlipSaveStatus_(sheet, row, message) {
+  if (!sheet || sheet.getName() !== 'DEALS' || row < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  const statusColumn = headerMap.payment_slip_save_status;
+  if (!statusColumn) {
+    Logger.log('Payment Slip Save Status column is missing; status message not written: ' + message);
+    return;
+  }
+
+  sheet.getRange(row, statusColumn).setValue(message);
+}
+
+function setupDealsPaymentUi() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet) return;
+
+  ensureDealsPaymentColumns_(sheet);
+  refreshDealsPaymentStatusDropdownsLight();
+}
+
+function ensureDealsPaymentColumns_(sheet) {
+  let headerMap = getHeaderMap_(sheet);
+
+  if (!headerMap.full_amount) {
+    const paidAmountColumn = headerMap.paid_amount || headerMap.price || headerMap.payment_status || 5;
+    sheet.insertColumnBefore(paidAmountColumn);
+    sheet.getRange(HEADER_ROW, paidAmountColumn).setValue('Full Amount');
+    sheet.getRange(HEADER_ROW + 1, paidAmountColumn).setValue('ยอดเต็ม');
+    Logger.log('Inserted DEALS Full Amount column at column ' + paidAmountColumn);
+  }
+
+  headerMap = getHeaderMap_(sheet);
+  if (!headerMap.paid_amount && headerMap.price) {
+    sheet.getRange(HEADER_ROW, headerMap.price).setValue('Paid Amount');
+    sheet.getRange(HEADER_ROW + 1, headerMap.price).setValue('ยอดที่ชำระแล้ว');
+    Logger.log('Renamed DEALS Price column to Paid Amount at column ' + headerMap.price);
+  } else if (headerMap.paid_amount) {
+    sheet.getRange(HEADER_ROW, headerMap.paid_amount).setValue('Paid Amount');
+    sheet.getRange(HEADER_ROW + 1, headerMap.paid_amount).setValue('ยอดที่ชำระแล้ว');
+  }
+
+  headerMap = getHeaderMap_(sheet);
+  if (!headerMap.payment_slip_save_status) {
+    const insertAfterColumn = headerMap.payment_slip_url || sheet.getLastColumn();
+    sheet.insertColumnAfter(insertAfterColumn);
+    sheet.getRange(HEADER_ROW, insertAfterColumn + 1).setValue('Payment Slip Save Status');
+    sheet.getRange(HEADER_ROW + 1, insertAfterColumn + 1).setValue('สถานะการบันทึกสลิป');
+    Logger.log('Inserted DEALS Payment Slip Save Status column after column ' + insertAfterColumn);
+  }
+
+  setDealsHeaderLabels_(sheet);
+}
+
+function setDealsHeaderLabels_(sheet) {
+  const labels = {
+    deal_id: ['Deal ID', 'รหัสดีล'],
+    lead_id: ['Lead ID', 'รหัสลูกค้า'],
+    product_model: ['Product Model', 'รุ่นสินค้า'],
+    package_type: ['Package Type', 'แพ็กเกจ'],
+    full_amount: ['Full Amount', 'ยอดเต็ม'],
+    paid_amount: ['Paid Amount', 'ยอดที่ชำระแล้ว'],
+    payment_status: ['Payment Status', 'สถานะการชำระเงิน'],
+    payment_date: ['Payment Date', 'วันที่ชำระเงิน'],
+    payment_slip_url: ['Payment Slip URL', 'ลิงก์สลิป'],
+    payment_slip_save_status: ['Payment Slip Save Status', 'สถานะการบันทึกสลิป'],
+  };
+
+  const headerMap = getHeaderMap_(sheet);
+  Object.keys(labels).forEach(key => {
+    const column = headerMap[key];
+    if (!column) return;
+    sheet.getRange(HEADER_ROW, column).setValue(labels[key][0]);
+    sheet.getRange(HEADER_ROW + 1, column).setValue(labels[key][1]);
+  });
+}
+
+function isDealsPaymentStatusDropdownCell_(cell) {
+  const validation = cell.getDataValidation();
+  if (!validation || validation.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+    return false;
+  }
+
+  const criteriaValues = validation.getCriteriaValues();
+  const values = criteriaValues && criteriaValues[0] ? criteriaValues[0] : [];
+  return values.join('|') === DEALS_PAYMENT_STATUS_VALUES.join('|');
+}
+
+function getDealsPaymentStatusValidation_() {
+  return SpreadsheetApp
+    .newDataValidation()
+    .requireValueInList(DEALS_PAYMENT_STATUS_VALUES, true)
+    .setAllowInvalid(false)
+    .build();
+}
+
+function ensureDealsPaymentStatusDropdownForRow(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet || sheet.getName() !== 'DEALS' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const dealIdColumn = headerMap.deal_id;
+  const leadIdColumn = headerMap.lead_id;
+  const paymentStatusColumn = headerMap.payment_status;
+  if (!dealIdColumn || !leadIdColumn || !paymentStatusColumn) return false;
+
+  const dealId = String(sheet.getRange(row, dealIdColumn).getValue() || '').trim();
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  const statusCell = sheet.getRange(row, paymentStatusColumn);
+  const currentStatus = String(statusCell.getValue() || '').trim();
+  let changed = false;
+
+  if (dealId && leadId) {
+    if (!isDealsPaymentStatusDropdownCell_(statusCell)) {
+      statusCell.setDataValidation(getDealsPaymentStatusValidation_());
+      changed = true;
+    }
+    if (!currentStatus) {
+      statusCell.setValue('Unpaid');
+      changed = true;
+    }
+    return changed;
+  }
+
+  if (!dealId && !leadId && !currentStatus && statusCell.getDataValidation()) {
+    statusCell.clearDataValidations();
+    changed = true;
+  }
+
+  return changed;
+}
+
+function refreshDealsPaymentStatusDropdownsLight() {
+  const properties = PropertiesService.getScriptProperties();
+  const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.payment_status) return;
+
+  const savedCursor = Number(properties.getProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY));
+  const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
+    ? savedCursor
+    : DATA_START_ROW;
+  const endRow = Math.min(startRow + DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE - 1, lastRow);
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = startRow; row <= endRow; row++) {
+    checked++;
+    if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
+  }
+
+  const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
+  properties.setProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY, String(nextCursor));
+
+  Logger.log('refreshDealsPaymentStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+}
+
+function resetDealsPaymentStatusDropdownRefreshCursor() {
+  PropertiesService
+    .getScriptProperties()
+    .setProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY, String(DATA_START_ROW));
+  Logger.log('DEALS payment status dropdown refresh cursor reset to ' + DATA_START_ROW);
 }
 
 function findPaymentSlipFile(leadId, paymentDate) {
