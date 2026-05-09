@@ -1,2 +1,4 @@
+# .clasp.json sets rootDir to apps-script, so these patterns are relative to apps-script.
 **
-!apps-script/**
+!*.gs
+!appsscript.json
