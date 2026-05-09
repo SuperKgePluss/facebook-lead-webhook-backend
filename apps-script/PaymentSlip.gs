@@ -4,7 +4,7 @@
 // 2. Replace PAYMENT_SLIP_FOLDER_ID with the Google Drive folder that stores payment slip files.
 // 3. Create an installable "On edit" trigger for onEdit so DriveApp authorization is available.
 // 4. Test by changing DEALS.Payment Status to "paid" on a row whose Payment Slip URL is blank.
-const PAYMENT_SLIP_FOLDER_ID = 'PUT_PAYMENT_SLIP_FOLDER_ID_HERE';
+const PAYMENT_SLIP_FOLDER_ID = '13ntH9hor9cYnTEL_exsIJZ2T7Y9wyRma';
 
 function handleDealPaymentStatusEdit_(e) {
   try {
@@ -12,22 +12,36 @@ function handleDealPaymentStatusEdit_(e) {
     if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
 
     const sheet = e.range.getSheet();
+    Logger.log('Payment slip edit sheet=' + sheet.getName() + ' row=' + e.range.getRow() + ' column=' + e.range.getColumn());
     if (sheet.getName() !== 'DEALS') return;
     if (e.range.getRow() < DATA_START_ROW) return;
 
     const headerMap = getHeaderMap_(sheet);
+    const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
     const paymentStatusColumn = headerMap.payment_status;
     const paymentSlipUrlColumn = headerMap.payment_slip_url;
     const leadIdColumn = headerMap.lead_id;
     const paymentDateColumn = headerMap.payment_date;
+
+    Logger.log('Payment slip edited header=' + editedHeader);
+    Logger.log('Payment slip detected columns payment_status=' + paymentStatusColumn + ' payment_slip_url=' + paymentSlipUrlColumn + ' lead_id=' + leadIdColumn + ' payment_date=' + paymentDateColumn);
 
     if (!paymentStatusColumn || !paymentSlipUrlColumn || !leadIdColumn) {
       Logger.log('Payment slip automation skipped: DEALS required headers missing.');
       return;
     }
 
-    if (e.range.getColumn() !== paymentStatusColumn) return;
-    if (String(e.value || '').trim().toLowerCase() !== 'paid') return;
+    if (e.range.getColumn() !== paymentStatusColumn) {
+      Logger.log('Payment slip automation skipped: edited column is not Payment Status.');
+      return;
+    }
+
+    const currentPaymentStatus = String(e.range.getValue() || e.value || '').trim();
+    Logger.log('Payment slip detected payment status=' + currentPaymentStatus);
+    if (currentPaymentStatus.toLowerCase() !== 'paid') {
+      Logger.log('Payment slip automation skipped: Payment Status is not paid.');
+      return;
+    }
 
     const row = e.range.getRow();
     const existingSlipUrl = String(sheet.getRange(row, paymentSlipUrlColumn).getValue() || '').trim();
@@ -38,6 +52,9 @@ function handleDealPaymentStatusEdit_(e) {
 
     const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
     const paymentDate = paymentDateColumn ? sheet.getRange(row, paymentDateColumn).getValue() : '';
+    Logger.log('Payment slip detected leadId=' + leadId);
+    Logger.log('Payment slip detected payment date=' + paymentDate);
+    Logger.log('Payment slip folder id=' + PAYMENT_SLIP_FOLDER_ID);
     if (!leadId) {
       Logger.log('Payment slip automation skipped: Lead ID missing on row ' + row);
       return;
@@ -83,11 +100,18 @@ function findPaymentSlipFile(leadId, paymentDate) {
   while (files.hasNext()) {
     const file = files.next();
     const mimeType = file.getMimeType();
-    if (!supportedMimeTypes[mimeType]) continue;
+    if (!supportedMimeTypes[mimeType]) {
+      Logger.log('Payment slip skipping unsupported file: ' + file.getName() + ' mime=' + mimeType);
+      continue;
+    }
 
     const fileName = String(file.getName() || '');
-    if (fileName.indexOf(targetLeadId) === -1) continue;
+    if (fileName.indexOf(targetLeadId) === -1) {
+      Logger.log('Payment slip skipping non-matching file: ' + fileName);
+      continue;
+    }
 
+    Logger.log('Payment slip candidate file: ' + fileName + ' / ' + file.getId());
     leadMatches.push(file);
   }
 
@@ -122,4 +146,41 @@ function formatDateForFileName(dateValue) {
   if (!(date instanceof Date) || isNaN(date.getTime())) return '';
 
   return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function debugPaymentSlipForActiveRow() {
+  const sheet = SpreadsheetApp.getActiveSheet();
+  if (!sheet || sheet.getName() !== 'DEALS') {
+    Logger.log('Select a DEALS row before running debugPaymentSlipForActiveRow.');
+    return;
+  }
+
+  const row = sheet.getActiveRange().getRow();
+  if (row < DATA_START_ROW) {
+    Logger.log('Select a data row before running debugPaymentSlipForActiveRow.');
+    return;
+  }
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  const paymentStatusColumn = headerMap.payment_status;
+  const paymentDateColumn = headerMap.payment_date;
+  const paymentSlipUrlColumn = headerMap.payment_slip_url;
+
+  Logger.log('Debug payment slip row=' + row);
+  Logger.log('Columns lead_id=' + leadIdColumn + ' payment_status=' + paymentStatusColumn + ' payment_date=' + paymentDateColumn + ' payment_slip_url=' + paymentSlipUrlColumn);
+
+  const leadId = leadIdColumn ? String(sheet.getRange(row, leadIdColumn).getValue() || '').trim() : '';
+  const paymentStatus = paymentStatusColumn ? String(sheet.getRange(row, paymentStatusColumn).getValue() || '').trim() : '';
+  const paymentDate = paymentDateColumn ? sheet.getRange(row, paymentDateColumn).getValue() : '';
+  const existingSlipUrl = paymentSlipUrlColumn ? String(sheet.getRange(row, paymentSlipUrlColumn).getValue() || '').trim() : '';
+
+  Logger.log('Lead ID=' + leadId);
+  Logger.log('Payment Status=' + paymentStatus);
+  Logger.log('Payment Date=' + paymentDate);
+  Logger.log('Payment Slip URL exists=' + Boolean(existingSlipUrl));
+  Logger.log('Folder ID=' + PAYMENT_SLIP_FOLDER_ID);
+
+  const file = findPaymentSlipFile(leadId, paymentDate);
+  Logger.log(file ? 'Matched payment slip file: ' + file.getName() + ' / ' + file.getId() + ' / ' + buildDriveFileUrl(file.getId()) : 'No matching payment slip file found.');
 }

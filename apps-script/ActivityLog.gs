@@ -115,7 +115,14 @@ function findLatestLeadAudioFile_(phone) {
 
   const prefix = 'LEAD_' + normalizedPhone + '_';
   const fileNamePattern = new RegExp('^LEAD_' + normalizedPhone + '_\\d{8}_\\d{2}_\\d{2}\\.(mp3|m4a|wav|ogg|mp4)$', 'i');
-  const rootFolder = DriveApp.getFolderById(AUDIO_ROOT_FOLDER_ID);
+  let rootFolder;
+
+  try {
+    rootFolder = DriveApp.getFolderById(AUDIO_ROOT_FOLDER_ID);
+  } catch (err) {
+    Logger.log('Follow-up audio search skipped: cannot open audio folder. ' + err.message);
+    return null;
+  }
 
   return findLatestLeadAudioFileInFolder_(rootFolder, prefix, fileNamePattern, null);
 }
@@ -145,4 +152,28 @@ function findLatestLeadAudioFileInFolder_(folder, prefix, fileNamePattern, lates
   }
 
   return currentLatestFile;
+}
+
+function debugFollowUpForActiveRow() {
+  const sheet = SpreadsheetApp.getActiveSheet();
+  if (!sheet || sheet.getName() !== 'LEADS_MAIN') {
+    Logger.log('Select a LEADS_MAIN row before running debugFollowUpForActiveRow.');
+    return;
+  }
+
+  const row = sheet.getActiveRange().getRow();
+  if (row < DATA_START_ROW) {
+    Logger.log('Select a data row before running debugFollowUpForActiveRow.');
+    return;
+  }
+
+  const lead = getRowObject_(sheet, row);
+  Logger.log('Debug follow-up row: ' + row);
+  Logger.log('Lead ID: ' + lead.lead_id);
+  Logger.log('Phone: ' + lead.phone + ' normalized=' + normalizePhone(lead.phone));
+  Logger.log('Follow-up Note exists: ' + Boolean(String(lead.follow_up_note || '').trim()));
+  Logger.log('Audio root folder id: ' + AUDIO_ROOT_FOLDER_ID);
+
+  const file = findLatestLeadAudioFile_(lead.phone);
+  Logger.log(file ? 'Matched audio file: ' + file.getName() + ' / ' + file.getId() : 'No matching audio file found.');
 }

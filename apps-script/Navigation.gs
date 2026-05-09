@@ -44,6 +44,8 @@ function handleOpenDealEdit_(e, sheet, row) {
 }
 
 function handleSaveFollowUpEdit_(e, sheet, row) {
+  if (!e || !e.range || !sheet || !row) return;
+
   if (String(e.value || '').toUpperCase() !== 'TRUE') {
     return;
   }

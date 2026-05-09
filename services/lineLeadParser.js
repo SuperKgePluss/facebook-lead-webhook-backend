@@ -45,7 +45,20 @@ function normalizeLineProvince(value) {
     return raw;
 }
 
+function findPhoneInText(text) {
+    const raw = String(text || "");
+    const candidates = raw.match(/(?:\+?66|0)?[\d][\d\s-]{7,14}\d/g) || [];
+
+    for (const candidate of candidates) {
+        const normalized = normalizePhone(candidate);
+        if (/^0\d{9}$/.test(normalized)) return normalized;
+    }
+
+    return "";
+}
+
 function parseLineLeadMessage(message, profile = {}) {
+    const rawMessage = String(message || "");
     const data = {
         source: "LINE",
         phone: "",
@@ -58,7 +71,7 @@ function parseLineLeadMessage(message, profile = {}) {
         lead_status: "New",
     };
 
-    const lines = String(message || "")
+    const lines = rawMessage
         .split(/\r?\n/)
         .map(line => line.trim())
         .filter(Boolean);
@@ -76,7 +89,7 @@ function parseLineLeadMessage(message, profile = {}) {
         data[fieldName] = value;
     }
 
-    data.phone = normalizePhone(data.phone);
+    data.phone = normalizePhone(data.phone) || findPhoneInText(rawMessage);
     data.customer_name = data.customer_name || data.line_display_name;
     data.province = normalizeLineProvince(data.province);
 
