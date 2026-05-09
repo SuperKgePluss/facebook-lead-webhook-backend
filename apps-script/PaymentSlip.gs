@@ -100,17 +100,17 @@ function handleDealPaymentStatusEdit_(e) {
       return;
     }
 
-    const file = findPaymentSlipFile(leadId, paymentDate);
-    if (!file) {
+    const paymentMatch = findPaymentSlipFile(leadId, paymentDate);
+    if (!paymentMatch.file) {
       Logger.log('Payment slip automation: no matching payment slip found for Lead ID ' + leadId);
-      writePaymentSlipSaveStatus_(sheet, row, 'ไม่พบไฟล์สลิป');
+      writePaymentSlipSaveStatus_(sheet, row, 'ไม่พบไฟล์สลิปใน Google Drive ตามรูปแบบที่กำหนด');
       return;
     }
 
-    sheet.getRange(row, paymentSlipUrlColumn).setValue(buildDriveFileUrl(file.getId()));
+    sheet.getRange(row, paymentSlipUrlColumn).setValue(paymentMatch.fileUrl);
     writePaymentSlipSaveStatus_(sheet, row, 'บันทึกลิงก์สลิปแล้ว');
-    appendPaymentSlipSavedActivity_(sheet, row, file);
-    Logger.log('Payment slip automation: wrote slip URL for Lead ID ' + leadId + ' from file ' + file.getName());
+    appendPaymentSlipSavedActivity_(sheet, row, paymentMatch);
+    Logger.log('Payment slip automation: wrote slip URL for Lead ID ' + leadId + ' from file ' + paymentMatch.fileName + ' parsed=' + paymentMatch.parsedTimestamp + ' matches=' + paymentMatch.matchCount);
   } catch (err) {
     Logger.log('Payment slip automation failed safely: ' + err.message);
     if (e && e.range && e.range.getSheet && e.range.getSheet().getName() === 'DEALS') {
@@ -119,18 +119,18 @@ function handleDealPaymentStatusEdit_(e) {
   }
 }
 
-function appendPaymentSlipSavedActivity_(sheet, row, file) {
+function appendPaymentSlipSavedActivity_(sheet, row, paymentMatch) {
   const deal = getRowObject_(sheet, row);
   const leadId = String(deal.lead_id || '').trim();
-  if (!leadId || !file) return;
+  if (!leadId || !paymentMatch || !paymentMatch.file) return;
 
   appendObjectRow_('ACTIVITY_LOG', {
     activity_id: 'ACT-' + Date.now(),
     lead_id: leadId,
     sheet_name: 'DEALS',
     action_type: 'payment_slip_saved',
-    payment_url: buildDriveFileUrl(file.getId()),
-    payment_file_name: file.getName(),
+    payment_url: paymentMatch.fileUrl,
+    payment_file_name: paymentMatch.fileName,
     created_by: 'SYSTEM',
     created_at: new Date(),
   });
@@ -421,170 +421,22 @@ function setupDealsPaymentStatusConditionalFormatting_() {
 }
 
 function findPaymentSlipFile(leadId, paymentDate) {
-  const targetLeadId = String(leadId || '').trim();
-  const targetDate = formatDateForFileName(paymentDate);
-  const targetDateCompact = targetDate ? targetDate.replace(/-/g, '') : '';
   const supportedMimeTypes = {
     'image/jpeg': true,
     'image/png': true,
     'application/pdf': true,
   };
-
-  if (!targetLeadId || PAYMENT_SLIP_FOLDER_ID === 'PUT_PAYMENT_SLIP_FOLDER_ID_HERE') {
-    Logger.log('Payment slip automation skipped: Lead ID or PAYMENT_SLIP_FOLDER_ID is not configured.');
-    return null;
-  }
-
-  let folder;
-  try {
-    folder = DriveApp.getFolderById(PAYMENT_SLIP_FOLDER_ID);
-  } catch (err) {
-    Logger.log('Payment slip automation skipped: cannot open configured folder. ' + err.message);
-    return null;
-  }
-
-  const scanState = {
-    foldersScanned: 0,
-    filesScanned: 0,
-    folderLimitExceeded: false,
-    fileLimitExceeded: false,
-  };
-  const leadMatches = findPaymentSlipMatchesInFolder_(
-    folder,
-    targetLeadId,
-    targetDate,
-    targetDateCompact,
-    supportedMimeTypes,
-    scanState
-  );
-
-  Logger.log('Payment slip scan complete folders=' + scanState.foldersScanned + ' files=' + scanState.filesScanned);
-  if (scanState.folderLimitExceeded) Logger.log('Payment slip scan stopped: folder scan limit exceeded (' + PAYMENT_SLIP_MAX_FOLDERS_SCANNED + ').');
-  if (scanState.fileLimitExceeded) Logger.log('Payment slip scan stopped: file scan limit exceeded (' + PAYMENT_SLIP_MAX_FILES_SCANNED + ').');
-
-  if (!leadMatches.length) {
-    Logger.log('Payment slip no candidates found. Expected filename containing Lead ID ' + targetLeadId + ', e.g. ' + targetLeadId + '_slip.png or ' + targetLeadId + '_yyyy-MM-dd_HHmm.png');
-    return null;
-  }
-
-  const best = leadMatches.reduce((latestMatch, match) => {
-    if (!latestMatch) return match;
-    if (match.score !== latestMatch.score) return match.score > latestMatch.score ? match : latestMatch;
-    return match.updatedAt > latestMatch.updatedAt ? match : latestMatch;
-  }, null);
-
-  Logger.log('Payment slip selected file: ' + best.file.getName() + ' reason=' + best.reason);
-  return best.file;
-}
-
-function findPaymentSlipMatchesInFolder_(folder, leadId, targetDate, targetDateCompact, supportedMimeTypes, scanState) {
-  const matches = [];
-
-  if (scanState.foldersScanned >= PAYMENT_SLIP_MAX_FOLDERS_SCANNED) {
-    scanState.folderLimitExceeded = true;
-    return matches;
-  }
-
-  scanState.foldersScanned++;
-  Logger.log('Payment slip scanning folder: ' + folder.getName() + ' / ' + folder.getId());
-
-  const files = folder.getFiles();
-  while (files.hasNext()) {
-    if (scanState.filesScanned >= PAYMENT_SLIP_MAX_FILES_SCANNED) {
-      scanState.fileLimitExceeded = true;
-      return matches;
-    }
-
-    const file = files.next();
-    scanState.filesScanned++;
-    const mimeType = file.getMimeType();
-    if (!supportedMimeTypes[mimeType]) {
-      Logger.log('Payment slip skipping unsupported file: ' + file.getName() + ' mime=' + mimeType);
-      continue;
-    }
-
-    const fileName = String(file.getName() || '');
-    const matchInfo = getPaymentSlipMatchInfo_(fileName, leadId, targetDate, targetDateCompact);
-    if (!matchInfo.matched) {
-      Logger.log('Payment slip skipping non-matching file: ' + fileName);
-      continue;
-    }
-
-    Logger.log('Payment slip candidate file: ' + fileName + ' / ' + file.getId() + ' reason=' + matchInfo.reason + ' score=' + matchInfo.score);
-    matches.push({
-      file: file,
-      score: matchInfo.score,
-      reason: matchInfo.reason,
-      updatedAt: file.getLastUpdated().getTime(),
-    });
-  }
-
-  const subfolders = folder.getFolders();
-  while (subfolders.hasNext()) {
-    if (scanState.foldersScanned >= PAYMENT_SLIP_MAX_FOLDERS_SCANNED || scanState.filesScanned >= PAYMENT_SLIP_MAX_FILES_SCANNED) {
-      scanState.folderLimitExceeded = scanState.foldersScanned >= PAYMENT_SLIP_MAX_FOLDERS_SCANNED;
-      scanState.fileLimitExceeded = scanState.filesScanned >= PAYMENT_SLIP_MAX_FILES_SCANNED;
-      break;
-    }
-
-    const subfolder = subfolders.next();
-    Logger.log('Payment slip found subfolder: ' + subfolder.getName() + ' / ' + subfolder.getId());
-    matches.push.apply(matches, findPaymentSlipMatchesInFolder_(
-      subfolder,
-      leadId,
-      targetDate,
-      targetDateCompact,
-      supportedMimeTypes,
-      scanState
-    ));
-  }
-
-  return matches;
-}
-
-function getPaymentSlipMatchInfo_(fileName, leadId, targetDate, targetDateCompact) {
-  const lowerFileName = String(fileName || '').toLowerCase();
-  const lowerLeadId = String(leadId || '').toLowerCase();
-  const lowerTargetDate = String(targetDate || '').toLowerCase();
-
-  if (!lowerFileName || !lowerLeadId || lowerFileName.indexOf(lowerLeadId) === -1) {
-    return { matched: false, score: 0, reason: 'lead_id_not_found' };
-  }
-
-  if (lowerTargetDate) {
-    const dateTimePattern = new RegExp(lowerLeadId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '.*' + lowerTargetDate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '.*\\d{4}');
-    if (dateTimePattern.test(lowerFileName)) {
-      return { matched: true, score: 40, reason: 'lead_id_date_hhmm' };
-    }
-
-    if (lowerFileName.indexOf(lowerTargetDate) !== -1 || (targetDateCompact && lowerFileName.indexOf(targetDateCompact) !== -1)) {
-      return { matched: true, score: 30, reason: 'lead_id_date' };
-    }
-  }
-
-  if (lowerFileName.indexOf(lowerLeadId + '_slip') !== -1 || lowerFileName.indexOf(lowerLeadId + '-slip') !== -1) {
-    return { matched: true, score: 20, reason: 'lead_id_slip' };
-  }
-
-  return { matched: true, score: 10, reason: 'lead_id_fallback' };
+  return findLatestEvidenceFileByLeadId_(PAYMENT_SLIP_FOLDER_ID, leadId, {
+    evidenceType: 'payment_slip',
+    maxFolders: PAYMENT_SLIP_MAX_FOLDERS_SCANNED,
+    maxFiles: PAYMENT_SLIP_MAX_FILES_SCANNED,
+    allowedMimeTypes: supportedMimeTypes,
+  });
 }
 
 function buildDriveFileUrl(fileId) {
   const id = String(fileId || '').trim();
   return id ? 'https://drive.google.com/file/d/' + id + '/view' : '';
-}
-
-function formatDateForFileName(dateValue) {
-  if (!dateValue) return '';
-
-  let date = dateValue;
-  if (!(date instanceof Date)) {
-    date = new Date(dateValue);
-  }
-
-  if (!(date instanceof Date) || isNaN(date.getTime())) return '';
-
-  return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd');
 }
 
 function debugPaymentSlipForActiveRow() {
@@ -620,6 +472,6 @@ function debugPaymentSlipForActiveRow() {
   Logger.log('Payment Slip URL exists=' + Boolean(existingSlipUrl));
   Logger.log('Folder ID=' + PAYMENT_SLIP_FOLDER_ID);
 
-  const file = findPaymentSlipFile(leadId, paymentDate);
-  Logger.log(file ? 'Matched payment slip file: ' + file.getName() + ' / ' + file.getId() + ' / ' + buildDriveFileUrl(file.getId()) : 'No matching payment slip file found.');
+  const paymentMatch = findPaymentSlipFile(leadId, paymentDate);
+  Logger.log(paymentMatch.file ? 'Matched payment slip file: ' + paymentMatch.fileName + ' / ' + paymentMatch.file.getId() + ' / ' + paymentMatch.fileUrl + ' parsed=' + paymentMatch.parsedTimestamp + ' matches=' + paymentMatch.matchCount : 'No matching payment slip file found. Expected format: ' + leadId + '_YYYYMMDD_HH_MM');
 }

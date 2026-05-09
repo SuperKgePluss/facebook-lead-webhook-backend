@@ -429,18 +429,16 @@ function handleSaveLocationEdit_(e, sheet, row) {
   }
 
   const locationFile = findInstallationLocationFile_(
-    leadId,
-    installation.preferred_install_date,
-    installation.preferred_install_time
+    leadId
   );
 
-  if (!locationFile) {
+  if (!locationFile.file) {
     writeInstallSaveStatus_(sheet, row, 'ไม่พบไฟล์สถานที่ติดตั้งใน Google Drive ตามรูปแบบที่กำหนด');
     return;
   }
 
-  const locationUrl = locationFile.getUrl();
-  const locationFileName = locationFile.getName();
+  const locationUrl = locationFile.fileUrl;
+  const locationFileName = locationFile.fileName;
   const note = String(installation.note || '').trim() || buildInstallLocationSummary_(installation);
 
   appendObjectRow_('ACTIVITY_LOG', {
@@ -490,142 +488,12 @@ function buildInstallLocationSummary_(installation) {
   ].filter(Boolean).join('\n');
 }
 
-function findInstallationLocationFile_(leadId, installDate, installTime) {
-  const targetLeadId = String(leadId || '').trim();
-  const datePart = formatLocationDatePart_(installDate);
-  const timePart = formatLocationTimePart_(installTime);
-  const expectedPrefix = targetLeadId && datePart && timePart
-    ? targetLeadId + '_' + datePart + '_' + timePart
-    : '';
-
-  Logger.log('Location file search lead_id=' + targetLeadId + ' date=' + datePart + ' time=' + timePart + ' prefix=' + expectedPrefix);
-
-  if (!expectedPrefix || !LOCATION_ROOT_FOLDER_ID || LOCATION_ROOT_FOLDER_ID === 'PASTE_FOLDER_ID_HERE') {
-    Logger.log('Location file search skipped: missing prefix or LOCATION_ROOT_FOLDER_ID is not configured.');
-    return null;
-  }
-
-  let rootFolder;
-  try {
-    rootFolder = DriveApp.getFolderById(LOCATION_ROOT_FOLDER_ID);
-  } catch (err) {
-    Logger.log('Location file search skipped: cannot open configured folder. ' + err.message);
-    return null;
-  }
-
-  const scanState = {
-    foldersScanned: 0,
-    filesScanned: 0,
-    folderLimitExceeded: false,
-    fileLimitExceeded: false,
-  };
-  const matches = findLocationFileMatchesInFolder_(rootFolder, expectedPrefix, scanState);
-
-  Logger.log('Location file scan complete folders=' + scanState.foldersScanned + ' files=' + scanState.filesScanned + ' matches=' + matches.length);
-  if (scanState.folderLimitExceeded) Logger.log('Location file scan stopped: folder scan limit exceeded (' + LOCATION_MAX_FOLDERS_SCANNED + ').');
-  if (scanState.fileLimitExceeded) Logger.log('Location file scan stopped: file scan limit exceeded (' + LOCATION_MAX_FILES_SCANNED + ').');
-
-  if (!matches.length) {
-    Logger.log('Location file not found. Expected filename starting with ' + expectedPrefix);
-    return null;
-  }
-
-  const best = matches.reduce((latestMatch, match) => {
-    if (!latestMatch) return match;
-    return match.updatedAt > latestMatch.updatedAt ? match : latestMatch;
-  }, null);
-
-  Logger.log('Location file selected: ' + best.file.getName() + ' / ' + best.file.getId());
-  return best.file;
-}
-
-function findLocationFileMatchesInFolder_(folder, expectedPrefix, scanState) {
-  const matches = [];
-
-  if (scanState.foldersScanned >= LOCATION_MAX_FOLDERS_SCANNED) {
-    scanState.folderLimitExceeded = true;
-    return matches;
-  }
-
-  scanState.foldersScanned++;
-  Logger.log('Location file scanning folder: ' + folder.getName() + ' / ' + folder.getId());
-
-  const files = folder.getFiles();
-  while (files.hasNext()) {
-    if (scanState.filesScanned >= LOCATION_MAX_FILES_SCANNED) {
-      scanState.fileLimitExceeded = true;
-      break;
-    }
-
-    const file = files.next();
-    scanState.filesScanned++;
-    const fileName = file.getName();
-    Logger.log('Location candidate file: ' + fileName);
-
-    if (fileName.indexOf(expectedPrefix) === 0) {
-      matches.push({
-        file: file,
-        updatedAt: file.getLastUpdated().getTime(),
-      });
-    }
-  }
-
-  const subfolders = folder.getFolders();
-  while (subfolders.hasNext()) {
-    if (scanState.foldersScanned >= LOCATION_MAX_FOLDERS_SCANNED || scanState.filesScanned >= LOCATION_MAX_FILES_SCANNED) {
-      scanState.folderLimitExceeded = scanState.foldersScanned >= LOCATION_MAX_FOLDERS_SCANNED;
-      scanState.fileLimitExceeded = scanState.filesScanned >= LOCATION_MAX_FILES_SCANNED;
-      break;
-    }
-
-    const subfolder = subfolders.next();
-    Logger.log('Location file found subfolder: ' + subfolder.getName() + ' / ' + subfolder.getId());
-    matches.push.apply(matches, findLocationFileMatchesInFolder_(subfolder, expectedPrefix, scanState));
-  }
-
-  return matches;
-}
-
-function formatLocationDatePart_(dateValue) {
-  if (!dateValue) return '';
-
-  const timezone = SpreadsheetApp.getActive().getSpreadsheetTimeZone() || 'Asia/Bangkok';
-  if (Object.prototype.toString.call(dateValue) === '[object Date]' && !isNaN(dateValue.getTime())) {
-    return Utilities.formatDate(dateValue, timezone, 'yyyyMMdd');
-  }
-
-  const raw = String(dateValue || '').trim();
-  const digits = raw.replace(/\D/g, '');
-  if (/^\d{8}$/.test(digits)) {
-    if (/^\d{4}/.test(digits)) return digits;
-    return digits.slice(4, 8) + digits.slice(2, 4) + digits.slice(0, 2);
-  }
-
-  const parsed = new Date(raw);
-  if (!isNaN(parsed.getTime())) {
-    return Utilities.formatDate(parsed, timezone, 'yyyyMMdd');
-  }
-
-  return '';
-}
-
-function formatLocationTimePart_(timeValue) {
-  if (!timeValue) return '';
-
-  const timezone = SpreadsheetApp.getActive().getSpreadsheetTimeZone() || 'Asia/Bangkok';
-  if (Object.prototype.toString.call(timeValue) === '[object Date]' && !isNaN(timeValue.getTime())) {
-    return Utilities.formatDate(timeValue, timezone, 'HHmm');
-  }
-
-  const raw = String(timeValue || '').trim();
-  const timeMatch = raw.match(/(\d{1,2})\D?(\d{2})/);
-  if (!timeMatch) return '';
-
-  const hour = Number(timeMatch[1]);
-  const minute = Number(timeMatch[2]);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour > 23 || minute > 59) return '';
-
-  return String(hour).padStart(2, '0') + String(minute).padStart(2, '0');
+function findInstallationLocationFile_(leadId) {
+  return findLatestEvidenceFileByLeadId_(LOCATION_ROOT_FOLDER_ID, leadId, {
+    evidenceType: 'location',
+    maxFolders: LOCATION_MAX_FOLDERS_SCANNED,
+    maxFiles: LOCATION_MAX_FILES_SCANNED,
+  });
 }
 
 function handleInstallationStatusEdit_(e) {
