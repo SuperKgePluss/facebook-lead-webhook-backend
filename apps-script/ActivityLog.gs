@@ -11,8 +11,11 @@ function createLeadStatusActivity_(leadSheet, row, oldValue, newValue) {
   appendObjectRow_('ACTIVITY_LOG', {
     activity_id: 'ACT-' + Date.now(),
     lead_id: leadId,
+    sheet_name: 'LEADS_MAIN',
     action_type: 'lead_status_changed',
-    result: String(newValue || '').trim(),
+    old_value: String(oldValue || '').trim(),
+    new_value: String(newValue || '').trim(),
+    lead_status: String(newValue || '').trim(),
     note: 'Lead status changed from "' + String(oldValue || '') + '" to "' + String(newValue || '') + '"',
     created_by: Session.getActiveUser().getEmail() || 'Sheet user',
     created_at: new Date(),
@@ -24,7 +27,6 @@ function saveLeadFollowUp_(leadSheet, row) {
   const lead = getRowObject_(leadSheet, row);
   const leadId = String(lead.lead_id || '').trim();
   const phone = normalizePhone(lead.phone);
-  const salesOwner = String(lead.sales_owner || '').trim();
   const note = String(lead.follow_up_note || '').trim();
 
   Logger.log('Follow-up save row=' + row + ' lead_id=' + leadId + ' phone=' + phone + ' note_present=' + Boolean(note));
@@ -60,13 +62,13 @@ function saveLeadFollowUp_(leadSheet, row) {
   appendObjectRow_('ACTIVITY_LOG', {
     activity_id: 'ACT-' + Date.now(),
     lead_id: leadId,
-    follow_up_no: followUpNo,
+    sheet_name: 'LEADS_MAIN',
     action_type: 'Follow-up',
-    result: '',
+    lead_status: String(lead.lead_status || '').trim(),
     note: note,
     audio_url: audioFile.getUrl(),
     audio_file_name: audioFile.getName(),
-    created_by: salesOwner,
+    created_by: Session.getActiveUser().getEmail() || 'Sheet user',
     created_at: createdAt,
   });
 
@@ -95,8 +97,9 @@ function getNextFollowUpNo_(leadId) {
 
   const headerMap = getHeaderMap_(sheet);
   const leadIdColumn = headerMap.lead_id;
+  const actionTypeColumn = headerMap.action_type;
   const followUpNoColumn = headerMap.follow_up_no;
-  if (!leadIdColumn || !followUpNoColumn) {
+  if (!leadIdColumn || (!actionTypeColumn && !followUpNoColumn)) {
     return 1;
   }
 
@@ -107,9 +110,16 @@ function getNextFollowUpNo_(leadId) {
   values.forEach(row => {
     if (String(row[leadIdColumn - 1] || '').trim() !== leadId) return;
 
-    const followUpNo = Number(row[followUpNoColumn - 1]);
-    if (Number.isFinite(followUpNo) && followUpNo > maxNo) {
-      maxNo = followUpNo;
+    if (actionTypeColumn && String(row[actionTypeColumn - 1] || '').trim() === 'Follow-up') {
+      maxNo++;
+      return;
+    }
+
+    if (followUpNoColumn) {
+      const followUpNo = Number(row[followUpNoColumn - 1]);
+      if (Number.isFinite(followUpNo) && followUpNo > maxNo) {
+        maxNo = followUpNo;
+      }
     }
   });
 

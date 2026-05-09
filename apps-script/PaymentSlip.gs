@@ -79,6 +79,7 @@ function handleDealPaymentStatusEdit_(e) {
 
     sheet.getRange(row, paymentSlipUrlColumn).setValue(buildDriveFileUrl(file.getId()));
     writePaymentSlipSaveStatus_(sheet, row, 'บันทึกลิงก์สลิปแล้ว');
+    appendPaymentSlipSavedActivity_(sheet, row, file);
     Logger.log('Payment slip automation: wrote slip URL for Lead ID ' + leadId + ' from file ' + file.getName());
   } catch (err) {
     Logger.log('Payment slip automation failed safely: ' + err.message);
@@ -86,6 +87,23 @@ function handleDealPaymentStatusEdit_(e) {
       writePaymentSlipSaveStatus_(e.range.getSheet(), e.range.getRow(), 'บันทึกสลิปไม่สำเร็จ');
     }
   }
+}
+
+function appendPaymentSlipSavedActivity_(sheet, row, file) {
+  const deal = getRowObject_(sheet, row);
+  const leadId = String(deal.lead_id || '').trim();
+  if (!leadId || !file) return;
+
+  appendObjectRow_('ACTIVITY_LOG', {
+    activity_id: 'ACT-' + Date.now(),
+    lead_id: leadId,
+    sheet_name: 'DEALS',
+    action_type: 'payment_slip_saved',
+    payment_url: buildDriveFileUrl(file.getId()),
+    payment_file_name: file.getName(),
+    created_by: 'SYSTEM',
+    created_at: new Date(),
+  });
 }
 
 function writePaymentSlipSaveStatus_(sheet, row, message) {

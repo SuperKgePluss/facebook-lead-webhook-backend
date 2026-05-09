@@ -6,6 +6,12 @@ function normalizeHeaderName_(headerName) {
   const aliases = {
     facebook_lead_id: 'facebook_leadgen_id',
     fb_lead_id: 'facebook_leadgen_id',
+    activity_type: 'action_type',
+    activity_result: 'new_value',
+    result: 'new_value',
+    audio_link: 'audio_url',
+    activity_date: 'created_at',
+    import_source: 'created_source',
   };
 
   const normalized = String(headerName || '')

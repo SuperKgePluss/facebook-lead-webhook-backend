@@ -144,11 +144,11 @@ async function upsertLineLead(data, messageText) {
 
     const detailObject = {
         lead_id: leadId,
+        raw_phone: data.phone,
         line_user_id: data.line_user_id,
         line_display_name: data.line_display_name,
-        product_interest: data.product_interest,
-        additional_note: data.note,
-        import_source: "LINE",
+        original_customer_name: data.customer_name,
+        created_source: "LINE",
     };
     const existingDetail = await findLeadDetailByLeadId(leadId);
     if (existingDetail?.rowNumber) {
@@ -165,8 +165,8 @@ async function upsertLineLead(data, messageText) {
     await googleSheets.appendObjects("ACTIVITY_LOG", [{
         activity_id: generateLineImportId("ACT"),
         lead_id: leadId,
+        sheet_name: "LINE",
         action_type: "LINE Lead Message",
-        result: "Note",
         note: buildLineActivityNote(data, messageText),
         created_by: "LINE",
         created_at: now,

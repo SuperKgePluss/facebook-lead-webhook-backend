@@ -20,6 +20,12 @@ const HEADER_ALIASES = {
     quantity: "machine_count",
     device_count: "machine_count",
     installation_status: "install_status",
+    activity_type: "action_type",
+    activity_result: "new_value",
+    result: "new_value",
+    audio_link: "audio_url",
+    activity_date: "created_at",
+    import_source: "created_source",
 };
 
 function normalizeLeadStatusForSheet(status) {
@@ -357,6 +363,33 @@ function normalizeSheetObject(sheetName, object = {}) {
         }
     }
 
+    if (sheetName === "ACTIVITY_LOG") {
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "activity_type")
+            && !Object.prototype.hasOwnProperty.call(normalizedObject, "action_type")) {
+            normalizedObject.action_type = normalizedObject.activity_type;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "activity_result")
+            && !Object.prototype.hasOwnProperty.call(normalizedObject, "new_value")) {
+            normalizedObject.new_value = normalizedObject.activity_result;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "result")
+            && !Object.prototype.hasOwnProperty.call(normalizedObject, "new_value")) {
+            normalizedObject.new_value = normalizedObject.result;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "audio_link")
+            && !Object.prototype.hasOwnProperty.call(normalizedObject, "audio_url")) {
+            normalizedObject.audio_url = normalizedObject.audio_link;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "activity_date")
+            && !Object.prototype.hasOwnProperty.call(normalizedObject, "created_at")) {
+            normalizedObject.created_at = normalizedObject.activity_date;
+        }
+    }
+
     return normalizedObject;
 }
 
@@ -512,11 +545,10 @@ function buildLeadDetailObject(leadId, lead) {
     return {
         lead_id: leadId,
         facebook_leadgen_id: lead.facebook_leadgen_id || "",
-        campaign_name: lead.facebook_campaign_name || "",
-        adset_name: lead.facebook_adset_name || "",
+        raw_phone: lead.raw_phone || lead.phone || "",
         raw_province: lead.raw_province || "",
-        raw_data_json: lead.raw_data_json || "",
-        import_source: lead.source || "Facebook",
+        original_customer_name: lead.original_customer_name || lead.name || "",
+        created_source: lead.source || "Facebook",
     };
 }
 

@@ -196,9 +196,10 @@ function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = 
 function buildLegacyLeadDetailObject(values, leadId, rowObject) {
     return {
         lead_id: leadId,
+        raw_phone: values.rawPhone || "",
         raw_province: values.rawProvince,
-        raw_data_json: JSON.stringify(rowObject),
-        import_source: "Legacy Import",
+        original_customer_name: values.name || "",
+        created_source: "CRM2 Import",
     };
 }
 
@@ -206,13 +207,12 @@ function buildLegacyActivityObjects(activityPreviews, leadId, salesOwner) {
     return activityPreviews.map(activity => ({
         activity_id: generateImportId("ACT"),
         lead_id: leadId,
-        follow_up_no: activity.follow_up_no,
+        sheet_name: "IMPORT",
         action_type: "Follow-up",
-        result: "",
         note: activity.note,
         audio_url: activity.audio_url,
         audio_file_name: "",
-        created_by: salesOwner,
+        created_by: "CRM2 Import",
         created_at: activity.created_at,
     }));
 }
@@ -470,6 +470,7 @@ async function handleLegacyCrm2Import(req, res) {
                         province: provinceResult.province,
                         zone: cleanedZone,
                         rawProvince: provinceResult.rawProvince,
+                        rawPhone: phone,
                         corporateName,
                         preferredCallDay: cleanedPreferredCallDay,
                         preferredCallTime: cleanedPreferredCallTime,

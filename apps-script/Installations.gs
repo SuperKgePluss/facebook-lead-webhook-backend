@@ -210,6 +210,7 @@ function handleInstallationStatusEdit_(e) {
 
   if (leadId && leadStatus) {
     updateLeadMainStatusByLeadId_(leadId, leadStatus);
+    appendStatusChangeActivity_(leadId, 'INSTALLATIONS', 'installation_status_changed', e.oldValue || '', installStatus, leadStatus);
   }
 }
 
@@ -232,7 +233,22 @@ function handleDealPaymentStatusLeadPropagation_(e) {
 
   if (leadId && leadStatus) {
     updateLeadMainStatusByLeadId_(leadId, leadStatus);
+    appendStatusChangeActivity_(leadId, 'DEALS', 'payment_status_changed', e.oldValue || '', rowObject.payment_status || '', leadStatus);
   }
+}
+
+function appendStatusChangeActivity_(leadId, sheetName, actionType, oldValue, newValue, leadStatus) {
+  appendObjectRow_('ACTIVITY_LOG', {
+    activity_id: 'ACT-' + Date.now(),
+    lead_id: leadId,
+    sheet_name: sheetName,
+    action_type: actionType,
+    old_value: String(oldValue || '').trim(),
+    new_value: String(newValue || '').trim(),
+    lead_status: String(leadStatus || '').trim(),
+    created_by: Session.getActiveUser().getEmail() || 'Sheet user',
+    created_at: new Date(),
+  });
 }
 
 function updateLeadMainStatusByLeadId_(leadId, leadStatus) {

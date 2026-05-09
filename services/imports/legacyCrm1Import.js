@@ -1179,24 +1179,10 @@ function buildCrm1LeadObject(record, leadId, existingLeadObject = null) {
 function buildCrm1LeadDetailObject(record, leadId) {
     return {
         lead_id: leadId,
-        customer_type: record.customerType,
-        location_type: record.locationType,
-        address: record.address,
-        location: record.address,
-        rooms: record.rooms,
-        area_sqm: record.areaSqm,
-        room_count: record.roomCount,
-        floor_type: record.floorType,
-        product_model: record.productModel,
-        reason: record.reason,
-        priority: record.priority,
-        month: record.month,
-        original_stage: record.stage,
-        original_source_row: record.sourceRow,
-        source_block: record.sourceBlock,
-        legacy_notes: record.note,
-        raw_data_json: JSON.stringify(record.rawObject),
-        import_source: "CRM1 Legacy Import",
+        raw_phone: record.originalPhone,
+        raw_province: record.rawProvince,
+        original_customer_name: record.customerName,
+        created_source: "CRM1 Import",
     };
 }
 
@@ -1264,16 +1250,11 @@ function buildCrm1ActivityObject(record, leadId) {
     return {
         activity_id: generateImportId("ACT"),
         lead_id: leadId,
-        follow_up_no: record.followUpCount || "",
-        followup_no: record.followUpCount || "",
-        rated_follow_up_no: record.followUpCount || "",
+        sheet_name: "IMPORT",
         action_type: activityType,
-        activity_type: activityType,
-        result: record.leadStatus,
-        activity_result: record.leadStatus,
+        lead_status: record.leadStatus,
         note: record.note,
         audio_url: record.audioLink,
-        audio_link: record.audioLink,
         created_at: record.now,
         activity_date: activityDate,
         created_by: "CRM1 Import",
@@ -1285,10 +1266,9 @@ function buildCrm1ActivityObjects(record, leadId) {
         return [{
             activity_id: generateImportId("ACT"),
             lead_id: leadId,
+            sheet_name: "IMPORT",
             action_type: "Installation",
-            activity_type: "Installation",
-            result: record.installationStatus,
-            activity_result: record.installationStatus,
+            new_value: record.installationStatus,
             note: [
                 record.timeSlot ? `Time slot: ${record.timeSlot}` : "",
                 record.technician ? `Technician: ${record.technician}` : "",
@@ -1307,9 +1287,7 @@ function buildCrm1ActivityObjects(record, leadId) {
     const activities = [];
     const base = {
         lead_id: leadId,
-        follow_up_no: record.followUpCount || "",
-        followup_no: record.followUpCount || "",
-        rated_follow_up_no: record.followUpCount || "",
+        sheet_name: "IMPORT",
         created_at: record.now,
         created_by: "CRM1 Import",
     };
@@ -1319,9 +1297,8 @@ function buildCrm1ActivityObjects(record, leadId) {
             ...base,
             activity_id: generateImportId("ACT"),
             action_type: "Payment",
-            activity_type: "Payment",
-            result: record.paymentStatus,
-            activity_result: record.paymentStatus,
+            new_value: record.paymentStatus,
+            payment_url: record.paymentSlipUrl,
             note: [
                 record.price ? `Price: ${record.price}` : "",
                 record.paymentDate ? `Payment Date: ${record.paymentDate}` : "",
@@ -1338,9 +1315,7 @@ function buildCrm1ActivityObjects(record, leadId) {
             ...base,
             activity_id: generateImportId("ACT"),
             action_type: "Installation",
-            activity_type: "Installation",
-            result: record.installationStatus,
-            activity_result: record.installationStatus,
+            new_value: record.installationStatus,
             note: [
                 record.installDate ? `Set up date: ${record.installDate}` : "",
                 record.address ? `Location: ${record.address}` : "",
@@ -1355,9 +1330,7 @@ function buildCrm1ActivityObjects(record, leadId) {
             ...base,
             activity_id: generateImportId("ACT"),
             action_type: "After Sales / Form Notification",
-            activity_type: "After Sales / Form Notification",
-            result: record.formStatus || record.afterSales30Days,
-            activity_result: record.formStatus || record.afterSales30Days,
+            new_value: record.formStatus || record.afterSales30Days,
             note: [
                 record.afterSales30Days ? `After sales 30 days: ${record.afterSales30Days}` : "",
                 record.formNotiDate ? `Form Noti Date: ${record.formNotiDate}` : "",
@@ -1720,6 +1693,7 @@ async function handleLegacyCrm1Import(req, res) {
                         originalPhone: phone,
                         normalizedPhone,
                         customerName,
+                        originalPhone: phone,
                         formLink,
                         adminName,
                         normalizedSource,
