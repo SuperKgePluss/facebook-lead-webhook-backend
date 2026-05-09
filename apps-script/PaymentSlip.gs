@@ -9,7 +9,37 @@ const PAYMENT_SLIP_MAX_FOLDERS_SCANNED = 50;
 const PAYMENT_SLIP_MAX_FILES_SCANNED = 500;
 const DEALS_PAYMENT_STATUS_VALUES = ['Unpaid', 'Paid', 'Cancelled'];
 const DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY = 'DEALS_PAYMENT_STATUS_REFRESH_NEXT_ROW';
+const DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY = 'DEALS_OPEN_INSTALLATION_REFRESH_NEXT_ROW';
 const DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE = 100;
+const DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE = 100;
+const DEALS_FINAL_HEADERS = [
+  'Deal ID',
+  'Lead ID',
+  'Phone',
+  'Product Model',
+  'Package Type',
+  'Full Amount',
+  'Paid Amount',
+  'Open Installation',
+  'Payment Status',
+  'Payment Date',
+  'Payment Slip URL',
+  'Payment Slip Save Status',
+];
+const DEALS_FINAL_THAI_LABELS = [
+  'รหัสดีล',
+  'รหัสลูกค้า',
+  'เบอร์โทร',
+  'รุ่นสินค้า',
+  'แพ็กเกจ',
+  'ยอดเต็ม',
+  'ยอดที่ชำระแล้ว',
+  'เปิดงานติดตั้ง',
+  'สถานะการชำระเงิน',
+  'วันที่ยืนยันการชำระเงิน',
+  'ลิงก์สลิป',
+  'สถานะการบันทึกสลิป',
+];
 
 function handleDealPaymentStatusEdit_(e) {
   try {
@@ -124,63 +154,65 @@ function setupDealsPaymentUi() {
   if (!sheet) return;
 
   ensureDealsPaymentColumns_(sheet);
+  resetDealsPaymentStatusDropdownRefreshCursor();
+  resetDealsOpenInstallationCheckboxRefreshCursor();
   refreshDealsPaymentStatusDropdownsLight();
+  refreshDealsOpenInstallationCheckboxes();
+  setupDealsPaymentStatusConditionalFormatting_();
 }
 
 function ensureDealsPaymentColumns_(sheet) {
-  let headerMap = getHeaderMap_(sheet);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = Math.max(sheet.getLastColumn(), 1);
+  const headers = sheet.getRange(HEADER_ROW, 1, 1, lastColumn).getValues()[0];
+  const dataRowCount = Math.max(lastRow - DATA_START_ROW + 1, 0);
+  const dataValues = dataRowCount
+    ? sheet.getRange(DATA_START_ROW, 1, dataRowCount, lastColumn).getValues()
+    : [];
 
-  if (!headerMap.full_amount) {
-    const paidAmountColumn = headerMap.paid_amount || headerMap.price || headerMap.payment_status || 5;
-    sheet.insertColumnBefore(paidAmountColumn);
-    sheet.getRange(HEADER_ROW, paidAmountColumn).setValue('Full Amount');
-    sheet.getRange(HEADER_ROW + 1, paidAmountColumn).setValue('ยอดเต็ม');
-    Logger.log('Inserted DEALS Full Amount column at column ' + paidAmountColumn);
-  }
+  const migratedRows = dataValues.map(row => {
+    const object = headers.reduce((item, header, index) => {
+      const key = normalizeHeaderName_(header);
+      if (key) item[key] = row[index];
+      return item;
+    }, {});
+    const leadId = String(object.lead_id || '').trim();
+    const phone = String(object.phone || '').trim() || getLeadPhoneByLeadId_(leadId);
 
-  headerMap = getHeaderMap_(sheet);
-  if (!headerMap.paid_amount && headerMap.price) {
-    sheet.getRange(HEADER_ROW, headerMap.price).setValue('Paid Amount');
-    sheet.getRange(HEADER_ROW + 1, headerMap.price).setValue('ยอดที่ชำระแล้ว');
-    Logger.log('Renamed DEALS Price column to Paid Amount at column ' + headerMap.price);
-  } else if (headerMap.paid_amount) {
-    sheet.getRange(HEADER_ROW, headerMap.paid_amount).setValue('Paid Amount');
-    sheet.getRange(HEADER_ROW + 1, headerMap.paid_amount).setValue('ยอดที่ชำระแล้ว');
-  }
+    return [
+      object.deal_id || '',
+      leadId,
+      phone,
+      object.product_model || '',
+      object.package_type || '',
+      object.full_amount || '',
+      object.paid_amount || object.price || '',
+      false,
+      object.payment_status || '',
+      object.payment_date || '',
+      object.payment_slip_url || '',
+      object.payment_slip_save_status || '',
+    ];
+  });
 
-  headerMap = getHeaderMap_(sheet);
-  if (!headerMap.payment_slip_save_status) {
-    const insertAfterColumn = headerMap.payment_slip_url || sheet.getLastColumn();
-    sheet.insertColumnAfter(insertAfterColumn);
-    sheet.getRange(HEADER_ROW, insertAfterColumn + 1).setValue('Payment Slip Save Status');
-    sheet.getRange(HEADER_ROW + 1, insertAfterColumn + 1).setValue('สถานะการบันทึกสลิป');
-    Logger.log('Inserted DEALS Payment Slip Save Status column after column ' + insertAfterColumn);
+  if (sheet.getMaxColumns() < DEALS_FINAL_HEADERS.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), DEALS_FINAL_HEADERS.length - sheet.getMaxColumns());
   }
 
   setDealsHeaderLabels_(sheet);
+
+  if (migratedRows.length) {
+    sheet.getRange(DATA_START_ROW, 1, migratedRows.length, DEALS_FINAL_HEADERS.length).setValues(migratedRows);
+  }
+
+  if (sheet.getLastColumn() > DEALS_FINAL_HEADERS.length) {
+    sheet.deleteColumns(DEALS_FINAL_HEADERS.length + 1, sheet.getLastColumn() - DEALS_FINAL_HEADERS.length);
+  }
 }
 
 function setDealsHeaderLabels_(sheet) {
-  const labels = {
-    deal_id: ['Deal ID', 'รหัสดีล'],
-    lead_id: ['Lead ID', 'รหัสลูกค้า'],
-    product_model: ['Product Model', 'รุ่นสินค้า'],
-    package_type: ['Package Type', 'แพ็กเกจ'],
-    full_amount: ['Full Amount', 'ยอดเต็ม'],
-    paid_amount: ['Paid Amount', 'ยอดที่ชำระแล้ว'],
-    payment_status: ['Payment Status', 'สถานะการชำระเงิน'],
-    payment_date: ['Payment Date', 'วันที่ชำระเงิน'],
-    payment_slip_url: ['Payment Slip URL', 'ลิงก์สลิป'],
-    payment_slip_save_status: ['Payment Slip Save Status', 'สถานะการบันทึกสลิป'],
-  };
-
-  const headerMap = getHeaderMap_(sheet);
-  Object.keys(labels).forEach(key => {
-    const column = headerMap[key];
-    if (!column) return;
-    sheet.getRange(HEADER_ROW, column).setValue(labels[key][0]);
-    sheet.getRange(HEADER_ROW + 1, column).setValue(labels[key][1]);
-  });
+  sheet.getRange(HEADER_ROW, 1, 1, DEALS_FINAL_HEADERS.length).setValues([DEALS_FINAL_HEADERS]);
+  sheet.getRange(HEADER_ROW + 1, 1, 1, DEALS_FINAL_THAI_LABELS.length).setValues([DEALS_FINAL_THAI_LABELS]);
 }
 
 function isDealsPaymentStatusDropdownCell_(cell) {
@@ -238,6 +270,41 @@ function ensureDealsPaymentStatusDropdownForRow(row, optionalSheet) {
   return changed;
 }
 
+function ensureDealsOpenInstallationCheckboxForRow(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet || sheet.getName() !== 'DEALS' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const dealIdColumn = headerMap.deal_id;
+  const leadIdColumn = headerMap.lead_id;
+  const openInstallationColumn = headerMap.open_installation;
+  if (!dealIdColumn || !leadIdColumn || !openInstallationColumn) return false;
+
+  const dealId = String(sheet.getRange(row, dealIdColumn).getValue() || '').trim();
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  const cell = sheet.getRange(row, openInstallationColumn);
+  let changed = false;
+
+  if (dealId && leadId) {
+    if (!isCheckboxCell_(cell)) {
+      cell.insertCheckboxes();
+      changed = true;
+    }
+    if (String(cell.getValue()).toUpperCase() !== 'TRUE') {
+      cell.setValue(false);
+    }
+    return changed;
+  }
+
+  if (!dealId && !leadId && (String(cell.getValue() || '').trim() || isCheckboxCell_(cell))) {
+    cell.clearContent();
+    cell.clearDataValidations();
+    changed = true;
+  }
+
+  return changed;
+}
+
 function refreshDealsPaymentStatusDropdownsLight() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
@@ -260,10 +327,12 @@ function refreshDealsPaymentStatusDropdownsLight() {
   for (let row = startRow; row <= endRow; row++) {
     checked++;
     if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
+    if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
   }
 
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
   properties.setProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY, String(nextCursor));
+  setupDealsPaymentStatusConditionalFormatting_();
 
   Logger.log('refreshDealsPaymentStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
 }
@@ -273,6 +342,82 @@ function resetDealsPaymentStatusDropdownRefreshCursor() {
     .getScriptProperties()
     .setProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY, String(DATA_START_ROW));
   Logger.log('DEALS payment status dropdown refresh cursor reset to ' + DATA_START_ROW);
+}
+
+function refreshDealsOpenInstallationCheckboxes() {
+  const properties = PropertiesService.getScriptProperties();
+  const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.open_installation) return;
+
+  const savedCursor = Number(properties.getProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY));
+  const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
+    ? savedCursor
+    : DATA_START_ROW;
+  const endRow = Math.min(startRow + DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE - 1, lastRow);
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = startRow; row <= endRow; row++) {
+    checked++;
+    if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
+  }
+
+  const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
+  properties.setProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY, String(nextCursor));
+
+  Logger.log('refreshDealsOpenInstallationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+}
+
+function resetDealsOpenInstallationCheckboxRefreshCursor() {
+  PropertiesService
+    .getScriptProperties()
+    .setProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY, String(DATA_START_ROW));
+  Logger.log('DEALS open installation checkbox refresh cursor reset to ' + DATA_START_ROW);
+}
+
+function setupDealsPaymentStatusConditionalFormatting_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  const statusColumn = headerMap.payment_status;
+  if (!statusColumn) return;
+
+  const lastRow = Math.max(sheet.getLastRow(), DATA_START_ROW);
+  const lastColumn = sheet.getLastColumn();
+  const range = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, lastColumn);
+  const statusColumnLetter = columnToLetter_(statusColumn);
+  const paidFormula = '=$' + statusColumnLetter + DATA_START_ROW + '="Paid"';
+  const cancelledFormula = '=$' + statusColumnLetter + DATA_START_ROW + '="Cancelled"';
+  const managedFormulas = [paidFormula, cancelledFormula];
+
+  const existingRules = sheet.getConditionalFormatRules().filter(rule => {
+    const condition = rule.getBooleanCondition();
+    const values = condition ? condition.getCriteriaValues() : [];
+    return !values.some(value => managedFormulas.indexOf(String(value)) !== -1);
+  });
+
+  const paidRule = SpreadsheetApp
+    .newConditionalFormatRule()
+    .whenFormulaSatisfied(paidFormula)
+    .setBackground('#d9ead3')
+    .setRanges([range])
+    .build();
+
+  const cancelledRule = SpreadsheetApp
+    .newConditionalFormatRule()
+    .whenFormulaSatisfied(cancelledFormula)
+    .setBackground('#f4cccc')
+    .setRanges([range])
+    .build();
+
+  sheet.setConditionalFormatRules(existingRules.concat([paidRule, cancelledRule]));
 }
 
 function findPaymentSlipFile(leadId, paymentDate) {

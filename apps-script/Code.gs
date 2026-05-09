@@ -88,13 +88,27 @@ function onEdit(e) {
 
   const sheet = e.range.getSheet();
   if (sheet.getName() === 'DEALS') {
+    const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
     ensureDealsPaymentStatusDropdownForRow(e.range.getRow(), sheet);
+    ensureDealsOpenInstallationCheckboxForRow(e.range.getRow(), sheet);
+    if (editedHeader === 'open_installation') {
+      handleOpenInstallationEdit_(e, sheet, e.range.getRow());
+      return;
+    }
     handleDealPaymentStatusEdit_(e);
     handleDealPaymentStatusLeadPropagation_(e);
+    setupDealsPaymentStatusConditionalFormatting_();
     return;
   }
 
   if (sheet.getName() === 'INSTALLATIONS') {
+    const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
+    ensureInstallationStatusDropdownForRow(e.range.getRow(), sheet);
+    ensureInstallationSaveLocationCheckboxForRow(e.range.getRow(), sheet);
+    if (editedHeader === 'save_location') {
+      handleSaveLocationEdit_(e, sheet, e.range.getRow());
+      return;
+    }
     handleInstallationStatusEdit_(e);
     return;
   }
