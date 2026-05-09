@@ -79,7 +79,27 @@ function saveLeadFollowUp_(leadSheet, row) {
     latest_follow_up_at: createdAt,
   });
 
+  updateLeadStatusAfterSuccessfulFollowUp_(leadSheet, row, lead.lead_status);
+
   return true;
+}
+
+function updateLeadStatusAfterSuccessfulFollowUp_(leadSheet, row, currentStatus) {
+  const normalizedStatus = String(currentStatus || '').trim();
+  if (normalizedStatus && normalizedStatus !== 'New') return;
+
+  setRowObjectValues_(leadSheet, row, {
+    lead_status: 'Ongoing',
+  });
+
+  if (typeof ensureLeadMainStatusDropdownForRow === 'function') {
+    ensureLeadMainStatusDropdownForRow(row, leadSheet);
+  }
+  if (typeof setupLeadMainStatusConditionalFormatting_ === 'function') {
+    setupLeadMainStatusConditionalFormatting_();
+  }
+
+  createLeadStatusActivity_(leadSheet, row, normalizedStatus || 'New', 'Ongoing');
 }
 
 function writeFollowUpSaveStatus_(sheet, row, message) {
