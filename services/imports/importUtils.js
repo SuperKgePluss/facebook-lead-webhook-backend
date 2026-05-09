@@ -342,6 +342,50 @@ function extractUrls(value) {
     return raw.match(/https?:\/\/[^\s,;]+/gi) || [];
 }
 
+function parseGoogleDriveFileLink(input) {
+    const raw = typeof input === "string" ? input.trim() : "";
+    if (!raw) {
+        return { valid: false, fileId: null, canonicalUrl: "" };
+    }
+
+    let fileId = "";
+
+    try {
+        const url = new URL(raw);
+        const host = url.hostname.toLowerCase();
+
+        if (host !== "drive.google.com" && !host.endsWith(".drive.google.com")) {
+            return { valid: false, fileId: null, canonicalUrl: "" };
+        }
+
+        const filePathMatch = url.pathname.match(/\/file\/d\/([^/]+)/);
+        if (filePathMatch) fileId = filePathMatch[1];
+        if (!fileId && (url.pathname === "/open" || url.pathname === "/uc")) {
+            fileId = url.searchParams.get("id") || "";
+        }
+    } catch (err) {
+        const filePathMatch = raw.match(/drive\.google\.com\/file\/d\/([^/?#]+)/i);
+        const queryIdMatch = raw.match(/drive\.google\.com\/(?:open|uc)\?[^#]*\bid=([^&#]+)/i);
+        fileId = filePathMatch?.[1] || queryIdMatch?.[1] || "";
+    }
+
+    fileId = decodeURIComponent(String(fileId || "").trim());
+
+    if (!/^[A-Za-z0-9_-]+$/.test(fileId)) {
+        return { valid: false, fileId: null, canonicalUrl: "" };
+    }
+
+    return {
+        valid: true,
+        fileId,
+        canonicalUrl: `https://drive.google.com/file/d/${fileId}/view`,
+    };
+}
+
+function normalizePaymentSlipLink(input) {
+    return parseGoogleDriveFileLink(input).canonicalUrl;
+}
+
 function isLegacyAudioHeader(headerName) {
     const header = String(headerName || "").toLowerCase();
     return header.includes("call_recording")
@@ -402,6 +446,8 @@ module.exports = {
     hasAnyValue,
     rowHasAnyValue,
     extractUrls,
+    parseGoogleDriveFileLink,
+    normalizePaymentSlipLink,
     isLegacyAudioHeader,
     loadMappingRules,
     readFirstAvailableSheet,

@@ -15,6 +15,7 @@ const {
     rowHasAnyValue,
     hasAnyValue,
     extractUrls,
+    normalizePaymentSlipLink,
     generateImportId,
 } = require("./importUtils");
 
@@ -1580,7 +1581,7 @@ async function handleLegacyCrm1Import(req, res) {
                     const deviceCount = getCrm1Value(dataRow.row, headerMap, "device_count");
                     const quantity = getCrm1Value(dataRow.row, headerMap, "quantity") || deviceCount;
                     const paymentDateRaw = getCrm1Value(dataRow.row, headerMap, "payment_date");
-                    const paymentSlipUrl = getCrm1Value(dataRow.row, headerMap, "payment_slip_url");
+                    const paymentSlipUrl = normalizePaymentSlipLink(getCrm1Value(dataRow.row, headerMap, "payment_slip_url"));
                     const price = getCrm1Value(dataRow.row, headerMap, "price");
                     const installDateRaw = getCrm1Value(dataRow.row, headerMap, "install_date");
                     const installTime = getCrm1Value(dataRow.row, headerMap, "install_time");

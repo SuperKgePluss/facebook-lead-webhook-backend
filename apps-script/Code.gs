@@ -81,6 +81,11 @@ function onEdit(e) {
   if (!e || !e.range) return;
 
   const sheet = e.range.getSheet();
+  if (sheet.getName() === 'DEALS') {
+    handleDealPaymentStatusEdit_(e);
+    return;
+  }
+
   if (sheet.getName() !== 'LEADS_MAIN') return;
   if (e.range.getRow() < DATA_START_ROW) return;
 

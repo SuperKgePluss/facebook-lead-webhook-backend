@@ -7,6 +7,7 @@ const {
     hasAnyValue,
     isLegacyAudioHeader,
     extractUrls,
+    normalizePaymentSlipLink,
     normalizeLegacyImportPhone,
     normalizeLegacyProvince,
     normalizeLegacyZone,
@@ -339,7 +340,7 @@ async function handleLegacyCrm2Import(req, res) {
             const whichPackage = getCrm2Value(rowObject, "which_package");
             const amountDue = getCrm2Value(rowObject, "amount_due");
             const amountPaid = getCrm2Value(rowObject, "amount_paid");
-            const paymentSlip = getCrm2Value(rowObject, "payment_slip");
+            const paymentSlip = normalizePaymentSlipLink(getCrm2Value(rowObject, "payment_slip"));
             const installationLocation = getCrm2Value(rowObject, "installation_location");
             const installationDetails = getCrm2Value(rowObject, "installation_details");
             const installationDate = getCrm2Value(rowObject, "installation_date");

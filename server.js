@@ -17,10 +17,15 @@ const {
 const { handleLegacyCrm2Import } = require("./services/imports/legacyCrm2Import");
 const { handleLegacyCrm1Import } = require("./services/imports/legacyCrm1Import");
 const { handleLegacyLeadStatusCleanup } = require("./services/imports/legacyCleanup");
+const { handleLineWebhook } = require("./services/lineWebhook");
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    },
+}));
 
 const PORT = process.env.PORT || 3000;
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
@@ -576,6 +581,7 @@ app.get("/debug/lead/:leadgenId", async (req, res) => {
 app.post("/import/legacy", handleLegacyCrm2Import);
 app.post("/import/legacy-crm1", handleLegacyCrm1Import);
 app.post("/import/legacy/cleanup-lead-status", handleLegacyLeadStatusCleanup);
+app.post("/webhook/line", handleLineWebhook);
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
