@@ -50,6 +50,26 @@ async function replyLineMessage(replyToken, text) {
     );
 }
 
+async function fetchLineProfileDisplayName(userId) {
+    const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (!userId || !token) return "";
+
+    try {
+        const response = await axios.get(
+            `https://api.line.me/v2/bot/profile/${encodeURIComponent(userId)}`,
+            {
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            }
+        );
+        return String(response.data?.displayName || "").trim();
+    } catch (err) {
+        console.error("LINE profile fetch failed:", err.response?.data || err.message);
+        return "";
+    }
+}
+
 function buildLineActivityNote(data, messageText) {
     return [
         data.product_interest ? `Product Interest: ${data.product_interest}` : "",
@@ -168,9 +188,11 @@ async function handleLineWebhook(req, res) {
     for (const event of events) {
         if (event.type !== "message" || event.message?.type !== "text") continue;
 
+        const lineUserId = event.source?.userId || "";
+        const displayName = await fetchLineProfileDisplayName(lineUserId);
         const profile = {
-            lineUserId: event.source?.userId || "",
-            displayName: event.source?.userId || "",
+            lineUserId,
+            displayName,
         };
         const parsed = parseLineLeadMessage(event.message.text, profile);
 

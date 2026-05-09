@@ -1,6 +1,7 @@
 // Activity log creation helpers for user-driven lead changes.
 const AUDIO_ROOT_FOLDER_ID = '1wXq0bgxy9mMmLALw2B7IOhty1X1EAew';
 const AUDIO_FILE_EXTENSION_PATTERN = /\.(mp3|m4a|wav|ogg|mp4)$/i;
+let FOLLOW_UP_AUDIO_LAST_ERROR_REASON = '';
 
 function createLeadStatusActivity_(leadSheet, row, oldValue, newValue) {
   const lead = getRowObject_(leadSheet, row);
@@ -19,31 +20,37 @@ function createLeadStatusActivity_(leadSheet, row, oldValue, newValue) {
 }
 
 function saveLeadFollowUp_(leadSheet, row) {
+  FOLLOW_UP_AUDIO_LAST_ERROR_REASON = '';
   const lead = getRowObject_(leadSheet, row);
   const leadId = String(lead.lead_id || '').trim();
   const phone = normalizePhone(lead.phone);
   const salesOwner = String(lead.sales_owner || '').trim();
   const note = String(lead.follow_up_note || '').trim();
 
+  Logger.log('Follow-up save row=' + row + ' lead_id=' + leadId + ' phone=' + phone + ' note_present=' + Boolean(note));
+
   if (!leadId) {
-    writeFollowUpSaveStatus_(leadSheet, row, 'Lead ID is missing.');
+    writeFollowUpSaveStatus_(leadSheet, row, 'บันทึกไม่สำเร็จ: ไม่พบรหัสลูกค้า');
     return false;
   }
 
   if (!phone) {
-    writeFollowUpSaveStatus_(leadSheet, row, 'Phone is missing.');
+    writeFollowUpSaveStatus_(leadSheet, row, 'บันทึกไม่สำเร็จ: ไม่พบเบอร์โทร');
     return false;
   }
 
   if (!note) {
-    writeFollowUpSaveStatus_(leadSheet, row, 'Follow-up Note is missing.');
+    writeFollowUpSaveStatus_(leadSheet, row, 'บันทึกไม่สำเร็จ: กรุณาใส่บันทึกติดตาม');
     return false;
   }
 
   const audioFile = findLatestLeadAudioFile_(phone);
 
   if (!audioFile) {
-    writeFollowUpSaveStatus_(leadSheet, row, 'Audio file not found. Check filename format.');
+    const message = FOLLOW_UP_AUDIO_LAST_ERROR_REASON === 'folder_access'
+      ? 'บันทึกแล้ว แต่ระบบเข้าโฟลเดอร์เสียงไม่ได้'
+      : 'บันทึกแล้ว แต่ไม่พบไฟล์เสียง';
+    writeFollowUpSaveStatus_(leadSheet, row, message);
     return false;
   }
 
@@ -65,7 +72,7 @@ function saveLeadFollowUp_(leadSheet, row) {
 
   setRowObjectValues_(leadSheet, row, {
     follow_up_note: '',
-    follow_up_save_status: 'Saved follow-up #' + followUpNo,
+    follow_up_save_status: 'บันทึกการติดตามแล้ว #' + followUpNo,
     latest_follow_up_no: followUpNo,
     latest_follow_up_at: createdAt,
   });
@@ -117,10 +124,13 @@ function findLatestLeadAudioFile_(phone) {
   const fileNamePattern = new RegExp('^LEAD_' + normalizedPhone + '_\\d{8}_\\d{2}_\\d{2}\\.(mp3|m4a|wav|ogg|mp4)$', 'i');
   let rootFolder;
 
+  Logger.log('Follow-up audio search phone=' + normalizedPhone + ' folder=' + AUDIO_ROOT_FOLDER_ID + ' prefix=' + prefix + ' pattern=' + fileNamePattern);
+
   try {
     rootFolder = DriveApp.getFolderById(AUDIO_ROOT_FOLDER_ID);
   } catch (err) {
     Logger.log('Follow-up audio search skipped: cannot open audio folder. ' + err.message);
+    FOLLOW_UP_AUDIO_LAST_ERROR_REASON = 'folder_access';
     return null;
   }
 
@@ -135,13 +145,18 @@ function findLatestLeadAudioFileInFolder_(folder, prefix, fileNamePattern, lates
     const file = files.next();
     const fileName = file.getName();
 
+    Logger.log('Follow-up audio candidate checked: ' + fileName);
+
     if (
       fileName.indexOf(prefix) === 0 &&
       fileNamePattern.test(fileName) &&
       AUDIO_FILE_EXTENSION_PATTERN.test(fileName) &&
       (!currentLatestFile || file.getLastUpdated() > currentLatestFile.getLastUpdated())
     ) {
+      Logger.log('Follow-up audio candidate accepted: ' + fileName + ' / ' + file.getId());
       currentLatestFile = file;
+    } else if (fileName.indexOf(prefix) === 0) {
+      Logger.log('Follow-up audio candidate rejected by filename pattern or extension: ' + fileName);
     }
   }
 
@@ -151,6 +166,9 @@ function findLatestLeadAudioFileInFolder_(folder, prefix, fileNamePattern, lates
     currentLatestFile = findLatestLeadAudioFileInFolder_(folders.next(), prefix, fileNamePattern, currentLatestFile);
   }
 
+  if (currentLatestFile) {
+    Logger.log('Follow-up audio current latest: ' + currentLatestFile.getName() + ' / ' + currentLatestFile.getId());
+  }
   return currentLatestFile;
 }
 
@@ -175,5 +193,5 @@ function debugFollowUpForActiveRow() {
   Logger.log('Audio root folder id: ' + AUDIO_ROOT_FOLDER_ID);
 
   const file = findLatestLeadAudioFile_(lead.phone);
-  Logger.log(file ? 'Matched audio file: ' + file.getName() + ' / ' + file.getId() : 'No matching audio file found.');
+  Logger.log(file ? 'Matched audio file: ' + file.getName() + ' / ' + file.getId() : 'No matching audio file found. Expected format: LEAD_' + normalizePhone(lead.phone) + '_YYYYMMDD_HH_MM.ext');
 }

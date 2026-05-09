@@ -90,7 +90,10 @@ function parseLineLeadMessage(message, profile = {}) {
     }
 
     data.phone = normalizePhone(data.phone) || findPhoneInText(rawMessage);
-    data.customer_name = data.customer_name || data.line_display_name;
+    data.customer_name = data.customer_name
+        || data.line_display_name
+        || data.line_user_id
+        || "LINE User";
     data.province = normalizeLineProvince(data.province);
 
     if (!data.phone) {

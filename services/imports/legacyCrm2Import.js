@@ -170,7 +170,6 @@ function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = 
             preferred_call_day: values.preferredCallDay,
             preferred_call_time: values.preferredCallTime,
             lead_status: values.leadStatus,
-            reason: values.reason,
             sales_owner: values.salesperson,
             created_at: values.leadInDate,
             updated_at: values.updatedAt,
@@ -188,7 +187,6 @@ function buildLegacyLeadObject(values, cleanPhone, leadId, existingLeadObject = 
     putIfBlank(updateObject, existingLeadObject, "preferred_call_day", values.preferredCallDay);
     putIfBlank(updateObject, existingLeadObject, "preferred_call_time", values.preferredCallTime);
     putIfBlank(updateObject, existingLeadObject, "lead_status", values.leadStatus);
-    putIfBlank(updateObject, existingLeadObject, "reason", values.reason);
     putIfBlank(updateObject, existingLeadObject, "sales_owner", values.salesperson);
     putIfBlank(updateObject, existingLeadObject, "created_at", values.leadInDate);
 

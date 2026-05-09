@@ -366,7 +366,6 @@ function buildLeadMainObject(leadId, lead, existingLead = null) {
         preferred_call_day: existingLead?.preferred_call_day || lead.preferred_call_day || "",
         preferred_call_time: existingLead?.preferred_call_time || lead.preferred_call_time || "",
         lead_status: existingLead?.lead_status || lead.status || "New",
-        reason: existingLead?.reason || lead.reason || "",
         sales_owner: existingLead?.sales_owner || lead.sales_owner || "",
         created_at: existingLead?.created_at || now,
         updated_at: now,

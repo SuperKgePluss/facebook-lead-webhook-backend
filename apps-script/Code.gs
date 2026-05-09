@@ -89,7 +89,6 @@ function onEdit(e) {
   if (sheet.getName() !== 'LEADS_MAIN') return;
   if (e.range.getRow() < DATA_START_ROW) return;
 
-  const headerMap = getHeaderMap_(sheet);
   const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
 
   if (editedHeader === 'open_deal') {
@@ -104,18 +103,9 @@ function onEdit(e) {
 
   normalizeLeadMainRow(sheet, e.range.getRow());
   refreshOpenDealCheckboxForRow_(sheet, e.range.getRow());
+  ensureLeadMainStatusDropdownForRow(e.range.getRow(), sheet);
 
   if (editedHeader === 'lead_status') {
     createLeadStatusActivity_(sheet, e.range.getRow(), e.oldValue || '', e.value || '');
-  }
-
-  const rowObject = getRowObject_(sheet, e.range.getRow());
-  if (String(rowObject.lead_status || '').trim() === 'Closed lost' && !String(rowObject.reason || '').trim()) {
-    if (headerMap.reason) {
-      sheet.getRange(e.range.getRow(), headerMap.reason).setBackground('#fce8e6');
-    }
-    SpreadsheetApp.getActive().toast('Please select a reason for Closed lost.', 'Missing reason', 5);
-  } else if (headerMap.reason) {
-    sheet.getRange(e.range.getRow(), headerMap.reason).setBackground(null);
   }
 }
