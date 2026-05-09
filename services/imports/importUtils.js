@@ -175,7 +175,7 @@ function normalizeLegacyLeadStatusValue(status, mappingRules = null, signals = {
     const value = signalText.toLowerCase();
 
     if (value.includes("not interested") || value.includes("cancel") || value.includes("ยกเลิก")) {
-        return "Not Interested";
+        return "Cancelled";
     }
 
     if (
@@ -185,13 +185,22 @@ function normalizeLegacyLeadStatusValue(status, mappingRules = null, signals = {
         || value.includes("ชำระครบแล้ว")
         || signals.closedDate
     ) {
-        return "Closed";
+        return "Done";
     }
 
-    if (value.includes("follow")) return "Follow-up";
-    if (value.includes("pending") || value.includes("รอ")) return "Pending";
+    if (value.includes("installed")) return "Installed";
+    if (value.includes("follow")) return "Ongoing";
+    if (value.includes("pending") || value.includes("รอ")) return "Ongoing";
+    if (value.includes("contacted") || value.includes("interested")) return "Ongoing";
 
-    if (explicit && explicit !== LEGACY_IMPORT_STATUS) return explicit;
+    if (explicit && explicit !== LEGACY_IMPORT_STATUS) {
+        const explicitValue = explicit.toLowerCase();
+        if (explicitValue === "new") return "New";
+        if (explicitValue === "ongoing") return "Ongoing";
+        if (explicitValue === "installed") return "Installed";
+        if (explicitValue === "done") return "Done";
+        if (explicitValue === "cancelled" || explicitValue === "canceled") return "Cancelled";
+    }
 
     return "New";
 }

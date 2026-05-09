@@ -84,6 +84,12 @@ function onEdit(e) {
   if (sheet.getName() === 'DEALS') {
     ensureDealsPaymentStatusDropdownForRow(e.range.getRow(), sheet);
     handleDealPaymentStatusEdit_(e);
+    handleDealPaymentStatusLeadPropagation_(e);
+    return;
+  }
+
+  if (sheet.getName() === 'INSTALLATIONS') {
+    handleInstallationStatusEdit_(e);
     return;
   }
 

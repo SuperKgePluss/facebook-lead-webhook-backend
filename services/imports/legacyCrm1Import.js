@@ -826,13 +826,20 @@ function normalizeCrm1PaymentStatus(value, mappingRules) {
     const mapped = normalizeByMappingRules(mappingRules, "payment_status", raw)
         || normalizeByMappingRules(mappingRules, "payment", raw);
 
-    if (mapped) return mapped;
-    if (!raw) return "unknown";
-    if (raw.includes("ชำระครบแล้ว")) return "paid";
-    if (raw.includes("มัดจำ")) return "partial";
-    if (lower.includes("pre-order") || raw.includes("รอชำระส่วนต่าง")) return "partial";
-    if (raw.includes("ยกเลิก")) return "cancelled";
-    return "unknown";
+    return normalizeCrm1PaymentStatusForSheet(mapped || raw || lower);
+}
+
+function normalizeCrm1PaymentStatusForSheet(value) {
+    const raw = String(value || "").trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw || lower === "unknown") return "Unpaid";
+    if (lower === "paid" || raw.includes("ชำระครบแล้ว")) return "Paid";
+    if (lower === "unpaid") return "Unpaid";
+    if (lower === "cancelled" || lower === "canceled" || raw.includes("ยกเลิก")) return "Cancelled";
+    if (lower === "partial" || raw.includes("มัดจำ") || lower.includes("pre-order") || raw.includes("รอชำระส่วนต่าง")) return "Unpaid";
+
+    return "Unpaid";
 }
 
 function normalizeCrm1InstallationStatus(value, mappingRules) {
@@ -853,18 +860,36 @@ function getCrm1Layout3LeadStatus(installStatus, sourceMarker = "") {
     const raw = String(installStatus || "").trim();
     const marker = normalizeCrm1MarkerText(sourceMarker);
 
-    if (marker.includes("link close won") || marker.includes("close won")) return "Closed";
-    if (raw.includes("ชำระครบแล้ว")) return "Closed";
-    if (raw.includes("ยกเลิก")) return "Not Interested";
+    if (marker.includes("link close won") || marker.includes("close won")) return "Done";
+    if (raw.includes("ชำระครบแล้ว")) return "Done";
+    if (raw.includes("ยกเลิก")) return "Cancelled";
     return "";
 }
 
 function getCrm1Layout4LeadStatus(installationStatus) {
     const status = String(installationStatus || "").trim().toLowerCase();
 
-    if (status === "installed") return "Closed";
-    if (status === "cancelled") return "Not Interested";
+    if (status === "installed") return "Installed";
+    if (status === "cancelled") return "Cancelled";
     return "";
+}
+
+function normalizeCrm1LeadStatusForSheet(value) {
+    const raw = String(value || "").trim();
+    const lower = raw.toLowerCase();
+
+    if (!raw || lower === "unknown") return "New";
+    if (lower === "new") return "New";
+    if (["ongoing", "contacted", "interested", "follow-up", "follow up", "followup", "pending"].includes(lower)) return "Ongoing";
+    if (lower === "installed") return "Installed";
+    if (["done", "closed", "closed won", "completed", "complete"].includes(lower)) return "Done";
+    if (["cancelled", "canceled", "not interested", "closed lost"].includes(lower)) return "Cancelled";
+    if (lower.includes("cancel")) return "Cancelled";
+    if (lower.includes("install")) return "Installed";
+    if (lower.includes("closed") || lower.includes("done") || lower.includes("complete")) return "Done";
+    if (lower.includes("follow") || lower.includes("pending") || lower.includes("contact") || lower.includes("interest")) return "Ongoing";
+
+    return "New";
 }
 
 function normalizeCrm1Layout4InstallationStatus(value) {
@@ -886,8 +911,8 @@ function shouldUpdateCrm1ExistingStatus(existingLeadObject) {
 }
 
 function getCrm1FinalLeadStatus(record) {
-    if (record.finalLeadStatus) return record.finalLeadStatus;
-    return record.closedDate ? "Closed" : "New";
+    if (record.finalLeadStatus) return normalizeCrm1LeadStatusForSheet(record.finalLeadStatus);
+    return record.closedDate ? "Done" : "New";
 }
 
 function normalizeCrm1DealDateKey(value) {
@@ -1176,7 +1201,7 @@ function buildCrm1LeadDetailObject(record, leadId) {
 }
 
 function buildCrm1DealObject(record, leadId, dealId) {
-    return {
+    const object = {
         deal_id: dealId,
         lead_id: leadId,
         product_model: record.productModel,
@@ -1184,6 +1209,7 @@ function buildCrm1DealObject(record, leadId, dealId) {
         quantity: record.deviceCount,
         device_count: record.deviceCount,
         price: record.price,
+        paid_amount: record.price,
         payment_date: record.paymentDate,
         payment_status: record.paymentStatus,
         installation_status: record.installationStatus,
@@ -1200,22 +1226,31 @@ function buildCrm1DealObject(record, leadId, dealId) {
         created_at: record.now,
         import_source: "CRM1 Legacy Import",
     };
+
+    if (String(record.fullAmount || "").trim()) {
+        object.full_amount = record.fullAmount;
+    }
+
+    return object;
 }
 
 function buildCrm1InstallationObject(record, leadId, installId) {
+    const note = [
+        record.note,
+        record.zone ? `Zone: ${record.zone}` : "",
+        record.technician ? `Technician: ${record.technician}` : "",
+        record.cancelReason ? `Cancel Reason: ${record.cancelReason}` : "",
+    ].filter(Boolean).join("\n");
+
     return {
         install_id: installId,
         lead_id: leadId,
-        product_model: record.productModel,
-        quantity: record.quantity,
-        install_date: record.installDate,
-        install_time: record.timeSlot,
-        time_slot: record.timeSlot,
-        technician: record.technician,
         install_status: record.installationStatus,
-        installation_status: record.installationStatus,
-        cancel_reason: record.cancelReason,
-        note: record.note,
+        preferred_install_date: record.installDate,
+        preferred_install_time: record.timeSlot,
+        location: record.address || record.zone,
+        machine_count: record.quantity,
+        note,
         created_at: record.now,
         updated_at: record.now,
         import_source: "CRM1 Legacy Import",
@@ -1669,7 +1704,7 @@ async function handleLegacyCrm1Import(req, res) {
                     }
 
                     if (hasDealData) wouldCreateDeal++;
-                    if (leadStatus === "Closed") closedWonLeads++;
+                    if (leadStatus === "Done") closedWonLeads++;
                     if (hasInstallationData) wouldCreateInstallation++;
                     if (hasActivityData) wouldCreateActivity++;
 

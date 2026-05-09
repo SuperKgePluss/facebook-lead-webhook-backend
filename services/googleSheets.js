@@ -4,6 +4,7 @@ const SHEETS = {
     LEADS_MAIN: "LEADS_MAIN",
     LEAD_DETAILS: "LEAD_DETAILS",
     DEALS: "DEALS",
+    INSTALLATIONS: "INSTALLATIONS",
 };
 
 const HEADER_ROW = 1;
@@ -12,7 +13,63 @@ const DATA_START_ROW = 3;
 const HEADER_ALIASES = {
     facebook_lead_id: "facebook_leadgen_id",
     fb_lead_id: "facebook_leadgen_id",
+    paid_amount: "price",
+    install_date: "preferred_install_date",
+    install_time: "preferred_install_time",
+    time_slot: "preferred_install_time",
+    quantity: "machine_count",
+    device_count: "machine_count",
+    installation_status: "install_status",
 };
+
+function normalizeLeadStatusForSheet(status) {
+    const raw = String(status || "").trim();
+    const value = raw.toLowerCase();
+
+    if (!raw || value === "unknown") return "New";
+    if (["new"].includes(value)) return "New";
+    if (["ongoing", "contacted", "interested", "follow-up", "follow up", "followup", "pending"].includes(value)) return "Ongoing";
+    if (["installed", "installation complete"].includes(value)) return "Installed";
+    if (["done", "closed", "closed won", "completed", "complete"].includes(value)) return "Done";
+    if (["cancelled", "canceled", "not interested", "closed lost"].includes(value)) return "Cancelled";
+
+    if (value.includes("cancel")) return "Cancelled";
+    if (value.includes("not interested")) return "Cancelled";
+    if (value.includes("install")) return "Installed";
+    if (value.includes("closed") || value.includes("done") || value.includes("complete")) return "Done";
+    if (value.includes("follow") || value.includes("pending") || value.includes("contact") || value.includes("interest")) return "Ongoing";
+
+    return "New";
+}
+
+function normalizePaymentStatusForSheet(status) {
+    const raw = String(status || "").trim();
+    const value = raw.toLowerCase();
+
+    if (!raw || value === "unknown") return "Unpaid";
+    if (value === "paid") return "Paid";
+    if (value === "unpaid") return "Unpaid";
+    if (value === "cancelled" || value === "canceled") return "Cancelled";
+    if (value === "partial" || value.includes("partial")) return "Unpaid";
+
+    if (value.includes("cancel")) return "Cancelled";
+    if (value.includes("unpaid")) return "Unpaid";
+    if (value.includes("paid") && !value.includes("unpaid")) return "Paid";
+
+    return "Unpaid";
+}
+
+function normalizeInstallationStatusForSheet(status) {
+    const raw = String(status || "").trim();
+    const value = raw.toLowerCase();
+
+    if (value === "installed") return "Installed";
+    if (value === "cancelled" || value === "canceled") return "Cancelled";
+    if (value.includes("install") && !value.includes("progress")) return "Installed";
+    if (value.includes("cancel")) return "Cancelled";
+
+    return "In Progress";
+}
 
 function normalizePhone(phone) {
     let digits = String(phone || "").replace(/\D/g, "").trim();
@@ -106,18 +163,20 @@ function groupObjectRanges(headers, rowNumber, object) {
             return;
         }
 
+        const value = getObjectValueForCanonicalHeader(object, canonicalHeader);
+
         if (!currentGroup) {
             currentGroup = {
                 startIndex: index,
                 endIndex: index,
-                values: [object[canonicalHeader] ?? ""],
+                values: [value],
             };
             return;
         }
 
         if (index === currentGroup.endIndex + 1) {
             currentGroup.endIndex = index;
-            currentGroup.values.push(object[canonicalHeader] ?? "");
+            currentGroup.values.push(value);
             return;
         }
 
@@ -125,7 +184,7 @@ function groupObjectRanges(headers, rowNumber, object) {
         currentGroup = {
             startIndex: index,
             endIndex: index,
-            values: [object[canonicalHeader] ?? ""],
+            values: [value],
         };
     });
 
@@ -237,8 +296,72 @@ function rowToObject(headers, row) {
     }, {});
 }
 
+function getObjectValueForCanonicalHeader(object, canonicalHeader) {
+    if (!object) return "";
+    if (Object.prototype.hasOwnProperty.call(object, canonicalHeader)) {
+        const value = object[canonicalHeader];
+        if (value !== undefined && value !== null) return value;
+    }
+    if (canonicalHeader === "price" && Object.prototype.hasOwnProperty.call(object, "paid_amount")) {
+        return object.paid_amount ?? "";
+    }
+    return "";
+}
+
+function normalizeSheetObject(sheetName, object = {}) {
+    const normalizedObject = { ...object };
+
+    if (sheetName === SHEETS.LEADS_MAIN) {
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "lead_status")) {
+            normalizedObject.lead_status = normalizeLeadStatusForSheet(normalizedObject.lead_status);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "status")) {
+            normalizedObject.status = normalizeLeadStatusForSheet(normalizedObject.status);
+        }
+    }
+
+    if (sheetName === SHEETS.DEALS) {
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "paid_amount")
+            && !Object.prototype.hasOwnProperty.call(normalizedObject, "price")) {
+            normalizedObject.price = normalizedObject.paid_amount;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "payment_status")) {
+            normalizedObject.payment_status = normalizePaymentStatusForSheet(normalizedObject.payment_status);
+        }
+    }
+
+    if (sheetName === SHEETS.INSTALLATIONS) {
+        const copyIfMissing = (target, sources) => {
+            if (Object.prototype.hasOwnProperty.call(normalizedObject, target)) return;
+            for (const source of sources) {
+                if (Object.prototype.hasOwnProperty.call(normalizedObject, source)
+                    && String(normalizedObject[source] ?? "").trim()) {
+                    normalizedObject[target] = normalizedObject[source];
+                    return;
+                }
+            }
+        };
+
+        copyIfMissing("preferred_install_date", ["install_date"]);
+        copyIfMissing("preferred_install_time", ["install_time", "time_slot"]);
+        copyIfMissing("machine_count", ["quantity", "device_count"]);
+        copyIfMissing("location", ["location", "address", "zone"]);
+
+        if (Object.prototype.hasOwnProperty.call(normalizedObject, "install_status")
+            || Object.prototype.hasOwnProperty.call(normalizedObject, "installation_status")) {
+            normalizedObject.install_status = normalizeInstallationStatusForSheet(
+                normalizedObject.install_status || normalizedObject.installation_status
+            );
+        }
+    }
+
+    return normalizedObject;
+}
+
 function objectToRow(headers, object) {
-    return headers.map(header => object?.[normalizeHeaderName(header)] ?? "");
+    return headers.map(header => getObjectValueForCanonicalHeader(object, normalizeHeaderName(header)));
 }
 
 async function appendObjects(sheetName, objects) {
@@ -252,8 +375,9 @@ async function appendObjects(sheetName, objects) {
     const appendedRows = [];
 
     for (const object of objects) {
+        const normalizedObject = normalizeSheetObject(sheetName, object);
         const rowNumber = nextRow++;
-        const groups = groupObjectRanges(headers, rowNumber, object);
+        const groups = groupObjectRanges(headers, rowNumber, normalizedObject);
 
         for (const group of groups) {
             data.push({
@@ -273,7 +397,7 @@ async function appendObjects(sheetName, objects) {
 async function updateObjectRow(sheetName, rowNumber, object) {
     const { sheets, spreadsheetId } = await createSheetsClient();
     const headers = await getHeaders(sheetName);
-    const groups = groupObjectRanges(headers, rowNumber, object);
+    const groups = groupObjectRanges(headers, rowNumber, normalizeSheetObject(sheetName, object));
 
     await batchUpdateValues(
         sheets,
@@ -365,7 +489,7 @@ function buildLeadMainObject(leadId, lead, existingLead = null) {
         zone: existingLead?.zone || lead.zone || "",
         preferred_call_day: existingLead?.preferred_call_day || lead.preferred_call_day || "",
         preferred_call_time: existingLead?.preferred_call_time || lead.preferred_call_time || "",
-        lead_status: existingLead?.lead_status || lead.status || "New",
+        lead_status: normalizeLeadStatusForSheet(existingLead?.lead_status || lead.status || "New"),
         sales_owner: existingLead?.sales_owner || lead.sales_owner || "",
         created_at: existingLead?.created_at || now,
         updated_at: now,
@@ -403,7 +527,8 @@ function buildDealObject(dealId, leadId, lead = {}, existingDeal = null) {
         product_model: lead.product_model || lead.product_name || existingDeal?.product_model || "",
         package_type: lead.package_type || lead.package_name || existingDeal?.package_type || "",
         price: lead.price || existingDeal?.price || "",
-        payment_status: existingDeal?.payment_status || lead.payment_status || "Unpaid",
+        full_amount: lead.full_amount || existingDeal?.full_amount || "",
+        payment_status: normalizePaymentStatusForSheet(existingDeal?.payment_status || lead.payment_status || "Unpaid"),
         payment_date: existingDeal?.payment_date || lead.payment_date || "",
     };
 }
