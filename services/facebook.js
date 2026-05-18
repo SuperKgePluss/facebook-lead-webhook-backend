@@ -133,6 +133,63 @@ async function debugFacebookAccess() {
     };
 }
 
+async function fetchLeadgenForms() {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.FB_PAGE_ID;
+
+    if (!token) throw new Error("Missing FB_PAGE_ACCESS_TOKEN");
+    if (!pageId) throw new Error("Missing FB_PAGE_ID");
+
+    const formsUrl = `https://graph.facebook.com/${GRAPH_VERSION}/${pageId}/leadgen_forms`;
+    const response = await axios.get(formsUrl, {
+        params: {
+            fields: "id,name,status",
+            limit: 100,
+            access_token: token,
+        },
+    });
+
+    return response.data?.data || [];
+}
+
+async function fetchLeadRefsPageForForm(options = {}) {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN;
+    const formId = String(options.formId || "").trim();
+    const formName = String(options.formName || "").trim();
+    const pageSize = Number.isFinite(Number(options.pageSize)) && Number(options.pageSize) > 0
+        ? Math.min(Number(options.pageSize), 100)
+        : 50;
+    const afterCursor = String(options.afterCursor || "").trim();
+
+    if (!token) throw new Error("Missing FB_PAGE_ACCESS_TOKEN");
+    if (!formId) throw new Error("Missing formId");
+
+    const response = await axios.get(`https://graph.facebook.com/${GRAPH_VERSION}/${formId}/leads`, {
+        params: {
+            fields: "id,created_time",
+            limit: pageSize,
+            after: afterCursor || undefined,
+            access_token: token,
+        },
+    });
+
+    const leads = (response.data?.data || []).map(lead => ({
+        id: lead.id,
+        created_time: lead.created_time,
+        form_id: formId,
+        form_name: formName,
+    }));
+    const nextAfterCursor = response.data?.paging?.next
+        ? response.data?.paging?.cursors?.after || ""
+        : "";
+
+    return {
+        leads,
+        next_after_cursor: nextAfterCursor,
+        next_url_available: Boolean(response.data?.paging?.next),
+    };
+}
+
 async function fetchLatestLeadIdsFromPage(options = {}) {
     const token = process.env.FB_PAGE_ACCESS_TOKEN;
     const pageId = process.env.FB_PAGE_ID;
@@ -331,6 +388,8 @@ module.exports = {
     debugFacebookForm,
     debugLeadgenForms,
     debugFacebookAccess,
+    fetchLeadgenForms,
+    fetchLeadRefsPageForForm,
     fetchLatestLeadIdsFromPage,
     fetchAllLeadIdsFromPage,
 };

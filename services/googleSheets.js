@@ -5,10 +5,32 @@ const SHEETS = {
     LEAD_DETAILS: "LEAD_DETAILS",
     DEALS: "DEALS",
     INSTALLATIONS: "INSTALLATIONS",
+    SYNC_STATE: "SYNC_STATE",
 };
 
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
+const SYNC_STATE_DATA_ROW = 3;
+const SYNC_STATE_HEADERS = [
+    "job_id",
+    "status",
+    "mode",
+    "current_form_index",
+    "current_form_id",
+    "current_form_name",
+    "after_cursor",
+    "processed_total",
+    "inserted_total",
+    "updated_existing_total",
+    "skipped_existing_total",
+    "skipped_empty_total",
+    "failed_total",
+    "forms_count",
+    "started_at",
+    "updated_at",
+    "completed_at",
+    "last_error",
+];
 
 const HEADER_ALIASES = {
     facebook_lead_id: "facebook_leadgen_id",
@@ -271,6 +293,32 @@ async function readSheet(sheets, spreadsheetId, range) {
     return result.data.values || [];
 }
 
+async function ensureSheetExists(sheets, spreadsheetId, sheetName) {
+    const spreadsheet = await sheets.spreadsheets.get({
+        spreadsheetId,
+        fields: "sheets.properties.title",
+    });
+    const exists = (spreadsheet.data.sheets || [])
+        .some(sheet => sheet.properties?.title === sheetName);
+
+    if (exists) return;
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+            requests: [
+                {
+                    addSheet: {
+                        properties: {
+                            title: sheetName,
+                        },
+                    },
+                },
+            ],
+        },
+    });
+}
+
 async function updateSheet(sheets, spreadsheetId, range, values) {
     await sheets.spreadsheets.values.update({
         spreadsheetId,
@@ -278,6 +326,56 @@ async function updateSheet(sheets, spreadsheetId, range, values) {
         valueInputOption: "USER_ENTERED",
         requestBody: { values },
     });
+}
+
+async function ensureSyncStateSheet() {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    await ensureSheetExists(sheets, spreadsheetId, SHEETS.SYNC_STATE);
+
+    const rows = await readSheet(sheets, spreadsheetId, `${SHEETS.SYNC_STATE}!A:ZZ`);
+    const headers = rows[HEADER_ROW - 1] || [];
+    const existingHeaders = headers.map(normalizeHeaderName);
+    const hasAllHeaders = SYNC_STATE_HEADERS.every(header => existingHeaders.includes(header));
+
+    if (!hasAllHeaders) {
+        await updateSheet(
+            sheets,
+            spreadsheetId,
+            `${SHEETS.SYNC_STATE}!A${HEADER_ROW}:${columnToLetter(SYNC_STATE_HEADERS.length)}${HEADER_ROW}`,
+            [SYNC_STATE_HEADERS]
+        );
+        rows[HEADER_ROW - 1] = SYNC_STATE_HEADERS;
+    }
+
+    return {
+        sheets,
+        spreadsheetId,
+        rows,
+        headers: rows[HEADER_ROW - 1] || SYNC_STATE_HEADERS,
+    };
+}
+
+async function getFacebookBackfillState() {
+    const { rows, headers } = await ensureSyncStateSheet();
+    const state = rowToObject(headers, rows[SYNC_STATE_DATA_ROW - 1] || []);
+
+    if (!String(state.job_id || "").trim()) return null;
+    return state;
+}
+
+async function saveFacebookBackfillState(state) {
+    const { sheets, spreadsheetId, headers } = await ensureSyncStateSheet();
+    const normalizedState = normalizeSheetObject(SHEETS.SYNC_STATE, state);
+    const row = objectToRow(headers, normalizedState);
+
+    await updateSheet(
+        sheets,
+        spreadsheetId,
+        `${SHEETS.SYNC_STATE}!A${SYNC_STATE_DATA_ROW}:${columnToLetter(headers.length)}${SYNC_STATE_DATA_ROW}`,
+        [row]
+    );
+
+    return normalizedState;
 }
 
 async function batchUpdateValues(sheets, spreadsheetId, data) {
@@ -895,6 +993,8 @@ module.exports = {
     headerIndex,
     rowToObject,
     objectToRow,
+    getFacebookBackfillState,
+    saveFacebookBackfillState,
     appendObjects,
     updateObjectRow,
     normalizePhone,

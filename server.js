@@ -8,6 +8,8 @@ const {
     debugFacebookForm,
     debugLeadgenForms,
     debugFacebookAccess,
+    fetchLeadgenForms,
+    fetchLeadRefsPageForForm,
     fetchLatestLeadIdsFromPage,
     fetchAllLeadIdsFromPage,
 } = require("./services/facebook");
@@ -15,6 +17,8 @@ const {
 const {
     appendLeadToSheet,
     appendLeadsToSheetBatch,
+    getFacebookBackfillState,
+    saveFacebookBackfillState,
 } = require("./services/googleSheets");
 const { handleLegacyCrm2Import } = require("./services/imports/legacyCrm2Import");
 const { handleLegacyCrm1Import } = require("./services/imports/legacyCrm1Import");
@@ -455,6 +459,42 @@ function parseBooleanQuery(value) {
     return String(value || "").trim().toLowerCase() === "true";
 }
 
+function parsePositiveInteger(value, fallback, max = null) {
+    const parsed = Number(value);
+    const safeValue = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+    return max ? Math.min(safeValue, max) : safeValue;
+}
+
+function buildFacebookBackfillResponse(state, extra = {}) {
+    const status = String(state?.status || "").trim() || "not_started";
+    const nextUrlAvailable = status === "running"
+        && Boolean(String(state?.current_form_id || "").trim());
+
+    return {
+        success: true,
+        job_id: state?.job_id || "",
+        status,
+        mode: state?.mode || "facebook_backfill",
+        current_form_index: Number(state?.current_form_index || 0),
+        current_form_id: state?.current_form_id || "",
+        current_form_name: state?.current_form_name || "",
+        processed_total: Number(state?.processed_total || 0),
+        inserted_total: Number(state?.inserted_total || 0),
+        updated_existing_total: Number(state?.updated_existing_total || 0),
+        skipped_existing_total: Number(state?.skipped_existing_total || 0),
+        skipped_empty_total: Number(state?.skipped_empty_total || 0),
+        failed_total: Number(state?.failed_total || 0),
+        forms_count: Number(state?.forms_count || 0),
+        next_url_available: nextUrlAvailable,
+        continue_required: status === "running",
+        started_at: state?.started_at || "",
+        updated_at: state?.updated_at || "",
+        completed_at: state?.completed_at || "",
+        last_error: state?.last_error || "",
+        ...extra,
+    };
+}
+
 async function parseAndEnrichFacebookLeadForSync(leadRef) {
     const leadgenId = String(leadRef.id || "").trim();
     const leadData = await fetchLeadDetail(leadgenId);
@@ -570,6 +610,309 @@ app.post("/webhook/facebook", async (req, res) => {
     } catch (err) {
         console.error("Webhook error:", err.message);
         return res.sendStatus(200);
+    }
+});
+
+app.all("/sync/facebook-leads/backfill/start", async (req, res) => {
+    try {
+        if (!requireSyncSecret(req, res)) return;
+
+        const forms = await fetchLeadgenForms();
+        const now = formatDateTimeForSheet(new Date());
+        const firstForm = forms[0] || {};
+        const state = {
+            job_id: `FB-BACKFILL-${Date.now()}`,
+            status: forms.length ? "running" : "completed",
+            mode: "facebook_backfill",
+            current_form_index: forms.length ? 0 : "",
+            current_form_id: firstForm.id || "",
+            current_form_name: firstForm.name || "",
+            after_cursor: "",
+            processed_total: 0,
+            inserted_total: 0,
+            updated_existing_total: 0,
+            skipped_existing_total: 0,
+            skipped_empty_total: 0,
+            failed_total: 0,
+            forms_count: forms.length,
+            started_at: now,
+            updated_at: now,
+            completed_at: forms.length ? "" : now,
+            last_error: "",
+        };
+
+        await saveFacebookBackfillState(state);
+        console.log("[facebook-backfill] started", {
+            job_id: state.job_id,
+            forms_count: forms.length,
+            first_form_id: firstForm.id || "",
+        });
+
+        return res.status(200).json(buildFacebookBackfillResponse(state, {
+            forms: forms.map(form => ({
+                id: form.id,
+                name: form.name,
+                status: form.status || "",
+            })),
+        }));
+    } catch (err) {
+        console.error("[facebook-backfill] start failed:", err.message);
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+        });
+    }
+});
+
+app.get("/sync/facebook-leads/backfill/status", async (req, res) => {
+    try {
+        if (!requireSyncSecret(req, res)) return;
+
+        const state = await getFacebookBackfillState();
+        if (!state) {
+            return res.status(200).json({
+                success: true,
+                status: "not_started",
+                continue_required: false,
+            });
+        }
+
+        return res.status(200).json(buildFacebookBackfillResponse(state));
+    } catch (err) {
+        console.error("[facebook-backfill] status failed:", err.message);
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+        });
+    }
+});
+
+app.get("/sync/facebook-leads/backfill/step", async (req, res) => {
+    const stopAtMs = Date.now() + 50000;
+
+    try {
+        if (!requireSyncSecret(req, res)) return;
+
+        const pageSize = parsePositiveInteger(req.query.page_size, 50, 100);
+        const maxPages = parsePositiveInteger(req.query.max_pages, 3, 10);
+        const forms = await fetchLeadgenForms();
+        let state = await getFacebookBackfillState();
+
+        if (!state) {
+            return res.status(409).json({
+                success: false,
+                error: "No Facebook backfill job found. Start one first.",
+                start_url: "/sync/facebook-leads/backfill/start?secret=...",
+            });
+        }
+
+        if (state.status === "completed") {
+            return res.status(200).json(buildFacebookBackfillResponse(state, {
+                pages_processed: 0,
+                fetched: 0,
+                inserted: 0,
+                updated_existing: 0,
+                skipped_existing: 0,
+                skipped_empty: 0,
+                failed: 0,
+            }));
+        }
+
+        let currentFormIndex = Number(state.current_form_index || 0);
+        let afterCursor = String(state.after_cursor || "").trim();
+        let processedTotal = Number(state.processed_total || 0);
+        let insertedTotal = Number(state.inserted_total || 0);
+        let updatedExistingTotal = Number(state.updated_existing_total || 0);
+        let skippedExistingTotal = Number(state.skipped_existing_total || 0);
+        let skippedEmptyTotal = Number(state.skipped_empty_total || 0);
+        let failedTotal = Number(state.failed_total || 0);
+
+        let pagesProcessed = 0;
+        let fetched = 0;
+        let inserted = 0;
+        let updatedExisting = 0;
+        let skippedExisting = 0;
+        let skippedEmpty = 0;
+        let failed = 0;
+        const failedItems = [];
+        let status = "running";
+        let lastError = "";
+
+        while (pagesProcessed < maxPages && Date.now() < stopAtMs) {
+            if (currentFormIndex >= forms.length) {
+                status = "completed";
+                afterCursor = "";
+                break;
+            }
+
+            const insertedBeforePage = inserted;
+            const updatedExistingBeforePage = updatedExisting;
+            const skippedExistingBeforePage = skippedExisting;
+            const skippedEmptyBeforePage = skippedEmpty;
+            const failedBeforePage = failed;
+            const currentForm = forms[currentFormIndex];
+            console.log("[facebook-backfill] fetching page", {
+                form_index: currentFormIndex,
+                form_id: currentForm.id,
+                page_size: pageSize,
+                has_after_cursor: Boolean(afterCursor),
+            });
+
+            const pageResult = await fetchLeadRefsPageForForm({
+                formId: currentForm.id,
+                formName: currentForm.name,
+                pageSize,
+                afterCursor,
+            });
+            pagesProcessed++;
+            fetched += pageResult.leads.length;
+
+            const parsedBatch = [];
+            for (const leadRef of pageResult.leads) {
+                const leadgenId = String(leadRef.id || "").trim();
+
+                if (!leadgenId) {
+                    skippedEmpty++;
+                    failedItems.push({
+                        leadgen_id: "",
+                        reason: "missing_leadgen_id",
+                    });
+                    continue;
+                }
+
+                try {
+                    const { lead } = await parseAndEnrichFacebookLeadForSync(leadRef);
+
+                    if (!lead.facebook_leadgen_id) {
+                        skippedEmpty++;
+                        failedItems.push({
+                            leadgen_id: leadgenId,
+                            reason: "missing_facebook_leadgen_id",
+                        });
+                        continue;
+                    }
+
+                    if (!lead.phone && !lead.name) {
+                        skippedEmpty++;
+                        failedItems.push({
+                            leadgen_id: leadgenId,
+                            reason: "missing_phone_and_name",
+                        });
+                        continue;
+                    }
+
+                    parsedBatch.push(lead);
+                } catch (err) {
+                    failed++;
+                    failedItems.push({
+                        leadgen_id: leadgenId,
+                        form_id: leadRef.form_id || "",
+                        form_name: leadRef.form_name || "",
+                        reason: err.message,
+                    });
+                }
+            }
+
+            if (parsedBatch.length) {
+                console.log("[facebook-backfill] writing page", {
+                    parsed: parsedBatch.length,
+                    form_id: currentForm.id,
+                });
+                const batchResult = await appendLeadsToSheetBatch(parsedBatch);
+                inserted += batchResult.created;
+                updatedExisting += batchResult.updated_existing;
+                skippedExisting += batchResult.skipped_existing;
+                skippedEmpty += batchResult.skipped_empty;
+            }
+
+            processedTotal += pageResult.leads.length;
+            insertedTotal += inserted - insertedBeforePage;
+            updatedExistingTotal += updatedExisting - updatedExistingBeforePage;
+            skippedExistingTotal += skippedExisting - skippedExistingBeforePage;
+            skippedEmptyTotal += skippedEmpty - skippedEmptyBeforePage;
+            failedTotal += failed - failedBeforePage;
+
+            if (pageResult.next_after_cursor) {
+                afterCursor = pageResult.next_after_cursor;
+            } else {
+                currentFormIndex++;
+                afterCursor = "";
+            }
+        }
+
+        if (currentFormIndex >= forms.length) {
+            status = "completed";
+            afterCursor = "";
+        }
+
+        const currentForm = forms[currentFormIndex] || {};
+        const now = formatDateTimeForSheet(new Date());
+        state = {
+            ...state,
+            status,
+            current_form_index: status === "completed" ? "" : currentFormIndex,
+            current_form_id: status === "completed" ? "" : currentForm.id || "",
+            current_form_name: status === "completed" ? "" : currentForm.name || "",
+            after_cursor: status === "completed" ? "" : afterCursor,
+            processed_total: processedTotal,
+            inserted_total: insertedTotal,
+            updated_existing_total: updatedExistingTotal,
+            skipped_existing_total: skippedExistingTotal,
+            skipped_empty_total: skippedEmptyTotal,
+            failed_total: failedTotal,
+            forms_count: forms.length,
+            updated_at: now,
+            completed_at: status === "completed" ? now : "",
+            last_error: lastError,
+        };
+
+        await saveFacebookBackfillState(state);
+        console.log("[facebook-backfill] step complete", {
+            job_id: state.job_id,
+            status,
+            pages_processed: pagesProcessed,
+            fetched,
+            inserted,
+            updated_existing: updatedExisting,
+            skipped_existing: skippedExisting,
+            skipped_empty: skippedEmpty,
+            failed,
+            next_url_available: status === "running" && Boolean(state.current_form_id),
+        });
+
+        return res.status(200).json(buildFacebookBackfillResponse(state, {
+            pages_processed: pagesProcessed,
+            fetched,
+            inserted,
+            updated_existing: updatedExisting,
+            skipped_existing: skippedExisting,
+            skipped_empty: skippedEmpty,
+            failed,
+            next_url_available: status === "running" && Boolean(state.current_form_id),
+            continue_required: status === "running",
+            failed_items: failedItems.slice(0, 30),
+        }));
+    } catch (err) {
+        console.error("[facebook-backfill] step failed:", err.message);
+
+        try {
+            const state = await getFacebookBackfillState();
+            if (state) {
+                await saveFacebookBackfillState({
+                    ...state,
+                    status: "failed",
+                    updated_at: formatDateTimeForSheet(new Date()),
+                    last_error: err.message,
+                });
+            }
+        } catch (stateErr) {
+            console.error("[facebook-backfill] failed to save error state:", stateErr.message);
+        }
+
+        return res.status(500).json({
+            success: false,
+            error: err.message,
+        });
     }
 });
 
