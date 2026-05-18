@@ -260,6 +260,12 @@ function maskDebugValue(value) {
     return `${raw.slice(0, 4)}...${raw.slice(-4)}`;
 }
 
+function maskDebugName(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    return raw.length <= 2 ? "***" : `${raw.slice(0, 1)}***${raw.slice(-1)}`;
+}
+
 async function fetchFacebookGraphDebugObject(objectId, fields) {
     const token = process.env.FB_PAGE_ACCESS_TOKEN;
 
@@ -689,10 +695,116 @@ app.get("/debug/routes", requireSyncSecretMiddleware, (req, res) => {
             "GET /debug/facebook-form",
             "GET /debug/leadgen-forms",
             "GET /debug/facebook-form-raw",
+            "GET /debug/facebook-leads-dry-run",
             "GET /debug/facebook-lead/:leadgenId",
             "GET /debug/lead/:leadgenId",
         ],
     });
+});
+
+app.get("/debug/facebook-leads-dry-run", requireSyncSecretMiddleware, async (req, res) => {
+    try {
+        const limitQuery = Number(req.query.limit);
+        const limit = Number.isFinite(limitQuery) && limitQuery > 0 ? limitQuery : 20;
+        const leadRefs = await fetchLatestLeadIdsFromPage({ limit });
+        const preview = [];
+        const failedItems = [];
+        let parsed = 0;
+        let enrichedSuccess = 0;
+        let missingPhone = 0;
+        let missingCustomerName = 0;
+        let missingForm = 0;
+        let missingAd = 0;
+        let missingCampaign = 0;
+
+        for (const leadRef of leadRefs) {
+            const leadgenId = String(leadRef.id || "").trim();
+            if (!leadgenId) {
+                failedItems.push({ leadgen_id: "", reason: "missing_leadgen_id" });
+                continue;
+            }
+
+            try {
+                const leadData = await fetchLeadDetail(leadgenId);
+                const lead = parseFacebookLead(leadData);
+
+                lead.source = "Facebook";
+                lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
+                lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
+                lead.facebook_form_name = leadRef.form_name || "";
+                lead.facebook_ad_id = leadData.ad_id || "";
+                lead.facebook_ad_name = "";
+                lead.facebook_campaign_id = leadData.campaign_id || "";
+                lead.facebook_campaign_name = leadData.campaign_name || "";
+                lead.facebook_adset_name = leadData.adset_name || "";
+
+                const attributionEnriched = await enrichFacebookLeadAttribution(lead, leadData);
+                if (attributionEnriched) enrichedSuccess++;
+
+                const missingFields = [];
+                if (!lead.phone) missingFields.push("phone");
+                if (!lead.name) missingFields.push("customer_name");
+                if (!lead.lead_form_name && !lead.facebook_form_name) missingFields.push("form_name");
+                if (!lead.ad_name && !lead.facebook_ad_name) missingFields.push("ad_name");
+                if (!lead.campaign_name && !lead.facebook_campaign_name) missingFields.push("campaign_name");
+
+                if (!lead.phone) missingPhone++;
+                if (!lead.name) missingCustomerName++;
+                if (!lead.lead_form_name && !lead.facebook_form_name) missingForm++;
+                if (!lead.ad_name && !lead.facebook_ad_name) missingAd++;
+                if (!lead.campaign_name && !lead.facebook_campaign_name) missingCampaign++;
+
+                parsed++;
+                preview.push({
+                    leadgen_id: lead.facebook_leadgen_id,
+                    customer_name: lead.name || "",
+                    phone: lead.phone || "",
+                    form_name: lead.lead_form_name || lead.facebook_form_name || "",
+                    ad_name: lead.ad_name || lead.facebook_ad_name || "",
+                    adset_name: lead.adset_name || lead.facebook_adset_name || "",
+                    campaign_name: lead.campaign_name || lead.facebook_campaign_name || "",
+                    has_required_data: Boolean(lead.phone && lead.name),
+                    missing_fields: missingFields,
+                });
+
+                console.log("Facebook dry-run lead parsed:", {
+                    leadgen_id: maskDebugValue(leadgenId),
+                    customer_name: maskDebugName(lead.name),
+                    phone: maskDebugValue(lead.phone),
+                    enriched: attributionEnriched,
+                    missing_fields: missingFields,
+                });
+            } catch (err) {
+                failedItems.push({
+                    leadgen_id: maskDebugValue(leadgenId),
+                    reason: err.response?.data?.error?.message || err.message,
+                });
+            }
+        }
+
+        return res.status(200).json({
+            success: true,
+            dry_run: true,
+            limit,
+            fetched: leadRefs.length,
+            parsed,
+            enriched_success: enrichedSuccess,
+            missing_phone: missingPhone,
+            missing_customer_name: missingCustomerName,
+            missing_form: missingForm,
+            missing_ad: missingAd,
+            missing_campaign: missingCampaign,
+            preview,
+            failed_items: failedItems.slice(0, 30),
+        });
+    } catch (err) {
+        console.error("Facebook dry-run failed:", err.response?.data || err.message);
+        return res.status(500).json({
+            success: false,
+            dry_run: true,
+            error: err.response?.data || err.message,
+        });
+    }
 });
 
 app.get("/debug/facebook-lead/:leadgenId", requireSyncSecretMiddleware, async (req, res) => {
