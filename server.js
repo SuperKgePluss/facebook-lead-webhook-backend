@@ -525,7 +525,45 @@ app.get("/sync/facebook-leads", async (req, res) => {
         const mode = String(req.query.mode || "").trim().toLowerCase();
         if (mode === "full") {
             const startedAtMs = Date.now();
-            const stopAtMs = startedAtMs + 45000;
+            const stopAtMs = startedAtMs + 50000;
+            let fullSyncResponded = false;
+            let latestFullSyncCounters = {
+                fetched_total: 0,
+                processed: 0,
+                parsed: 0,
+                inserted: 0,
+                updated_existing: 0,
+                skipped_existing: 0,
+                skipped_empty: 0,
+                failed: 0,
+                enriched_success: 0,
+                stopped_early: false,
+                stop_reason: "",
+            };
+            const sendFullSyncResponse = (statusCode, payload) => {
+                if (fullSyncResponded || res.headersSent) return false;
+                fullSyncResponded = true;
+                console.log("[full-sync] response sent", {
+                    status_code: statusCode,
+                    ...latestFullSyncCounters,
+                });
+                res.status(statusCode).json(payload);
+                return true;
+            };
+            const fullSyncResponseTimer = setTimeout(() => {
+                latestFullSyncCounters = {
+                    ...latestFullSyncCounters,
+                    stopped_early: true,
+                    stop_reason: latestFullSyncCounters.stop_reason || "response_timeout_guard",
+                };
+                sendFullSyncResponse(504, {
+                    success: false,
+                    mode: "full",
+                    error: "Full sync response timeout guard reached. Some in-flight work may still finish.",
+                    ...latestFullSyncCounters,
+                    continue_instructions: "Retry with dry_run=true first, then run mode=full with limit=50 or 100 and max_total=100 per request.",
+                });
+            }, 60000);
             const pageSizeQuery = Number(req.query.limit);
             const pageSize = Number.isFinite(pageSizeQuery) && pageSizeQuery > 0
                 ? Math.min(pageSizeQuery, 100)
@@ -613,9 +651,29 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 }
 
                 processed += batchRefs.length;
+                latestFullSyncCounters = {
+                    ...latestFullSyncCounters,
+                    fetched_total: leadRefs.length,
+                    processed,
+                    parsed,
+                    inserted,
+                    updated_existing: updatedExisting,
+                    skipped_existing: skippedExisting,
+                    skipped_empty: skippedEmpty,
+                    failed: failedItems.length,
+                    enriched_success: enrichedSuccess,
+                    stopped_early: stoppedEarly,
+                    stop_reason: stopReason,
+                };
 
                 if (dryRun || !parsedBatch.length) {
                     continue;
+                }
+
+                if (Date.now() >= stopAtMs) {
+                    stoppedEarly = true;
+                    stopReason = stopReason || "timeout_guard_before_sheet_write";
+                    break;
                 }
 
                 const batchResult = await appendLeadsToSheetBatch(parsedBatch);
@@ -624,11 +682,32 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 skippedExisting += batchResult.skipped_existing;
                 skippedEmpty += batchResult.skipped_empty;
                 batchSkippedEmptyItems = batchSkippedEmptyItems.concat(batchResult.skipped_empty_items || []);
+                latestFullSyncCounters = {
+                    ...latestFullSyncCounters,
+                    inserted,
+                    updated_existing: updatedExisting,
+                    skipped_existing: skippedExisting,
+                    skipped_empty: skippedEmpty,
+                };
             }
 
             const failed = failedItems.length;
+            latestFullSyncCounters = {
+                fetched_total: leadRefs.length,
+                processed,
+                parsed,
+                inserted,
+                updated_existing: updatedExisting,
+                skipped_existing: skippedExisting,
+                skipped_empty: skippedEmpty,
+                failed,
+                enriched_success: enrichedSuccess,
+                stopped_early: stoppedEarly,
+                stop_reason: stopReason,
+            };
 
-            return res.status(200).json({
+            clearTimeout(fullSyncResponseTimer);
+            return sendFullSyncResponse(200, {
                 success: true,
                 mode: "full",
                 dry_run: dryRun,
@@ -762,6 +841,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
         });
     } catch (err) {
         console.error("❌ Facebook lead batch sync failed:", err.message);
+
+        if (res.headersSent) return;
 
         return res.status(500).json({
             success: false,
