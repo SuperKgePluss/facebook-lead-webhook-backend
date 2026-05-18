@@ -277,6 +277,76 @@ async function fetchFacebookGraphDebugObject(objectId, fields) {
     return response.data;
 }
 
+async function enrichFacebookLeadAttribution(lead, leadData) {
+    const leadgenId = String(leadData?.id || lead.facebook_leadgen_id || "").trim();
+    let enriched = false;
+
+    const safeFetch = async (objectId, fields, label) => {
+        if (!objectId) return null;
+
+        try {
+            return await fetchFacebookGraphDebugObject(objectId, fields);
+        } catch (err) {
+            console.warn("Facebook attribution enrichment skipped:", {
+                leadgen_id: maskDebugValue(leadgenId),
+                object_type: label,
+                object_id: maskDebugValue(objectId),
+                reason: err.response?.data?.error?.message || err.message,
+            });
+            return null;
+        }
+    };
+
+    const attributionLeadData = await safeFetch(
+        leadgenId,
+        "field_data,form_id,ad_id,campaign_id",
+        "leadgen"
+    );
+
+    if (!attributionLeadData) {
+        return false;
+    }
+
+    const formData = await safeFetch(attributionLeadData.form_id, "name", "form");
+    if (formData?.name) {
+        lead.lead_form_name = formData.name;
+        lead.facebook_form_name = formData.name;
+        enriched = true;
+    }
+
+    const adData = await safeFetch(
+        attributionLeadData.ad_id,
+        "name,adset{name,campaign{name}}",
+        "ad"
+    );
+    if (adData?.name) {
+        lead.ad_name = adData.name;
+        lead.facebook_ad_name = adData.name;
+        enriched = true;
+    }
+    if (adData?.adset?.name) {
+        lead.adset_name = adData.adset.name;
+        lead.facebook_adset_name = adData.adset.name;
+        enriched = true;
+    }
+    if (adData?.adset?.campaign?.name) {
+        lead.campaign_name = adData.adset.campaign.name;
+        lead.facebook_campaign_name = adData.adset.campaign.name;
+        enriched = true;
+    }
+
+    if (attributionLeadData.campaign_id && !lead.campaign_name) {
+        const campaignData = await safeFetch(attributionLeadData.campaign_id, "name", "campaign");
+        if (campaignData?.name) {
+            lead.campaign_name = campaignData.name;
+            lead.facebook_campaign_name = campaignData.name;
+            enriched = true;
+        }
+    }
+
+    return enriched;
+}
+
 function formatDateTimeForSheet(date = new Date()) {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
         return "";
@@ -380,10 +450,12 @@ app.post("/webhook/facebook", async (req, res) => {
                     lead.facebook_form_id = leadData.form_id || "";
                     lead.facebook_form_name = "";
                     lead.facebook_ad_id = leadData.ad_id || "";
+                    lead.facebook_ad_name = "";
                     lead.facebook_campaign_id = leadData.campaign_id || "";
                     lead.facebook_campaign_name = leadData.campaign_name || "";
                     lead.facebook_adset_name = leadData.adset_name || "";
                     lead.raw_data_json = JSON.stringify(leadData);
+                    const attributionEnriched = await enrichFacebookLeadAttribution(lead, leadData);
 
                     if (!lead.facebook_leadgen_id) {
                         console.warn("⚠️ Webhook lead has no facebook_leadgen_id → skip");
@@ -396,6 +468,7 @@ app.post("/webhook/facebook", async (req, res) => {
                     }
 
                     const result = await appendLeadToSheet(lead);
+                    result.attribution_enriched = attributionEnriched;
 
                     console.log("✅ Webhook lead processed:", leadgenId, result);
                 } catch (err) {
@@ -433,6 +506,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
 
         const parsedLeads = [];
         const failedItems = [];
+        let enriched_success = 0;
         let skipped_empty = 0;
 
         for (const leadRef of leadRefs) {
@@ -459,10 +533,13 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
                 lead.facebook_form_name = leadRef.form_name || "";
                 lead.facebook_ad_id = leadData.ad_id || "";
+                lead.facebook_ad_name = "";
                 lead.facebook_campaign_id = leadData.campaign_id || "";
                 lead.facebook_campaign_name = leadData.campaign_name || "";
                 lead.facebook_adset_name = leadData.adset_name || "";
                 lead.raw_data_json = JSON.stringify(leadData);
+                const attributionEnriched = await enrichFacebookLeadAttribution(lead, leadData);
+                if (attributionEnriched) enriched_success++;
 
                 if (!lead.facebook_leadgen_id) {
                     skipped_empty++;
@@ -510,6 +587,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
             skipped_existing: batchResult.skipped_existing,
             skipped_empty: skipped_empty + batchResult.skipped_empty,
             failed,
+            enriched_success,
             affected_rows: batchResult.affected_rows || [],
             incremental_cleanup_attempted: batchResult.incremental_cleanup_attempted || false,
             incremental_cleanup_rows: batchResult.incremental_cleanup_rows || 0,

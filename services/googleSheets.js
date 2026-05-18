@@ -140,6 +140,29 @@ function getNextDataRow(rows) {
     return Math.max(getLastDataRow(rows) + 1, DATA_START_ROW);
 }
 
+async function ensureSheetHeaders(sheets, spreadsheetId, sheetName, rows, requiredHeaders) {
+    const headers = rows[HEADER_ROW - 1] || [];
+    const existingHeaders = new Set(headers.map(normalizeHeaderName).filter(Boolean));
+    const missingHeaders = requiredHeaders.filter(header => !existingHeaders.has(normalizeHeaderName(header)));
+
+    if (!missingHeaders.length) {
+        return headers;
+    }
+
+    const startColumn = columnToLetter(headers.length + 1);
+    const endColumn = columnToLetter(headers.length + missingHeaders.length);
+    await updateSheet(
+        sheets,
+        spreadsheetId,
+        `${sheetName}!${startColumn}${HEADER_ROW}:${endColumn}${HEADER_ROW}`,
+        [missingHeaders]
+    );
+
+    const updatedHeaders = [...headers, ...missingHeaders];
+    rows[HEADER_ROW - 1] = updatedHeaders;
+    return updatedHeaders;
+}
+
 function normalizeHeaderName(headerName) {
     const normalized = String(headerName || "")
         .trim()
@@ -522,6 +545,10 @@ function buildLeadMainObject(leadId, lead, existingLead = null) {
         zone: existingLead?.zone || lead.zone || "",
         preferred_call_day: existingLead?.preferred_call_day || lead.preferred_call_day || "",
         preferred_call_time: existingLead?.preferred_call_time || lead.preferred_call_time || "",
+        lead_form_name: lead.lead_form_name || lead.facebook_form_name || "",
+        ad_name: lead.ad_name || lead.facebook_ad_name || "",
+        adset_name: lead.adset_name || lead.facebook_adset_name || "",
+        campaign_name: lead.campaign_name || lead.facebook_campaign_name || "",
         lead_status: normalizeLeadStatusForSheet(existingLead?.lead_status || lead.status || "New"),
         sales_owner: existingLead?.sales_owner || lead.sales_owner || "",
         created_at: existingLead?.created_at || now,
@@ -619,7 +646,13 @@ async function appendLeadsToSheetBatch(leads) {
         readSheet(sheets, spreadsheetId, `${SHEETS.DEALS}!A:ZZ`),
     ]);
 
-    const leadHeaders = leadsRows[HEADER_ROW - 1] || [];
+    const leadHeaders = await ensureSheetHeaders(
+        sheets,
+        spreadsheetId,
+        SHEETS.LEADS_MAIN,
+        leadsRows,
+        ["lead_form_name", "ad_name", "adset_name", "campaign_name"]
+    );
     const detailHeaders = detailsRows[HEADER_ROW - 1] || [];
     const dealHeaders = dealsRows[HEADER_ROW - 1] || [];
 
