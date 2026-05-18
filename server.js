@@ -370,6 +370,24 @@ function formatDateTimeForSheet(date = new Date()) {
     });
 }
 
+function getFacebookCreatedTimeForSheet(leadData) {
+    const rawCreatedTime = String(leadData?.created_time || "").trim();
+
+    if (!rawCreatedTime) {
+        return {
+            value: "",
+            used: false,
+        };
+    }
+
+    const formattedCreatedTime = formatDateTimeForSheet(new Date(rawCreatedTime));
+
+    return {
+        value: formattedCreatedTime,
+        used: Boolean(formattedCreatedTime),
+    };
+}
+
 function requireSyncSecret(req, res) {
     if (!process.env.SYNC_SECRET) {
         console.error("❌ Missing SYNC_SECRET in environment variables");
@@ -415,9 +433,8 @@ async function parseAndEnrichFacebookLeadForSync(leadRef) {
 
     lead.source = "Facebook";
     lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
-    lead.facebook_created_time = leadData.created_time
-        ? formatDateTimeForSheet(new Date(leadData.created_time))
-        : "";
+    const facebookCreatedTime = getFacebookCreatedTimeForSheet(leadData);
+    lead.facebook_created_time = facebookCreatedTime.value;
     lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
     lead.facebook_form_name = lead.lead_form_name || lead.facebook_form_name || leadRef.form_name || "";
     lead.facebook_ad_id = leadData.ad_id || "";
@@ -427,7 +444,11 @@ async function parseAndEnrichFacebookLeadForSync(leadRef) {
     lead.facebook_adset_name = lead.adset_name || lead.facebook_adset_name || "";
     lead.raw_data_json = JSON.stringify(leadData);
 
-    return { lead, attributionEnriched };
+    return {
+        lead,
+        attributionEnriched,
+        facebookCreatedTimeUsed: facebookCreatedTime.used,
+    };
 }
 
 app.get("/health", (req, res) => {
@@ -478,9 +499,8 @@ app.post("/webhook/facebook", async (req, res) => {
 
                     lead.source = "Facebook";
                     lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
-                    lead.facebook_created_time = leadData.created_time
-                        ? formatDateTimeForSheet(new Date(leadData.created_time))
-                        : "";
+                    const facebookCreatedTime = getFacebookCreatedTimeForSheet(leadData);
+                    lead.facebook_created_time = facebookCreatedTime.value;
                     lead.facebook_form_id = leadData.form_id || "";
                     lead.facebook_form_name = "";
                     lead.facebook_ad_id = leadData.ad_id || "";
@@ -503,6 +523,7 @@ app.post("/webhook/facebook", async (req, res) => {
 
                     const result = await appendLeadToSheet(lead);
                     result.attribution_enriched = attributionEnriched;
+                    result.facebook_created_time_used = facebookCreatedTime.used;
 
                     console.log("✅ Webhook lead processed:", leadgenId, result);
                 } catch (err) {
@@ -525,8 +546,10 @@ app.get("/sync/facebook-leads", async (req, res) => {
         const mode = String(req.query.mode || "").trim().toLowerCase();
         if (mode === "full") {
             const startedAtMs = Date.now();
-            const stopAtMs = startedAtMs + 50000;
+            const stopAtMs = startedAtMs + 120000;
             let fullSyncResponded = false;
+            let fullSyncProcessingStarted = false;
+            let fullSyncResponseTimer = null;
             let latestFullSyncCounters = {
                 fetched_total: 0,
                 processed: 0,
@@ -537,6 +560,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 skipped_empty: 0,
                 failed: 0,
                 enriched_success: 0,
+                facebook_created_time_used: 0,
+                facebook_created_time_missing: 0,
                 stopped_early: false,
                 stop_reason: "",
             };
@@ -550,20 +575,28 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 res.status(statusCode).json(payload);
                 return true;
             };
-            const fullSyncResponseTimer = setTimeout(() => {
-                latestFullSyncCounters = {
-                    ...latestFullSyncCounters,
-                    stopped_early: true,
-                    stop_reason: latestFullSyncCounters.stop_reason || "response_timeout_guard",
-                };
-                sendFullSyncResponse(504, {
-                    success: false,
-                    mode: "full",
-                    error: "Full sync response timeout guard reached. Some in-flight work may still finish.",
-                    ...latestFullSyncCounters,
-                    continue_instructions: "Retry with dry_run=true first, then run mode=full with limit=50 or 100 and max_total=100 per request.",
-                });
-            }, 60000);
+            const startFullSyncResponseTimer = () => {
+                if (fullSyncResponseTimer) return;
+                fullSyncResponseTimer = setTimeout(() => {
+                    if (!fullSyncProcessingStarted && latestFullSyncCounters.processed <= 0) {
+                        console.log("[full-sync] timeout guard skipped before processing started");
+                        return;
+                    }
+
+                    latestFullSyncCounters = {
+                        ...latestFullSyncCounters,
+                        stopped_early: true,
+                        stop_reason: latestFullSyncCounters.stop_reason || "response_timeout_guard",
+                    };
+                    sendFullSyncResponse(504, {
+                        success: false,
+                        mode: "full",
+                        error: "Full sync response timeout guard reached. Some in-flight work may still finish.",
+                        ...latestFullSyncCounters,
+                        continue_instructions: "Retry with dry_run=true first, then run mode=full with limit=50 or 100 and max_total=100 per request.",
+                    });
+                }, 120000);
+            };
             const pageSizeQuery = Number(req.query.limit);
             const pageSize = Number.isFinite(pageSizeQuery) && pageSizeQuery > 0
                 ? Math.min(pageSizeQuery, 100)
@@ -573,6 +606,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 ? maxTotalQuery
                 : null;
             const dryRun = parseBooleanQuery(req.query.dry_run);
+            console.log("[full-sync] fetching lead forms");
+            console.log("[full-sync] entering pagination loop");
             const fullFetchResult = await fetchAllLeadIdsFromPage({
                 pageSize,
                 maxTotal,
@@ -588,11 +623,17 @@ app.get("/sync/facebook-leads", async (req, res) => {
             let skippedExisting = 0;
             let skippedEmpty = 0;
             let enrichedSuccess = 0;
+            let facebookCreatedTimeUsed = 0;
+            let facebookCreatedTimeMissing = 0;
             let processed = 0;
             let stoppedEarly = fullFetchResult.stopped_early;
             let stopReason = fullFetchResult.stop_reason || "";
             let batchSkippedEmptyItems = [];
             const batchSize = pageSize;
+
+            console.log("[full-sync] started processing");
+            fullSyncProcessingStarted = true;
+            startFullSyncResponseTimer();
 
             for (let i = 0; i < leadRefs.length; i += batchSize) {
                 if (Date.now() >= stopAtMs) {
@@ -617,8 +658,10 @@ app.get("/sync/facebook-leads", async (req, res) => {
                     }
 
                     try {
-                        const { lead, attributionEnriched } = await parseAndEnrichFacebookLeadForSync(leadRef);
+                        const { lead, attributionEnriched, facebookCreatedTimeUsed: createdTimeUsed } = await parseAndEnrichFacebookLeadForSync(leadRef);
                         if (attributionEnriched) enrichedSuccess++;
+                        if (createdTimeUsed) facebookCreatedTimeUsed++;
+                        else facebookCreatedTimeMissing++;
 
                         if (!lead.facebook_leadgen_id) {
                             skippedEmpty++;
@@ -662,6 +705,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
                     skipped_empty: skippedEmpty,
                     failed: failedItems.length,
                     enriched_success: enrichedSuccess,
+                    facebook_created_time_used: facebookCreatedTimeUsed,
+                    facebook_created_time_missing: facebookCreatedTimeMissing,
                     stopped_early: stoppedEarly,
                     stop_reason: stopReason,
                 };
@@ -702,11 +747,13 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 skipped_empty: skippedEmpty,
                 failed,
                 enriched_success: enrichedSuccess,
+                facebook_created_time_used: facebookCreatedTimeUsed,
+                facebook_created_time_missing: facebookCreatedTimeMissing,
                 stopped_early: stoppedEarly,
                 stop_reason: stopReason,
             };
 
-            clearTimeout(fullSyncResponseTimer);
+            if (fullSyncResponseTimer) clearTimeout(fullSyncResponseTimer);
             return sendFullSyncResponse(200, {
                 success: true,
                 mode: "full",
@@ -722,6 +769,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 skipped_empty: skippedEmpty,
                 failed,
                 enriched_success: enrichedSuccess,
+                facebook_created_time_used: facebookCreatedTimeUsed,
+                facebook_created_time_missing: facebookCreatedTimeMissing,
                 stopped_early: stoppedEarly,
                 stop_reason: stopReason,
                 next_cursor: fullFetchResult.next_cursor || null,
@@ -751,6 +800,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
         const parsedLeads = [];
         const failedItems = [];
         let enriched_success = 0;
+        let facebook_created_time_used = 0;
+        let facebook_created_time_missing = 0;
         let skipped_empty = 0;
 
         for (const leadRef of leadRefs) {
@@ -771,9 +822,10 @@ app.get("/sync/facebook-leads", async (req, res) => {
 
                 lead.source = "Facebook";
                 lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
-                lead.facebook_created_time = leadData.created_time
-                    ? formatDateTimeForSheet(new Date(leadData.created_time))
-                    : "";
+                const facebookCreatedTime = getFacebookCreatedTimeForSheet(leadData);
+                lead.facebook_created_time = facebookCreatedTime.value;
+                if (facebookCreatedTime.used) facebook_created_time_used++;
+                else facebook_created_time_missing++;
                 lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
                 lead.facebook_form_name = leadRef.form_name || "";
                 lead.facebook_ad_id = leadData.ad_id || "";
@@ -832,6 +884,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
             skipped_empty: skipped_empty + batchResult.skipped_empty,
             failed,
             enriched_success,
+            facebook_created_time_used,
+            facebook_created_time_missing,
             affected_rows: batchResult.affected_rows || [],
             incremental_cleanup_attempted: batchResult.incremental_cleanup_attempted || false,
             incremental_cleanup_rows: batchResult.incremental_cleanup_rows || 0,
