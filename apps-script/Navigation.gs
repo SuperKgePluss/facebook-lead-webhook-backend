@@ -349,9 +349,8 @@ function refreshOpenDealCheckboxForRow_(sheet, row) {
 function setupLeadMainUi() {
   resetLeadMainCheckboxRefreshCursor();
   resetLeadMainStatusDropdownRefreshCursor();
-  refreshLeadMainActionCheckboxes();
-  refreshLeadMainStatusDropdownsAll();
   setupLeadMainStatusConditionalFormatting_();
+  Logger.log('setupLeadMainUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level checkboxes and dropdowns.');
 }
 
 function refreshLeadMainImportCheckboxes() {

@@ -79,9 +79,22 @@ function appendObjectRow_(sheetName, object) {
 }
 
 function setupCrmUi() {
+  setupCrmUiLight();
+}
+
+function setupCrmUiLight() {
   setupLeadMainUi();
   setupDealsPaymentUi();
   setupInstallationsUi();
+}
+
+function setupCrmUiBatch() {
+  refreshLeadMainCheckboxesLight();
+  refreshLeadMainStatusDropdownsLight();
+  refreshDealsPaymentStatusDropdownsLight();
+  refreshDealsOpenInstallationCheckboxes();
+  refreshInstallationStatusDropdownsLight();
+  refreshInstallationSaveLocationCheckboxes();
 }
 
 function installCrmTriggers() {

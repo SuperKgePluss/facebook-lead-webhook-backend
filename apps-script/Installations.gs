@@ -116,9 +116,8 @@ function setupInstallationsUi() {
 
   resetInstallationStatusDropdownRefreshCursor();
   resetInstallationSaveLocationCheckboxRefreshCursor();
-  refreshInstallationStatusDropdownsAll();
-  refreshInstallationSaveLocationCheckboxesAll();
   setupInstallationsStatusConditionalFormatting_();
+  Logger.log('setupInstallationsUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level dropdowns and checkboxes.');
 }
 
 function getInstallationStatusValidation_() {

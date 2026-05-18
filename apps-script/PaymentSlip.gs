@@ -156,9 +156,8 @@ function setupDealsPaymentUi() {
   ensureDealsPaymentColumns_(sheet);
   resetDealsPaymentStatusDropdownRefreshCursor();
   resetDealsOpenInstallationCheckboxRefreshCursor();
-  refreshDealsPaymentStatusDropdownsAll();
-  refreshDealsOpenInstallationCheckboxesAll();
   setupDealsPaymentStatusConditionalFormatting_();
+  Logger.log('setupDealsPaymentUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level dropdowns and checkboxes.');
 }
 
 function ensureDealsPaymentColumns_(sheet) {
