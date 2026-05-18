@@ -306,12 +306,19 @@ async function enrichFacebookLeadAttribution(lead, leadData) {
 
     const attributionLeadData = await safeFetch(
         leadgenId,
-        "field_data,form_id,ad_id,campaign_id",
+        "created_time,field_data,form_id,ad_id,campaign_id,is_organic,platform",
         "leadgen"
     );
 
     if (!attributionLeadData) {
         return false;
+    }
+
+    if (attributionLeadData.is_organic !== undefined) {
+        lead.facebook_is_organic = attributionLeadData.is_organic;
+    }
+    if (attributionLeadData.platform) {
+        lead.facebook_platform = attributionLeadData.platform;
     }
 
     const formData = await safeFetch(attributionLeadData.form_id, "name", "form");
@@ -323,7 +330,7 @@ async function enrichFacebookLeadAttribution(lead, leadData) {
 
     const adData = await safeFetch(
         attributionLeadData.ad_id,
-        "name,adset{name,campaign{name}}",
+        "name,adset{id,name,campaign{id,name}}",
         "ad"
     );
     if (adData?.name) {
@@ -332,6 +339,7 @@ async function enrichFacebookLeadAttribution(lead, leadData) {
         enriched = true;
     }
     if (adData?.adset?.name) {
+        lead.facebook_adset_id = adData.adset.id || "";
         lead.adset_name = adData.adset.name;
         lead.facebook_adset_name = adData.adset.name;
         enriched = true;
@@ -370,20 +378,42 @@ function formatDateTimeForSheet(date = new Date()) {
     });
 }
 
+function formatFacebookDateTimeForSheet(date = new Date()) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return "";
+    }
+
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Bangkok",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+    }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+    }, {});
+
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
 function getFacebookCreatedTimeForSheet(leadData) {
     const rawCreatedTime = String(leadData?.created_time || "").trim();
 
     if (!rawCreatedTime) {
         return {
-            value: "",
+            value: formatFacebookDateTimeForSheet(new Date()),
             used: false,
         };
     }
 
-    const formattedCreatedTime = formatDateTimeForSheet(new Date(rawCreatedTime));
+    const formattedCreatedTime = formatFacebookDateTimeForSheet(new Date(rawCreatedTime));
 
     return {
-        value: formattedCreatedTime,
+        value: formattedCreatedTime || formatFacebookDateTimeForSheet(new Date()),
         used: Boolean(formattedCreatedTime),
     };
 }
@@ -442,6 +472,8 @@ async function parseAndEnrichFacebookLeadForSync(leadRef) {
     lead.facebook_campaign_id = leadData.campaign_id || "";
     lead.facebook_campaign_name = lead.campaign_name || lead.facebook_campaign_name || "";
     lead.facebook_adset_name = lead.adset_name || lead.facebook_adset_name || "";
+    lead.facebook_is_organic = leadData.is_organic ?? lead.facebook_is_organic ?? "";
+    lead.facebook_platform = leadData.platform || lead.facebook_platform || "";
     lead.raw_data_json = JSON.stringify(leadData);
 
     return {
@@ -508,6 +540,8 @@ app.post("/webhook/facebook", async (req, res) => {
                     lead.facebook_campaign_id = leadData.campaign_id || "";
                     lead.facebook_campaign_name = leadData.campaign_name || "";
                     lead.facebook_adset_name = leadData.adset_name || "";
+                    lead.facebook_is_organic = leadData.is_organic ?? "";
+                    lead.facebook_platform = leadData.platform || "";
                     lead.raw_data_json = JSON.stringify(leadData);
                     const attributionEnriched = await enrichFacebookLeadAttribution(lead, leadData);
 
@@ -856,6 +890,8 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 lead.facebook_campaign_id = leadData.campaign_id || "";
                 lead.facebook_campaign_name = leadData.campaign_name || "";
                 lead.facebook_adset_name = leadData.adset_name || "";
+                lead.facebook_is_organic = leadData.is_organic ?? "";
+                lead.facebook_platform = leadData.platform || "";
                 lead.raw_data_json = JSON.stringify(leadData);
                 const attributionEnriched = await enrichFacebookLeadAttribution(lead, leadData);
                 if (attributionEnriched) enriched_success++;

@@ -534,6 +534,7 @@ function isCompletedLead(leadObject) {
 
 function buildLeadMainObject(leadId, lead, existingLead = null) {
     const now = formatDateTimeForSheet(new Date());
+    const facebookCreatedTime = String(lead.facebook_created_time || "").trim();
 
     return {
         lead_id: leadId,
@@ -549,6 +550,7 @@ function buildLeadMainObject(leadId, lead, existingLead = null) {
         ad_name: lead.ad_name || lead.facebook_ad_name || "",
         adset_name: lead.adset_name || lead.facebook_adset_name || "",
         campaign_name: lead.campaign_name || lead.facebook_campaign_name || "",
+        facebook_created_time: facebookCreatedTime,
         lead_status: normalizeLeadStatusForSheet(existingLead?.lead_status || lead.status || "New"),
         sales_owner: existingLead?.sales_owner || lead.sales_owner || "",
         created_at: existingLead?.created_at || now,
@@ -574,6 +576,14 @@ function buildLeadDetailObject(leadId, lead) {
         facebook_leadgen_id: lead.facebook_leadgen_id || "",
         raw_phone: lead.raw_phone || lead.phone || "",
         raw_province: lead.raw_province || "",
+        form_id: lead.form_id || lead.facebook_form_id || "",
+        ad_id: lead.ad_id || lead.facebook_ad_id || "",
+        adset_id: lead.adset_id || lead.facebook_adset_id || "",
+        campaign_id: lead.campaign_id || lead.facebook_campaign_id || "",
+        facebook_created_time: lead.facebook_created_time || "",
+        is_organic: lead.is_organic ?? lead.facebook_is_organic ?? "",
+        platform: lead.platform || lead.facebook_platform || "",
+        inbox_url: lead.inbox_url || "",
         original_customer_name: lead.original_customer_name || lead.name || "",
         created_source: lead.source || "Facebook",
     };
@@ -651,9 +661,24 @@ async function appendLeadsToSheetBatch(leads) {
         spreadsheetId,
         SHEETS.LEADS_MAIN,
         leadsRows,
-        ["lead_form_name", "ad_name", "adset_name", "campaign_name"]
+        ["lead_form_name", "ad_name", "adset_name", "campaign_name", "facebook_created_time"]
     );
-    const detailHeaders = detailsRows[HEADER_ROW - 1] || [];
+    const detailHeaders = await ensureSheetHeaders(
+        sheets,
+        spreadsheetId,
+        SHEETS.LEAD_DETAILS,
+        detailsRows,
+        [
+            "form_id",
+            "ad_id",
+            "adset_id",
+            "campaign_id",
+            "facebook_created_time",
+            "is_organic",
+            "platform",
+            "inbox_url",
+        ]
+    );
     const dealHeaders = dealsRows[HEADER_ROW - 1] || [];
 
     headerIndex(leadHeaders, "phone");

@@ -17,7 +17,7 @@ async function fetchLeadDetail(leadgenId) {
 
     const response = await axios.get(url, {
         params: {
-            fields: "created_time,field_data,form_id,ad_id,campaign_id",
+            fields: "created_time,field_data,form_id,ad_id,campaign_id,is_organic,platform",
             access_token: token,
         },
     });
