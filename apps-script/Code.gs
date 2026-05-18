@@ -78,6 +78,27 @@ function appendObjectRow_(sheetName, object) {
   return row;
 }
 
+function setupCrmUi() {
+  setupLeadMainUi();
+  setupDealsPaymentUi();
+  setupInstallationsUi();
+}
+
+function installCrmTriggers() {
+  const ss = SpreadsheetApp.getActive();
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'onEdit') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp
+    .newTrigger('onEdit')
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+}
+
 function getEditedHeader_(sheet, column) {
   const headerMap = getHeaderMap_(sheet);
   return Object.keys(headerMap).find(header => headerMap[header] === column) || '';

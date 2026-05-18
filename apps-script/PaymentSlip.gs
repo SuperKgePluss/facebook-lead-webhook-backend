@@ -156,8 +156,8 @@ function setupDealsPaymentUi() {
   ensureDealsPaymentColumns_(sheet);
   resetDealsPaymentStatusDropdownRefreshCursor();
   resetDealsOpenInstallationCheckboxRefreshCursor();
-  refreshDealsPaymentStatusDropdownsLight();
-  refreshDealsOpenInstallationCheckboxes();
+  refreshDealsPaymentStatusDropdownsAll();
+  refreshDealsOpenInstallationCheckboxesAll();
   setupDealsPaymentStatusConditionalFormatting_();
 }
 
@@ -337,6 +337,29 @@ function refreshDealsPaymentStatusDropdownsLight() {
   Logger.log('refreshDealsPaymentStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
 }
 
+function refreshDealsPaymentStatusDropdownsAll() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.payment_status) return;
+
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = DATA_START_ROW; row <= lastRow; row++) {
+    checked++;
+    if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
+    if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
+  }
+
+  setupDealsPaymentStatusConditionalFormatting_();
+  Logger.log('refreshDealsPaymentStatusDropdownsAll checked=' + checked + ' fixed=' + fixed);
+}
+
 function resetDealsPaymentStatusDropdownRefreshCursor() {
   PropertiesService
     .getScriptProperties()
@@ -372,6 +395,27 @@ function refreshDealsOpenInstallationCheckboxes() {
   properties.setProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY, String(nextCursor));
 
   Logger.log('refreshDealsOpenInstallationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+}
+
+function refreshDealsOpenInstallationCheckboxesAll() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.open_installation) return;
+
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = DATA_START_ROW; row <= lastRow; row++) {
+    checked++;
+    if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
+  }
+
+  Logger.log('refreshDealsOpenInstallationCheckboxesAll checked=' + checked + ' fixed=' + fixed);
 }
 
 function resetDealsOpenInstallationCheckboxRefreshCursor() {

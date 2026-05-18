@@ -259,6 +259,28 @@ function refreshLeadMainStatusDropdownsLight() {
   Logger.log('refreshLeadMainStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
 }
 
+function refreshLeadMainStatusDropdownsAll() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.phone || !headerMap.lead_status) return;
+
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = DATA_START_ROW; row <= lastRow; row++) {
+    checked++;
+    if (ensureLeadMainStatusDropdownForRow(row, sheet)) fixed++;
+  }
+
+  setupLeadMainStatusConditionalFormatting_();
+  Logger.log('refreshLeadMainStatusDropdownsAll checked=' + checked + ' fixed=' + fixed);
+}
+
 function resetLeadMainStatusDropdownRefreshCursor() {
   PropertiesService
     .getScriptProperties()
@@ -325,8 +347,10 @@ function refreshOpenDealCheckboxForRow_(sheet, row) {
 }
 
 function setupLeadMainUi() {
+  resetLeadMainCheckboxRefreshCursor();
+  resetLeadMainStatusDropdownRefreshCursor();
   refreshLeadMainActionCheckboxes();
-  refreshLeadMainStatusDropdownsLight();
+  refreshLeadMainStatusDropdownsAll();
   setupLeadMainStatusConditionalFormatting_();
 }
 

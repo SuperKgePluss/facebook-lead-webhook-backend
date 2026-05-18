@@ -116,8 +116,8 @@ function setupInstallationsUi() {
 
   resetInstallationStatusDropdownRefreshCursor();
   resetInstallationSaveLocationCheckboxRefreshCursor();
-  refreshInstallationStatusDropdownsLight();
-  refreshInstallationSaveLocationCheckboxes();
+  refreshInstallationStatusDropdownsAll();
+  refreshInstallationSaveLocationCheckboxesAll();
   setupInstallationsStatusConditionalFormatting_();
 }
 
@@ -241,6 +241,29 @@ function refreshInstallationStatusDropdownsLight() {
   Logger.log('refreshInstallationStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
 }
 
+function refreshInstallationStatusDropdownsAll() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('INSTALLATIONS');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.install_id || !headerMap.lead_id || !headerMap.install_status) return;
+
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = DATA_START_ROW; row <= lastRow; row++) {
+    checked++;
+    if (ensureInstallationStatusDropdownForRow(row, sheet)) fixed++;
+    if (ensureInstallationSaveLocationCheckboxForRow(row, sheet)) fixed++;
+  }
+
+  setupInstallationsStatusConditionalFormatting_();
+  Logger.log('refreshInstallationStatusDropdownsAll checked=' + checked + ' fixed=' + fixed);
+}
+
 function resetInstallationStatusDropdownRefreshCursor() {
   PropertiesService
     .getScriptProperties()
@@ -276,6 +299,27 @@ function refreshInstallationSaveLocationCheckboxes() {
   properties.setProperty(INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY, String(nextCursor));
 
   Logger.log('refreshInstallationSaveLocationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+}
+
+function refreshInstallationSaveLocationCheckboxesAll() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('INSTALLATIONS');
+  if (!sheet) return;
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.install_id || !headerMap.lead_id || !headerMap.save_location) return;
+
+  let checked = 0;
+  let fixed = 0;
+
+  for (let row = DATA_START_ROW; row <= lastRow; row++) {
+    checked++;
+    if (ensureInstallationSaveLocationCheckboxForRow(row, sheet)) fixed++;
+  }
+
+  Logger.log('refreshInstallationSaveLocationCheckboxesAll checked=' + checked + ' fixed=' + fixed);
 }
 
 function resetInstallationSaveLocationCheckboxRefreshCursor() {
