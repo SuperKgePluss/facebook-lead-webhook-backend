@@ -9,6 +9,7 @@ const {
     debugLeadgenForms,
     debugFacebookAccess,
     fetchLatestLeadIdsFromPage,
+    fetchAllLeadIdsFromPage,
 } = require("./services/facebook");
 
 const {
@@ -402,6 +403,33 @@ function requireSyncSecretMiddleware(req, res, next) {
     next();
 }
 
+function parseBooleanQuery(value) {
+    return String(value || "").trim().toLowerCase() === "true";
+}
+
+async function parseAndEnrichFacebookLeadForSync(leadRef) {
+    const leadgenId = String(leadRef.id || "").trim();
+    const leadData = await fetchLeadDetail(leadgenId);
+    const lead = parseFacebookLead(leadData);
+    const attributionEnriched = await enrichFacebookLeadAttribution(lead, leadData);
+
+    lead.source = "Facebook";
+    lead.facebook_leadgen_id = String(leadData.id || leadgenId).trim();
+    lead.facebook_created_time = leadData.created_time
+        ? formatDateTimeForSheet(new Date(leadData.created_time))
+        : "";
+    lead.facebook_form_id = leadData.form_id || leadRef.form_id || "";
+    lead.facebook_form_name = lead.lead_form_name || lead.facebook_form_name || leadRef.form_name || "";
+    lead.facebook_ad_id = leadData.ad_id || "";
+    lead.facebook_ad_name = lead.ad_name || lead.facebook_ad_name || "";
+    lead.facebook_campaign_id = leadData.campaign_id || "";
+    lead.facebook_campaign_name = lead.campaign_name || lead.facebook_campaign_name || "";
+    lead.facebook_adset_name = lead.adset_name || lead.facebook_adset_name || "";
+    lead.raw_data_json = JSON.stringify(leadData);
+
+    return { lead, attributionEnriched };
+}
+
 app.get("/health", (req, res) => {
     return res.status(200).send("OK");
 });
@@ -495,6 +523,137 @@ app.get("/sync/facebook-leads", async (req, res) => {
         if (!requireSyncSecret(req, res)) return;
 
         const mode = String(req.query.mode || "").trim().toLowerCase();
+        if (mode === "full") {
+            const startedAtMs = Date.now();
+            const stopAtMs = startedAtMs + 45000;
+            const pageSizeQuery = Number(req.query.limit);
+            const pageSize = Number.isFinite(pageSizeQuery) && pageSizeQuery > 0
+                ? Math.min(pageSizeQuery, 100)
+                : 100;
+            const maxTotalQuery = Number(req.query.max_total);
+            const maxTotal = Number.isFinite(maxTotalQuery) && maxTotalQuery > 0
+                ? maxTotalQuery
+                : null;
+            const dryRun = parseBooleanQuery(req.query.dry_run);
+            const fullFetchResult = await fetchAllLeadIdsFromPage({
+                pageSize,
+                maxTotal,
+                stopAtMs,
+            });
+            const leadRefs = fullFetchResult.leads
+                .slice()
+                .sort((a, b) => new Date(a.created_time || 0) - new Date(b.created_time || 0));
+            const failedItems = [];
+            let parsed = 0;
+            let inserted = 0;
+            let updatedExisting = 0;
+            let skippedExisting = 0;
+            let skippedEmpty = 0;
+            let enrichedSuccess = 0;
+            let processed = 0;
+            let stoppedEarly = fullFetchResult.stopped_early;
+            let stopReason = fullFetchResult.stop_reason || "";
+            let batchSkippedEmptyItems = [];
+            const batchSize = pageSize;
+
+            for (let i = 0; i < leadRefs.length; i += batchSize) {
+                if (Date.now() >= stopAtMs) {
+                    stoppedEarly = true;
+                    stopReason = stopReason || "timeout_guard";
+                    break;
+                }
+
+                const batchRefs = leadRefs.slice(i, i + batchSize);
+                const parsedBatch = [];
+
+                for (const leadRef of batchRefs) {
+                    const leadgenId = String(leadRef.id || "").trim();
+
+                    if (!leadgenId) {
+                        skippedEmpty++;
+                        failedItems.push({
+                            leadgen_id: "",
+                            reason: "missing_leadgen_id",
+                        });
+                        continue;
+                    }
+
+                    try {
+                        const { lead, attributionEnriched } = await parseAndEnrichFacebookLeadForSync(leadRef);
+                        if (attributionEnriched) enrichedSuccess++;
+
+                        if (!lead.facebook_leadgen_id) {
+                            skippedEmpty++;
+                            failedItems.push({
+                                leadgen_id: leadgenId,
+                                reason: "missing_facebook_leadgen_id",
+                            });
+                            continue;
+                        }
+
+                        if (!lead.phone && !lead.name) {
+                            skippedEmpty++;
+                            failedItems.push({
+                                leadgen_id: leadgenId,
+                                reason: "missing_phone_and_name",
+                            });
+                            continue;
+                        }
+
+                        parsedBatch.push(lead);
+                        parsed++;
+                    } catch (err) {
+                        failedItems.push({
+                            leadgen_id: leadgenId,
+                            form_id: leadRef.form_id || "",
+                            form_name: leadRef.form_name || "",
+                            reason: err.message,
+                        });
+                    }
+                }
+
+                processed += batchRefs.length;
+
+                if (dryRun || !parsedBatch.length) {
+                    continue;
+                }
+
+                const batchResult = await appendLeadsToSheetBatch(parsedBatch);
+                inserted += batchResult.created;
+                updatedExisting += batchResult.updated_existing;
+                skippedExisting += batchResult.skipped_existing;
+                skippedEmpty += batchResult.skipped_empty;
+                batchSkippedEmptyItems = batchSkippedEmptyItems.concat(batchResult.skipped_empty_items || []);
+            }
+
+            const failed = failedItems.length;
+
+            return res.status(200).json({
+                success: true,
+                mode: "full",
+                dry_run: dryRun,
+                page_size: pageSize,
+                max_total: maxTotal,
+                fetched_total: leadRefs.length,
+                processed,
+                parsed,
+                inserted,
+                updated_existing: updatedExisting,
+                skipped_existing: skippedExisting,
+                skipped_empty: skippedEmpty,
+                failed,
+                enriched_success: enrichedSuccess,
+                stopped_early: stoppedEarly,
+                stop_reason: stopReason,
+                next_cursor: fullFetchResult.next_cursor || null,
+                continue_instructions: stoppedEarly
+                    ? "Run the same full sync again. Existing facebook_leadgen_id rows will be skipped."
+                    : "",
+                failed_items: failedItems.slice(0, 30),
+                batch_skipped_empty_items: batchSkippedEmptyItems.slice(0, 30),
+            });
+        }
+
         const limitQuery = Number(req.query.limit);
         const limit = mode === "full"
             ? null

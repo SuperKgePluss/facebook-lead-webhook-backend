@@ -213,6 +213,118 @@ async function fetchLatestLeadIdsFromPage(options = {}) {
     }
 }
 
+async function fetchAllLeadIdsFromPage(options = {}) {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN;
+    const pageId = process.env.FB_PAGE_ID;
+    const pageSize = Number.isFinite(Number(options.pageSize)) && Number(options.pageSize) > 0
+        ? Math.min(Number(options.pageSize), 100)
+        : 100;
+    const maxTotal = Number.isFinite(Number(options.maxTotal)) && Number(options.maxTotal) > 0
+        ? Number(options.maxTotal)
+        : null;
+    const stopAtMs = Number.isFinite(Number(options.stopAtMs)) && Number(options.stopAtMs) > 0
+        ? Number(options.stopAtMs)
+        : null;
+
+    if (!token) throw new Error("Missing FB_PAGE_ACCESS_TOKEN");
+    if (!pageId) throw new Error("Missing FB_PAGE_ID");
+
+    const formsUrl = `https://graph.facebook.com/${GRAPH_VERSION}/${pageId}/leadgen_forms`;
+
+    try {
+        const formsResponse = await axios.get(formsUrl, {
+            params: {
+                fields: "id,name,status",
+                limit: 100,
+                access_token: token,
+            },
+        });
+
+        const forms = formsResponse.data?.data || [];
+        const leads = [];
+        let stoppedEarly = false;
+        let stopReason = "";
+        let nextCursor = null;
+
+        for (const form of forms) {
+            let nextUrl = `https://graph.facebook.com/${GRAPH_VERSION}/${form.id}/leads`;
+            let pageCount = 0;
+
+            while (nextUrl) {
+                if (stopAtMs && Date.now() >= stopAtMs) {
+                    stoppedEarly = true;
+                    stopReason = "timeout_guard";
+                    nextCursor = {
+                        form_id: form.id,
+                        form_name: form.name,
+                        next_url_available: true,
+                    };
+                    break;
+                }
+
+                pageCount++;
+                if (pageCount > 100) {
+                    stoppedEarly = true;
+                    stopReason = "form_page_limit";
+                    nextCursor = {
+                        form_id: form.id,
+                        form_name: form.name,
+                        next_url_available: Boolean(nextUrl),
+                    };
+                    break;
+                }
+
+                const leadResponse = await axios.get(nextUrl, {
+                    params: nextUrl.includes("?")
+                        ? {}
+                        : {
+                            fields: "id,created_time",
+                            limit: pageSize,
+                            access_token: token,
+                        },
+                });
+
+                const formLeads = leadResponse.data?.data || [];
+                for (const lead of formLeads) {
+                    leads.push({
+                        id: lead.id,
+                        created_time: lead.created_time,
+                        form_id: form.id,
+                        form_name: form.name,
+                    });
+
+                    if (maxTotal && leads.length >= maxTotal) {
+                        stoppedEarly = true;
+                        stopReason = "max_total";
+                        nextCursor = {
+                            form_id: form.id,
+                            form_name: form.name,
+                            next_url_available: Boolean(leadResponse.data?.paging?.next),
+                        };
+                        break;
+                    }
+                }
+
+                if (stoppedEarly) break;
+                nextUrl = leadResponse.data?.paging?.next || null;
+            }
+
+            if (stoppedEarly) break;
+        }
+
+        return {
+            leads,
+            forms_count: forms.length,
+            stopped_early: stoppedEarly,
+            stop_reason: stopReason,
+            next_cursor: nextCursor,
+        };
+    } catch (err) {
+        console.error("❌ Facebook full lead query error:", JSON.stringify(err.response?.data, null, 2));
+        throw new Error(err.response?.data?.error?.message || err.message);
+    }
+}
+
 module.exports = {
     fetchLeadDetail,
     fetchFormLeads,
@@ -220,4 +332,5 @@ module.exports = {
     debugLeadgenForms,
     debugFacebookAccess,
     fetchLatestLeadIdsFromPage,
+    fetchAllLeadIdsFromPage,
 };
