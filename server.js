@@ -712,15 +712,20 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 };
 
                 if (dryRun || !parsedBatch.length) {
+                    if (Date.now() >= stopAtMs) {
+                        stoppedEarly = true;
+                        stopReason = stopReason || "timeout_guard_after_batch";
+                        latestFullSyncCounters = {
+                            ...latestFullSyncCounters,
+                            stopped_early: stoppedEarly,
+                            stop_reason: stopReason,
+                        };
+                        break;
+                    }
                     continue;
                 }
 
-                if (Date.now() >= stopAtMs) {
-                    stoppedEarly = true;
-                    stopReason = stopReason || "timeout_guard_before_sheet_write";
-                    break;
-                }
-
+                console.log("[full-sync] writing batch", { size: parsedBatch.length });
                 const batchResult = await appendLeadsToSheetBatch(parsedBatch);
                 inserted += batchResult.created;
                 updatedExisting += batchResult.updated_existing;
@@ -733,7 +738,25 @@ app.get("/sync/facebook-leads", async (req, res) => {
                     updated_existing: updatedExisting,
                     skipped_existing: skippedExisting,
                     skipped_empty: skippedEmpty,
+                    failed: failedItems.length,
+                    enriched_success: enrichedSuccess,
+                    facebook_created_time_used: facebookCreatedTimeUsed,
+                    facebook_created_time_missing: facebookCreatedTimeMissing,
+                    stopped_early: stoppedEarly,
+                    stop_reason: stopReason,
                 };
+                console.log("[full-sync] write complete", latestFullSyncCounters);
+
+                if (Date.now() >= stopAtMs) {
+                    stoppedEarly = true;
+                    stopReason = stopReason || "timeout_guard_after_write";
+                    latestFullSyncCounters = {
+                        ...latestFullSyncCounters,
+                        stopped_early: stoppedEarly,
+                        stop_reason: stopReason,
+                    };
+                    break;
+                }
             }
 
             const failed = failedItems.length;
