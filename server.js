@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const express = require("express");
+const axios = require("axios");
 const {
     fetchLeadDetail,
     fetchFormLeads,
@@ -241,6 +242,41 @@ function parseFacebookLead(leadData) {
     };
 }
 
+function getFacebookFieldValue(fieldData, ...names) {
+    if (!Array.isArray(fieldData)) return "";
+
+    const normalizedNames = names.map(name => String(name || "").toLowerCase());
+    const found = fieldData.find(item => {
+        const itemName = String(item.name || "").toLowerCase();
+        return normalizedNames.includes(itemName);
+    });
+
+    return found?.values?.[0] || "";
+}
+
+function maskDebugValue(value) {
+    const raw = String(value || "").trim();
+    if (raw.length <= 8) return raw ? "***" : "";
+    return `${raw.slice(0, 4)}...${raw.slice(-4)}`;
+}
+
+async function fetchFacebookGraphDebugObject(objectId, fields) {
+    const token = process.env.FB_PAGE_ACCESS_TOKEN;
+
+    if (!token) {
+        throw new Error("Missing FB_PAGE_ACCESS_TOKEN");
+    }
+
+    const response = await axios.get(`https://graph.facebook.com/v19.0/${encodeURIComponent(objectId)}`, {
+        params: {
+            fields,
+            access_token: token,
+        },
+    });
+
+    return response.data;
+}
+
 function formatDateTimeForSheet(date = new Date()) {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
         return "";
@@ -283,6 +319,11 @@ function requireSyncSecret(req, res) {
     }
 
     return true;
+}
+
+function requireSyncSecretMiddleware(req, res, next) {
+    if (!requireSyncSecret(req, res)) return;
+    next();
 }
 
 app.get("/health", (req, res) => {
@@ -541,8 +582,6 @@ app.get("/debug/facebook-form-raw", async (req, res) => {
         const formId = process.env.FB_FORM_ID;
         const token = process.env.FB_PAGE_ACCESS_TOKEN;
 
-        const axios = require("axios");
-
         const response = await axios.get(`https://graph.facebook.com/v25.0/${formId}`, {
             params: {
                 fields: "id,name,status,created_time,questions",
@@ -557,6 +596,121 @@ app.get("/debug/facebook-form-raw", async (req, res) => {
     } catch (err) {
         return res.status(500).json({
             success: false,
+            error: err.response?.data || err.message,
+        });
+    }
+});
+
+console.log("[debug] facebook lead enrichment route registered: GET /debug/facebook-lead/:leadgenId");
+
+app.get("/debug/routes", requireSyncSecretMiddleware, (req, res) => {
+    return res.status(200).json({
+        success: true,
+        debug_routes: [
+            "GET /debug/facebook-access",
+            "GET /debug/facebook-form",
+            "GET /debug/leadgen-forms",
+            "GET /debug/facebook-form-raw",
+            "GET /debug/facebook-lead/:leadgenId",
+            "GET /debug/lead/:leadgenId",
+        ],
+    });
+});
+
+app.get("/debug/facebook-lead/:leadgenId", requireSyncSecretMiddleware, async (req, res) => {
+    try {
+        const leadgenId = String(req.params.leadgenId || "").trim();
+
+        if (!leadgenId) {
+            return res.status(400).json({
+                error: "Missing leadgenId",
+            });
+        }
+
+        const leadData = await fetchFacebookGraphDebugObject(
+            leadgenId,
+            "created_time,field_data,form_id,ad_id,campaign_id"
+        );
+        const fieldData = leadData.field_data || [];
+        const customerName = getFacebookFieldValue(fieldData, "full_name", "name", "first_name", "customer_name");
+        const phone = getFacebookFieldValue(fieldData, "phone_number", "phone", "mobile_phone");
+        let form = null;
+        let ad = null;
+        let adset = null;
+        let campaign = null;
+
+        if (leadData.form_id) {
+            const formData = await fetchFacebookGraphDebugObject(
+                leadData.form_id,
+                "id,name"
+            );
+            form = {
+                id: formData.id || leadData.form_id,
+                name: formData.name || "",
+            };
+        }
+
+        if (leadData.ad_id) {
+            const adData = await fetchFacebookGraphDebugObject(
+                leadData.ad_id,
+                "id,name,adset{id,name,campaign{id,name}},campaign{id,name}"
+            );
+            ad = {
+                id: adData.id || leadData.ad_id,
+                name: adData.name || "",
+            };
+            if (adData.adset) {
+                adset = {
+                    id: adData.adset.id || "",
+                    name: adData.adset.name || "",
+                };
+            }
+            if (adData.campaign) {
+                campaign = {
+                    id: adData.campaign.id || "",
+                    name: adData.campaign.name || "",
+                };
+            } else if (adData.adset?.campaign) {
+                campaign = {
+                    id: adData.adset.campaign.id || "",
+                    name: adData.adset.campaign.name || "",
+                };
+            }
+        }
+
+        if (leadData.campaign_id) {
+            const campaignData = await fetchFacebookGraphDebugObject(
+                leadData.campaign_id,
+                "id,name"
+            );
+            campaign = {
+                id: campaignData.id || leadData.campaign_id,
+                name: campaignData.name || "",
+            };
+        }
+
+        console.log("Facebook lead debug fetched:", {
+            leadgen_id: maskDebugValue(leadgenId),
+            has_customer_name: Boolean(customerName),
+            has_phone: Boolean(phone),
+            has_form: Boolean(form),
+            has_ad: Boolean(ad),
+            has_adset: Boolean(adset),
+            has_campaign: Boolean(campaign),
+        });
+
+        return res.status(200).json({
+            leadgen_id: leadData.id || leadgenId,
+            customer_name: customerName,
+            phone,
+            form,
+            ad,
+            adset,
+            campaign,
+        });
+    } catch (err) {
+        console.error("Facebook lead debug failed:", err.response?.data || err.message);
+        return res.status(500).json({
             error: err.response?.data || err.message,
         });
     }
