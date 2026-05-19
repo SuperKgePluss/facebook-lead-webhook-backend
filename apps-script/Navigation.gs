@@ -1,7 +1,7 @@
 // Navigation helpers for Open Deal checkbox actions and ACTIVITY_LOG open_audio selection.
 const LEAD_MAIN_STATUS_VALUES = ['New', 'Ongoing', 'Installed', 'Done', 'Cancelled'];
 const LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY = 'LEADS_MAIN_STATUS_REFRESH_NEXT_ROW';
-const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 25;
+const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 50;
 function onSelectionChange(e) {
   if (!e || !e.range) return;
 
@@ -133,7 +133,7 @@ function ensureLeadMainCheckboxesForRow(row, optionalSheet) {
 
 function refreshLeadMainCheckboxesLight() {
   const cursorKey = 'LEADS_MAIN_CHECKBOX_REFRESH_NEXT_ROW';
-  const batchSize = 25;
+  const batchSize = 50;
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
   if (!sheet) return { task_completed: true };
@@ -163,7 +163,7 @@ function refreshLeadMainCheckboxesLight() {
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
   properties.setProperty(cursorKey, String(nextCursor));
 
-  Logger.log('refreshLeadMainCheckboxesLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  Logger.log('refreshLeadMainCheckboxesLight batch_size=' + batchSize + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
   return {
     startRow: startRow,
     endRow: endRow,
@@ -264,7 +264,7 @@ function refreshLeadMainStatusDropdownsLight() {
   properties.setProperty(LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY, String(nextCursor));
   setupLeadMainStatusConditionalFormatting_();
 
-  Logger.log('refreshLeadMainStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  Logger.log('refreshLeadMainStatusDropdownsLight batch_size=' + LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
   return {
     startRow: startRow,
     endRow: endRow,

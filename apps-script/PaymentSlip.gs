@@ -10,8 +10,8 @@ const PAYMENT_SLIP_MAX_FILES_SCANNED = 500;
 const DEALS_PAYMENT_STATUS_VALUES = ['Unpaid', 'Paid', 'Cancelled'];
 const DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY = 'DEALS_PAYMENT_STATUS_REFRESH_NEXT_ROW';
 const DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY = 'DEALS_OPEN_INSTALLATION_REFRESH_NEXT_ROW';
-const DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE = 25;
-const DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE = 25;
+const DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE = 50;
+const DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE = 50;
 const DEALS_FINAL_HEADERS = [
   'Deal ID',
   'Lead ID',
@@ -333,7 +333,7 @@ function refreshDealsPaymentStatusDropdownsLight() {
   properties.setProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY, String(nextCursor));
   setupDealsPaymentStatusConditionalFormatting_();
 
-  Logger.log('refreshDealsPaymentStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  Logger.log('refreshDealsPaymentStatusDropdownsLight batch_size=' + DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
   return {
     startRow: startRow,
     endRow: endRow,
@@ -401,7 +401,7 @@ function refreshDealsOpenInstallationCheckboxes() {
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
   properties.setProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY, String(nextCursor));
 
-  Logger.log('refreshDealsOpenInstallationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  Logger.log('refreshDealsOpenInstallationCheckboxes batch_size=' + DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
   return {
     startRow: startRow,
     endRow: endRow,

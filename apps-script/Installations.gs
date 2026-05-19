@@ -2,8 +2,8 @@
 const INSTALLATION_STATUS_VALUES = ['In Progress', 'Installed', 'Cancelled'];
 const INSTALLATION_STATUS_REFRESH_CURSOR_KEY = 'INSTALLATION_STATUS_REFRESH_NEXT_ROW';
 const INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY = 'INSTALLATION_SAVE_LOCATION_REFRESH_NEXT_ROW';
-const INSTALLATION_STATUS_REFRESH_BATCH_SIZE = 25;
-const INSTALLATION_SAVE_LOCATION_REFRESH_BATCH_SIZE = 25;
+const INSTALLATION_STATUS_REFRESH_BATCH_SIZE = 50;
+const INSTALLATION_SAVE_LOCATION_REFRESH_BATCH_SIZE = 50;
 const LOCATION_ROOT_FOLDER_ID = 'PASTE_FOLDER_ID_HERE';
 const LOCATION_MAX_FOLDERS_SCANNED = 50;
 const LOCATION_MAX_FILES_SCANNED = 500;
@@ -237,7 +237,7 @@ function refreshInstallationStatusDropdownsLight() {
   properties.setProperty(INSTALLATION_STATUS_REFRESH_CURSOR_KEY, String(nextCursor));
   setupInstallationsStatusConditionalFormatting_();
 
-  Logger.log('refreshInstallationStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  Logger.log('refreshInstallationStatusDropdownsLight batch_size=' + INSTALLATION_STATUS_REFRESH_BATCH_SIZE + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
   return {
     startRow: startRow,
     endRow: endRow,
@@ -305,7 +305,7 @@ function refreshInstallationSaveLocationCheckboxes() {
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
   properties.setProperty(INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY, String(nextCursor));
 
-  Logger.log('refreshInstallationSaveLocationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  Logger.log('refreshInstallationSaveLocationCheckboxes batch_size=' + INSTALLATION_SAVE_LOCATION_REFRESH_BATCH_SIZE + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
   return {
     startRow: startRow,
     endRow: endRow,
