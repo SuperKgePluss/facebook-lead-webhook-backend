@@ -185,6 +185,33 @@ function getSampleLimit(req) {
     return Math.min(parsed, 25);
 }
 
+function getRestoreLimit(req) {
+    const parsed = Number.parseInt(req.query.limit || req.query.restore_limit, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) return 50;
+    return Math.min(parsed, 200);
+}
+
+function getRestoreStep(req) {
+    const step = String(req.query.restore_step || "all").trim().toLowerCase();
+    if (["leads", "deals", "installations", "activities", "all"].includes(step)) return step;
+    return "all";
+}
+
+function shouldRunRestoreStep(selectedStep, step) {
+    return selectedStep === "all" || selectedStep === step;
+}
+
+function isQuotaOrTimeoutError(err) {
+    const status = err.response?.status || err.code;
+    const message = String(err.response?.data?.error?.message || err.message || "").toLowerCase();
+    return status === 429
+        || status === 503
+        || message.includes("quota")
+        || message.includes("timeout")
+        || message.includes("timed out")
+        || message.includes("rate limit");
+}
+
 async function readOptionalSheet(req, queryName, defaults, spreadsheetQueryName, spreadsheetEnvName) {
     const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
     const resolvedSpreadsheet = resolveSpreadsheetId(
@@ -827,6 +854,8 @@ async function handleCrm3SafeRestore(req, res) {
     const confirm = String(req.query.confirm || "").trim().toLowerCase() === "true";
     const dryRun = !confirm || String(req.query.mode || "").trim().toLowerCase() === "dry_run";
     const sampleLimit = getSampleLimit(req);
+    const restoreLimit = getRestoreLimit(req);
+    const restoreStep = getRestoreStep(req);
 
     try {
         const [
@@ -873,6 +902,11 @@ async function handleCrm3SafeRestore(req, res) {
             dry_run: dryRun,
             write_enabled: !dryRun,
             no_writes_performed: dryRun,
+            restore_step: restoreStep,
+            limit_per_step: restoreLimit,
+            partial_completed: false,
+            continue_required: false,
+            next_step: null,
             source_sheets: {
                 crm3_leads: {
                     sheet_name: crm3Leads.sheetName || null,
@@ -907,6 +941,10 @@ async function handleCrm3SafeRestore(req, res) {
                 skipped_missing_current_deal: 0,
                 skipped_existing_installation: 0,
                 skipped_missing_phone: 0,
+                leads_remaining: 0,
+                deals_remaining: 0,
+                installations_remaining: 0,
+                activities_remaining: 0,
             },
             sample_lead_updates: [],
             sample_deal_updates: [],
@@ -1093,26 +1131,67 @@ async function handleCrm3SafeRestore(req, res) {
             }
         }
 
+        response.counts.leads_remaining = leadUpdates.length;
+        response.counts.deals_remaining = dealUpdates.length;
+        response.counts.installations_remaining = installationCreates.length;
+        response.counts.activities_remaining = activityCreates.length;
+
         if (!dryRun) {
-            for (const update of leadUpdates) {
-                await googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.patch);
-                response.counts.leads_updated++;
-            }
+            try {
+                if (shouldRunRestoreStep(restoreStep, "leads")) {
+                    const chunk = leadUpdates.slice(0, restoreLimit);
+                    if (chunk.length) {
+                        response.counts.leads_updated = await googleSheets.updateObjectRows(
+                            "LEADS_MAIN",
+                            chunk.map(update => ({
+                                rowNumber: update.rowNumber,
+                                object: update.patch,
+                            }))
+                        );
+                    }
+                    response.counts.leads_remaining = Math.max(leadUpdates.length - response.counts.leads_updated, 0);
+                }
 
-            for (const update of dealUpdates) {
-                await googleSheets.updateObjectRow("DEALS", update.rowNumber, update.patch);
-                response.counts.deals_updated++;
-            }
+                if (shouldRunRestoreStep(restoreStep, "deals")) {
+                    const chunk = dealUpdates.slice(0, restoreLimit);
+                    if (chunk.length) {
+                        response.counts.deals_updated = await googleSheets.updateObjectRows(
+                            "DEALS",
+                            chunk.map(update => ({
+                                rowNumber: update.rowNumber,
+                                object: update.patch,
+                            }))
+                        );
+                    }
+                    response.counts.deals_remaining = Math.max(dealUpdates.length - response.counts.deals_updated, 0);
+                }
 
-            if (installationCreates.length) {
-                await googleSheets.appendObjects("INSTALLATIONS", installationCreates.map(item => item.object));
-            }
-            response.counts.created_installations = installationCreates.length;
+                if (shouldRunRestoreStep(restoreStep, "installations")) {
+                    const chunk = installationCreates.slice(0, restoreLimit);
+                    if (chunk.length) {
+                        await googleSheets.appendObjects("INSTALLATIONS", chunk.map(item => item.object));
+                        response.counts.created_installations = chunk.length;
+                    }
+                    response.counts.installations_remaining = Math.max(installationCreates.length - response.counts.created_installations, 0);
+                }
 
-            if (activityCreates.length) {
-                await googleSheets.appendObjects("ACTIVITY_LOG", activityCreates.map(item => item.object));
+                if (shouldRunRestoreStep(restoreStep, "activities")) {
+                    const chunk = activityCreates.slice(0, restoreLimit);
+                    if (chunk.length) {
+                        await googleSheets.appendObjects("ACTIVITY_LOG", chunk.map(item => item.object));
+                        response.counts.created_activities = chunk.length;
+                    }
+                    response.counts.activities_remaining = Math.max(activityCreates.length - response.counts.created_activities, 0);
+                }
+            } catch (writeErr) {
+                response.success = false;
+                response.partial_completed = true;
+                response.error = writeErr.response?.data || writeErr.message;
+                response.quota_or_timeout = isQuotaOrTimeoutError(writeErr);
+                response.continue_required = true;
+                response.next_step = "Rerun the same restore endpoint after quota resets. The restore recomputes current sheet state and skips already restored rows.";
+                return res.status(response.quota_or_timeout ? 429 : 500).json(response);
             }
-            response.counts.created_activities = activityCreates.length;
         }
 
         if (dryRun) {
@@ -1120,6 +1199,17 @@ async function handleCrm3SafeRestore(req, res) {
             response.counts.deals_updated = 0;
             response.counts.created_installations = 0;
             response.counts.created_activities = 0;
+        }
+
+        response.continue_required = !dryRun && (
+            response.counts.leads_remaining > 0
+            || response.counts.deals_remaining > 0
+            || response.counts.installations_remaining > 0
+            || response.counts.activities_remaining > 0
+        );
+        if (response.continue_required) {
+            response.partial_completed = true;
+            response.next_step = "Rerun the same endpoint with confirm=true. Already restored rows will be skipped by current-sheet matching/dedupe.";
         }
 
         return res.status(200).json(response);

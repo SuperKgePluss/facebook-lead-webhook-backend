@@ -563,6 +563,35 @@ async function updateObjectRow(sheetName, rowNumber, object) {
     );
 }
 
+async function updateObjectRows(sheetName, updates, chunkSize = 100) {
+    if (!updates.length) return 0;
+
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    const headers = await getHeaders(sheetName);
+    const data = [];
+
+    for (const update of updates) {
+        const groups = groupObjectRanges(
+            headers,
+            update.rowNumber,
+            normalizeSheetObject(sheetName, update.object || update.patch || {})
+        );
+
+        for (const group of groups) {
+            data.push({
+                range: `${sheetName}!${group.rangeSuffix}`,
+                values: group.values,
+            });
+        }
+    }
+
+    for (let i = 0; i < data.length; i += chunkSize) {
+        await batchUpdateValues(sheets, spreadsheetId, data.slice(i, i + chunkSize));
+    }
+
+    return updates.length;
+}
+
 function findLeadByPhone(headers, rows, phone) {
     const phoneIndex = headerIndex(headers, "phone");
     const normalizedPhone = normalizePhone(phone);
@@ -997,6 +1026,7 @@ module.exports = {
     saveFacebookBackfillState,
     appendObjects,
     updateObjectRow,
+    updateObjectRows,
     normalizePhone,
     normalizeHeaderName,
 };
