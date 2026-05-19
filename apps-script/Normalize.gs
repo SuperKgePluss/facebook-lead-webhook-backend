@@ -3,15 +3,19 @@ function normalizePhone(value) {
   let digits = String(value || '').replace(/\D/g, '').trim();
   if (!digits) return '';
 
-  if (digits.indexOf('66') === 0 && digits.length > 2) {
+  if (digits.indexOf('0066') === 0 && digits.length > 4) {
+    digits = digits.slice(2);
+  }
+
+  if (digits.indexOf('66') === 0 && digits.length === 11) {
     digits = '0' + digits.slice(2);
   }
 
-  if (digits.length === 9 && digits.indexOf('0') !== 0) {
+  if (digits.length === 9 && /^[689]/.test(digits)) {
     digits = '0' + digits;
   }
 
-  return digits;
+  return /^0\d{9}$/.test(digits) ? digits : '';
 }
 
 function normalizeLeadMainRow(sheet, row) {

@@ -169,5 +169,5 @@ function debugFollowUpForActiveRow() {
   Logger.log('Audio root folder id: ' + AUDIO_ROOT_FOLDER_ID);
 
   const match = findLatestLeadAudioFile_(lead.lead_id);
-  Logger.log(match.file ? 'Matched audio file: ' + match.fileName + ' / ' + match.file.getId() + ' parsed=' + match.parsedTimestamp + ' matches=' + match.matchCount : 'No matching audio file found. Expected format: ' + lead.lead_id + '_YYYYMMDD_HH_MM.ext');
+  Logger.log(match.file ? 'Matched audio file: ' + match.fileName + ' / ' + match.file.getId() + ' parsed=' + match.parsedTimestamp + ' matches=' + match.matchCount : 'No matching audio file found. Expected format: ' + lead.lead_id + '_YYYYMMDD_HH_MM.ext or ' + lead.lead_id + '_DDMMYYYY_HH_MM.ext');
 }

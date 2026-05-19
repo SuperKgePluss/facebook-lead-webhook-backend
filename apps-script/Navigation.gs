@@ -2,6 +2,8 @@
 const LEAD_MAIN_STATUS_VALUES = ['New', 'Ongoing', 'Installed', 'Done', 'Cancelled'];
 const LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY = 'LEADS_MAIN_STATUS_REFRESH_NEXT_ROW';
 const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 70;
+const LEAD_MAIN_SALES_OWNER_SETTING_HEADERS = ['Sales Owner', 'Sales Owners', 'sales_owner'];
+var LEAD_MAIN_SALES_OWNER_VALUES_CACHE_ = null;
 function onSelectionChange(e) {
   if (!e || !e.range) return;
 
@@ -200,6 +202,93 @@ function getLeadMainStatusValidation_() {
     .build();
 }
 
+function getSettingsValuesForHeaders_(candidateHeaders) {
+  if (LEAD_MAIN_SALES_OWNER_VALUES_CACHE_) return LEAD_MAIN_SALES_OWNER_VALUES_CACHE_;
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName('SETTINGS');
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) {
+    LEAD_MAIN_SALES_OWNER_VALUES_CACHE_ = [];
+    return LEAD_MAIN_SALES_OWNER_VALUES_CACHE_;
+  }
+
+  const headerMap = getHeaderMap_(sheet);
+  const values = [];
+
+  candidateHeaders.forEach(header => {
+    const column = headerMap[normalizeHeaderName_(header)];
+    if (!column) return;
+
+    sheet
+      .getRange(DATA_START_ROW, column, sheet.getLastRow() - DATA_START_ROW + 1, 1)
+      .getValues()
+      .forEach(row => {
+        const value = String(row[0] || '').trim();
+        if (value && values.indexOf(value) === -1) values.push(value);
+      });
+  });
+
+  const settingColumn = headerMap.setting || headerMap.setting_name || headerMap.type || headerMap.key;
+  const valueColumn = headerMap.value || headerMap.option || headerMap.display_value || headerMap.name;
+  if (settingColumn && valueColumn) {
+    sheet
+      .getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn())
+      .getValues()
+      .forEach(row => {
+        const setting = normalizeHeaderName_(row[settingColumn - 1]);
+        const value = String(row[valueColumn - 1] || '').trim();
+        if ((setting === 'sales_owner' || setting === 'sales_owners') && value && values.indexOf(value) === -1) {
+          values.push(value);
+        }
+      });
+  }
+
+  LEAD_MAIN_SALES_OWNER_VALUES_CACHE_ = values;
+  return values;
+}
+
+function isValueInListDropdownCell_(cell, expectedValues) {
+  const validation = cell.getDataValidation();
+  if (!validation || validation.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+    return false;
+  }
+
+  const criteriaValues = validation.getCriteriaValues();
+  const values = criteriaValues && criteriaValues[0] ? criteriaValues[0] : [];
+  return values.join('|') === expectedValues.join('|');
+}
+
+function ensureLeadMainSalesOwnerDropdownForRow(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet || sheet.getName() !== 'LEADS_MAIN' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  const phoneColumn = headerMap.phone;
+  const salesOwnerColumn = headerMap.sales_owner;
+  if (!leadIdColumn || !phoneColumn || !salesOwnerColumn) return false;
+
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  const phone = String(sheet.getRange(row, phoneColumn).getValue() || '').trim();
+  const cell = sheet.getRange(row, salesOwnerColumn);
+  const values = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
+  if (!values.length) return false;
+
+  if (leadId && phone) {
+    if (!isValueInListDropdownCell_(cell, values)) {
+      cell.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(true).build());
+      return true;
+    }
+    return false;
+  }
+
+  if (!leadId && !phone && !String(cell.getValue() || '').trim() && cell.getDataValidation()) {
+    cell.clearDataValidations();
+    return true;
+  }
+
+  return false;
+}
+
 function ensureLeadMainStatusDropdownForRow(row, optionalSheet) {
   const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
   if (!sheet || sheet.getName() !== 'LEADS_MAIN' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
@@ -258,6 +347,7 @@ function refreshLeadMainStatusDropdownsLight() {
   for (let row = startRow; row <= endRow; row++) {
     checked++;
     if (ensureLeadMainStatusDropdownForRow(row, sheet)) fixed++;
+    if (ensureLeadMainSalesOwnerDropdownForRow(row, sheet)) fixed++;
   }
 
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
@@ -291,6 +381,7 @@ function refreshLeadMainStatusDropdownsAll() {
   for (let row = DATA_START_ROW; row <= lastRow; row++) {
     checked++;
     if (ensureLeadMainStatusDropdownForRow(row, sheet)) fixed++;
+    if (ensureLeadMainSalesOwnerDropdownForRow(row, sheet)) fixed++;
   }
 
   setupLeadMainStatusConditionalFormatting_();
@@ -327,9 +418,14 @@ function setupLeadMainStatusConditionalFormatting_() {
   const lastColumn = sheet.getLastColumn();
   const range = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, lastColumn);
   const statusColumnLetter = columnToLetter_(statusColumn);
-  const doneFormula = '=$' + statusColumnLetter + DATA_START_ROW + '="Done"';
-  const cancelledFormula = '=$' + statusColumnLetter + DATA_START_ROW + '="Cancelled"';
-  const managedFormulas = [doneFormula, cancelledFormula];
+  const statusColors = {
+    New: '#ffffff',
+    Ongoing: '#fff2cc',
+    Installed: '#d9eaf7',
+    Done: '#d9ead3',
+    Cancelled: '#f4cccc',
+  };
+  const managedFormulas = LEAD_MAIN_STATUS_VALUES.map(status => '=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"');
 
   const existingRules = sheet.getConditionalFormatRules().filter(rule => {
     const condition = rule.getBooleanCondition();
@@ -337,21 +433,14 @@ function setupLeadMainStatusConditionalFormatting_() {
     return !values.some(value => managedFormulas.indexOf(String(value)) !== -1);
   });
 
-  const doneRule = SpreadsheetApp
+  const statusRules = LEAD_MAIN_STATUS_VALUES.map(status => SpreadsheetApp
     .newConditionalFormatRule()
-    .whenFormulaSatisfied(doneFormula)
-    .setBackground('#d9ead3')
+    .whenFormulaSatisfied('=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"')
+    .setBackground(statusColors[status])
     .setRanges([range])
-    .build();
+    .build());
 
-  const cancelledRule = SpreadsheetApp
-    .newConditionalFormatRule()
-    .whenFormulaSatisfied(cancelledFormula)
-    .setBackground('#f4cccc')
-    .setRanges([range])
-    .build();
-
-  sheet.setConditionalFormatRules(existingRules.concat([doneRule, cancelledRule]));
+  sheet.setConditionalFormatRules(existingRules.concat(statusRules));
 }
 
 function refreshOpenDealCheckboxes() {

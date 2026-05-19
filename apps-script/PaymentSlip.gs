@@ -233,6 +233,28 @@ function getDealsPaymentStatusValidation_() {
     .build();
 }
 
+function ensureDealsPhoneForRow(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet || sheet.getName() !== 'DEALS' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  const phoneColumn = headerMap.phone;
+  if (!leadIdColumn || !phoneColumn) return false;
+
+  const currentPhone = String(sheet.getRange(row, phoneColumn).getValue() || '').trim();
+  if (currentPhone) return false;
+
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  if (!leadId) return false;
+
+  const phone = getLeadPhoneByLeadId_(leadId);
+  if (!phone) return false;
+
+  sheet.getRange(row, phoneColumn).setValue(phone);
+  return true;
+}
+
 function ensureDealsPaymentStatusDropdownForRow(row, optionalSheet) {
   const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('DEALS');
   if (!sheet || sheet.getName() !== 'DEALS' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
@@ -247,7 +269,7 @@ function ensureDealsPaymentStatusDropdownForRow(row, optionalSheet) {
   const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
   const statusCell = sheet.getRange(row, paymentStatusColumn);
   const currentStatus = String(statusCell.getValue() || '').trim();
-  let changed = false;
+  let changed = ensureDealsPhoneForRow(row, sheet);
 
   if (dealId && leadId) {
     if (!isDealsPaymentStatusDropdownCell_(statusCell)) {
@@ -282,7 +304,7 @@ function ensureDealsOpenInstallationCheckboxForRow(row, optionalSheet) {
   const dealId = String(sheet.getRange(row, dealIdColumn).getValue() || '').trim();
   const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
   const cell = sheet.getRange(row, openInstallationColumn);
-  let changed = false;
+  let changed = ensureDealsPhoneForRow(row, sheet);
 
   if (dealId && leadId) {
     if (!isCheckboxCell_(cell)) {
@@ -532,5 +554,5 @@ function debugPaymentSlipForActiveRow() {
   Logger.log('Folder ID=' + PAYMENT_SLIP_FOLDER_ID);
 
   const paymentMatch = findPaymentSlipFile(leadId, paymentDate);
-  Logger.log(paymentMatch.file ? 'Matched payment slip file: ' + paymentMatch.fileName + ' / ' + paymentMatch.file.getId() + ' / ' + paymentMatch.fileUrl + ' parsed=' + paymentMatch.parsedTimestamp + ' matches=' + paymentMatch.matchCount : 'No matching payment slip file found. Expected format: ' + leadId + '_YYYYMMDD_HH_MM');
+  Logger.log(paymentMatch.file ? 'Matched payment slip file: ' + paymentMatch.fileName + ' / ' + paymentMatch.file.getId() + ' / ' + paymentMatch.fileUrl + ' parsed=' + paymentMatch.parsedTimestamp + ' matches=' + paymentMatch.matchCount : 'No matching payment slip file found. Expected format: ' + leadId + '_YYYYMMDD_HH_MM or ' + leadId + '_DDMMYYYY_HH_MM');
 }

@@ -104,15 +104,19 @@ function normalizePhone(phone) {
 
     if (!digits) return "";
 
-    if (digits.startsWith("66") && digits.length > 2) {
+    if (digits.startsWith("0066") && digits.length > 4) {
+        digits = digits.slice(2);
+    }
+
+    if (digits.startsWith("66") && digits.length === 11) {
         digits = "0" + digits.slice(2);
     }
 
-    if (digits.length === 9 && !digits.startsWith("0")) {
+    if (digits.length === 9 && /^[689]/.test(digits)) {
         digits = "0" + digits;
     }
 
-    return digits;
+    return /^0\d{9}$/.test(digits) ? digits : "";
 }
 
 function generateId(prefix) {
@@ -720,6 +724,7 @@ function buildDealObject(dealId, leadId, lead = {}, existingDeal = null) {
     return {
         deal_id: dealId,
         lead_id: leadId,
+        phone: normalizePhone(lead.phone || existingDeal?.phone || ""),
         product_model: lead.product_model || lead.product_name || existingDeal?.product_model || "",
         package_type: lead.package_type || lead.package_name || existingDeal?.package_type || "",
         price: lead.price || existingDeal?.price || "",

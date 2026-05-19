@@ -53,6 +53,9 @@ function normalizeProvince(rawProvince) {
 
     const cleaned = normalizeKey(raw);
     if (!cleaned) return { province: "UNKNOWN", rawProvince: raw };
+    if (["bangkok", "bkk", "bangkokmetropolis"].includes(cleaned)) {
+        return { province: "กรุงเทพมหานคร", rawProvince: raw };
+    }
 
     const provinceAliases = {
         "กรุงเทพมหานคร": ["กทม", "กทม.", "กรุงเทพ", "กรุงเทพฯ", "bangkok", "bkk"],

@@ -78,7 +78,7 @@ function findLatestEvidenceFileByLeadId_(rootFolderId, leadId, options) {
 
   if (!matches.length) {
     result.errorReason = 'not_found';
-    Logger.log('Evidence file not found for ' + evidenceType + '. Expected format: ' + targetLeadId + '_YYYYMMDD_HH_MM');
+    Logger.log('Evidence file not found for ' + evidenceType + '. Expected format: ' + targetLeadId + '_YYYYMMDD_HH_MM or ' + targetLeadId + '_DDMMYYYY_HH_MM');
     return result;
   }
 
@@ -138,11 +138,17 @@ function findEvidenceMatchesInFolder_(folder, matcher, allowedMimeTypes, allowed
       continue;
     }
 
+    const parsedDate = parseEvidenceDatePart_(match[1], match[2], match[3]);
+    if (!parsedDate) {
+      Logger.log('Evidence candidate rejected by invalid date file=' + fileName);
+      continue;
+    }
+
     matches.push({
       file: file,
       fileName: fileName,
-      timestampKey: match[1] + match[2] + match[3],
-      parsedTimestamp: formatEvidenceParsedTimestamp_(match[1], match[2], match[3]),
+      timestampKey: parsedDate.timestampKey,
+      parsedTimestamp: parsedDate.parsedTimestamp,
       updatedAt: file.getLastUpdated().getTime(),
     });
   }
@@ -170,8 +176,41 @@ function findEvidenceMatchesInFolder_(folder, matcher, allowedMimeTypes, allowed
   return matches;
 }
 
-function formatEvidenceParsedTimestamp_(yyyymmdd, hour, minute) {
-  return yyyymmdd.slice(0, 4) + '-' + yyyymmdd.slice(4, 6) + '-' + yyyymmdd.slice(6, 8) + ' ' + hour + ':' + minute;
+function parseEvidenceDatePart_(datePart, hour, minute) {
+  const rawDate = String(datePart || '');
+  const rawHour = String(hour || '');
+  const rawMinute = String(minute || '');
+  let year = '';
+  let month = '';
+  let day = '';
+
+  if (/^(19|20)\d{6}$/.test(rawDate)) {
+    year = rawDate.slice(0, 4);
+    month = rawDate.slice(4, 6);
+    day = rawDate.slice(6, 8);
+  } else if (/^\d{4}(19|20)\d{2}$/.test(rawDate)) {
+    day = rawDate.slice(0, 2);
+    month = rawDate.slice(2, 4);
+    year = rawDate.slice(4, 8);
+  } else {
+    return null;
+  }
+
+  const date = new Date(Number(year), Number(month) - 1, Number(day), Number(rawHour), Number(rawMinute));
+  if (
+    date.getFullYear() !== Number(year)
+    || date.getMonth() !== Number(month) - 1
+    || date.getDate() !== Number(day)
+    || date.getHours() !== Number(rawHour)
+    || date.getMinutes() !== Number(rawMinute)
+  ) {
+    return null;
+  }
+
+  return {
+    timestampKey: year + month + day + rawHour + rawMinute,
+    parsedTimestamp: year + '-' + month + '-' + day + ' ' + rawHour + ':' + rawMinute,
+  };
 }
 
 function escapeRegExp_(value) {
