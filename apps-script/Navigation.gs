@@ -1,7 +1,7 @@
 // Navigation helpers for Open Deal checkbox actions and ACTIVITY_LOG open_audio selection.
 const LEAD_MAIN_STATUS_VALUES = ['New', 'Ongoing', 'Installed', 'Done', 'Cancelled'];
 const LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY = 'LEADS_MAIN_STATUS_REFRESH_NEXT_ROW';
-const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 100;
+const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 25;
 function onSelectionChange(e) {
   if (!e || !e.range) return;
 
@@ -133,19 +133,19 @@ function ensureLeadMainCheckboxesForRow(row, optionalSheet) {
 
 function refreshLeadMainCheckboxesLight() {
   const cursorKey = 'LEADS_MAIN_CHECKBOX_REFRESH_NEXT_ROW';
-  const batchSize = 100;
+  const batchSize = 25;
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
-  if (!sheet) return;
+  if (!sheet) return { task_completed: true };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
+  if (lastRow < DATA_START_ROW) return { task_completed: true };
 
   const headerMap = getHeaderMap_(sheet);
   const openDealColumn = headerMap.open_deal;
   const saveFollowUpColumn = headerMap.save_follow_up;
   const leadIdColumn = headerMap.lead_id;
-  if (!leadIdColumn || (!openDealColumn && !saveFollowUpColumn)) return;
+  if (!leadIdColumn || (!openDealColumn && !saveFollowUpColumn)) return { task_completed: true };
 
   const savedCursor = Number(properties.getProperty(cursorKey));
   const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
@@ -164,6 +164,14 @@ function refreshLeadMainCheckboxesLight() {
   properties.setProperty(cursorKey, String(nextCursor));
 
   Logger.log('refreshLeadMainCheckboxesLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  return {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    fixed: fixed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
 }
 
 function resetLeadMainCheckboxRefreshCursor() {
@@ -231,13 +239,13 @@ function ensureLeadMainStatusDropdownForRow(row, optionalSheet) {
 function refreshLeadMainStatusDropdownsLight() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
-  if (!sheet) return;
+  if (!sheet) return { task_completed: true };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
+  if (lastRow < DATA_START_ROW) return { task_completed: true };
 
   const headerMap = getHeaderMap_(sheet);
-  if (!headerMap.lead_id || !headerMap.phone || !headerMap.lead_status) return;
+  if (!headerMap.lead_id || !headerMap.phone || !headerMap.lead_status) return { task_completed: true };
 
   const savedCursor = Number(properties.getProperty(LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY));
   const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
@@ -257,6 +265,14 @@ function refreshLeadMainStatusDropdownsLight() {
   setupLeadMainStatusConditionalFormatting_();
 
   Logger.log('refreshLeadMainStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  return {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    fixed: fixed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
 }
 
 function refreshLeadMainStatusDropdownsAll() {

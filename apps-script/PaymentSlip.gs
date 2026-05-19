@@ -10,8 +10,8 @@ const PAYMENT_SLIP_MAX_FILES_SCANNED = 500;
 const DEALS_PAYMENT_STATUS_VALUES = ['Unpaid', 'Paid', 'Cancelled'];
 const DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY = 'DEALS_PAYMENT_STATUS_REFRESH_NEXT_ROW';
 const DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY = 'DEALS_OPEN_INSTALLATION_REFRESH_NEXT_ROW';
-const DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE = 100;
-const DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE = 100;
+const DEALS_PAYMENT_STATUS_REFRESH_BATCH_SIZE = 25;
+const DEALS_OPEN_INSTALLATION_REFRESH_BATCH_SIZE = 25;
 const DEALS_FINAL_HEADERS = [
   'Deal ID',
   'Lead ID',
@@ -307,13 +307,13 @@ function ensureDealsOpenInstallationCheckboxForRow(row, optionalSheet) {
 function refreshDealsPaymentStatusDropdownsLight() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
-  if (!sheet) return;
+  if (!sheet) return { task_completed: true };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
+  if (lastRow < DATA_START_ROW) return { task_completed: true };
 
   const headerMap = getHeaderMap_(sheet);
-  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.payment_status) return;
+  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.payment_status) return { task_completed: true };
 
   const savedCursor = Number(properties.getProperty(DEALS_PAYMENT_STATUS_REFRESH_CURSOR_KEY));
   const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
@@ -334,6 +334,14 @@ function refreshDealsPaymentStatusDropdownsLight() {
   setupDealsPaymentStatusConditionalFormatting_();
 
   Logger.log('refreshDealsPaymentStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  return {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    fixed: fixed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
 }
 
 function refreshDealsPaymentStatusDropdownsAll() {
@@ -369,13 +377,13 @@ function resetDealsPaymentStatusDropdownRefreshCursor() {
 function refreshDealsOpenInstallationCheckboxes() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('DEALS');
-  if (!sheet) return;
+  if (!sheet) return { task_completed: true };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
+  if (lastRow < DATA_START_ROW) return { task_completed: true };
 
   const headerMap = getHeaderMap_(sheet);
-  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.open_installation) return;
+  if (!headerMap.deal_id || !headerMap.lead_id || !headerMap.open_installation) return { task_completed: true };
 
   const savedCursor = Number(properties.getProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY));
   const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
@@ -394,6 +402,14 @@ function refreshDealsOpenInstallationCheckboxes() {
   properties.setProperty(DEALS_OPEN_INSTALLATION_REFRESH_CURSOR_KEY, String(nextCursor));
 
   Logger.log('refreshDealsOpenInstallationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  return {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    fixed: fixed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
 }
 
 function refreshDealsOpenInstallationCheckboxesAll() {

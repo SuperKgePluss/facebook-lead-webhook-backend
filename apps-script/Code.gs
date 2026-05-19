@@ -1,6 +1,15 @@
 // Trigger entrypoints and shared sheet helpers. Row 1 contains headers, row 2 is reserved, and data starts at row 3.
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
+const CRM_UI_BATCH_TASK_CURSOR_KEY = 'CRM_UI_BATCH_CURRENT_TASK';
+const CRM_UI_BATCH_TASKS = [
+  'lead_main_checkboxes',
+  'lead_main_status_dropdowns',
+  'deals_payment_status',
+  'deals_open_installation',
+  'installations_status',
+  'installations_save_location',
+];
 
 function normalizeHeaderName_(headerName) {
   const aliases = {
@@ -86,15 +95,52 @@ function setupCrmUiLight() {
   setupLeadMainUi();
   setupDealsPaymentUi();
   setupInstallationsUi();
+  PropertiesService
+    .getScriptProperties()
+    .setProperty(CRM_UI_BATCH_TASK_CURSOR_KEY, CRM_UI_BATCH_TASKS[0]);
 }
 
 function setupCrmUiBatch() {
-  refreshLeadMainCheckboxesLight();
-  refreshLeadMainStatusDropdownsLight();
-  refreshDealsPaymentStatusDropdownsLight();
-  refreshDealsOpenInstallationCheckboxes();
-  refreshInstallationStatusDropdownsLight();
-  refreshInstallationSaveLocationCheckboxes();
+  const properties = PropertiesService.getScriptProperties();
+  const savedTask = String(properties.getProperty(CRM_UI_BATCH_TASK_CURSOR_KEY) || CRM_UI_BATCH_TASKS[0]).trim();
+  const currentTask = CRM_UI_BATCH_TASKS.indexOf(savedTask) === -1 ? CRM_UI_BATCH_TASKS[0] : savedTask;
+  const taskIndex = CRM_UI_BATCH_TASKS.indexOf(currentTask);
+  let result;
+
+  if (savedTask === 'completed') {
+    Logger.log('setupCrmUiBatch current_task=completed task_completed=true next_task=completed');
+    return;
+  }
+
+  if (currentTask === 'lead_main_checkboxes') {
+    result = refreshLeadMainCheckboxesLight();
+  } else if (currentTask === 'lead_main_status_dropdowns') {
+    result = refreshLeadMainStatusDropdownsLight();
+  } else if (currentTask === 'deals_payment_status') {
+    result = refreshDealsPaymentStatusDropdownsLight();
+  } else if (currentTask === 'deals_open_installation') {
+    result = refreshDealsOpenInstallationCheckboxes();
+  } else if (currentTask === 'installations_status') {
+    result = refreshInstallationStatusDropdownsLight();
+  } else if (currentTask === 'installations_save_location') {
+    result = refreshInstallationSaveLocationCheckboxes();
+  }
+
+  result = result || {};
+  const taskCompleted = Boolean(result.task_completed);
+  const nextTask = taskCompleted
+    ? CRM_UI_BATCH_TASKS[taskIndex + 1] || 'completed'
+    : currentTask;
+
+  properties.setProperty(CRM_UI_BATCH_TASK_CURSOR_KEY, nextTask);
+  Logger.log(
+    'setupCrmUiBatch current_task=' + currentTask
+    + ' startRow=' + (result.startRow || '')
+    + ' endRow=' + (result.endRow || '')
+    + ' nextCursor=' + (result.nextCursor || '')
+    + ' task_completed=' + taskCompleted
+    + ' next_task=' + nextTask
+  );
 }
 
 function installCrmTriggers() {

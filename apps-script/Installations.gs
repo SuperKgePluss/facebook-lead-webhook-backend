@@ -2,8 +2,8 @@
 const INSTALLATION_STATUS_VALUES = ['In Progress', 'Installed', 'Cancelled'];
 const INSTALLATION_STATUS_REFRESH_CURSOR_KEY = 'INSTALLATION_STATUS_REFRESH_NEXT_ROW';
 const INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY = 'INSTALLATION_SAVE_LOCATION_REFRESH_NEXT_ROW';
-const INSTALLATION_STATUS_REFRESH_BATCH_SIZE = 100;
-const INSTALLATION_SAVE_LOCATION_REFRESH_BATCH_SIZE = 100;
+const INSTALLATION_STATUS_REFRESH_BATCH_SIZE = 25;
+const INSTALLATION_SAVE_LOCATION_REFRESH_BATCH_SIZE = 25;
 const LOCATION_ROOT_FOLDER_ID = 'PASTE_FOLDER_ID_HERE';
 const LOCATION_MAX_FOLDERS_SCANNED = 50;
 const LOCATION_MAX_FILES_SCANNED = 500;
@@ -211,13 +211,13 @@ function ensureInstallationSaveLocationCheckboxForRow(row, optionalSheet) {
 function refreshInstallationStatusDropdownsLight() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('INSTALLATIONS');
-  if (!sheet) return;
+  if (!sheet) return { task_completed: true };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
+  if (lastRow < DATA_START_ROW) return { task_completed: true };
 
   const headerMap = getHeaderMap_(sheet);
-  if (!headerMap.install_id || !headerMap.lead_id || !headerMap.install_status) return;
+  if (!headerMap.install_id || !headerMap.lead_id || !headerMap.install_status) return { task_completed: true };
 
   const savedCursor = Number(properties.getProperty(INSTALLATION_STATUS_REFRESH_CURSOR_KEY));
   const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
@@ -238,6 +238,14 @@ function refreshInstallationStatusDropdownsLight() {
   setupInstallationsStatusConditionalFormatting_();
 
   Logger.log('refreshInstallationStatusDropdownsLight startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  return {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    fixed: fixed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
 }
 
 function refreshInstallationStatusDropdownsAll() {
@@ -273,13 +281,13 @@ function resetInstallationStatusDropdownRefreshCursor() {
 function refreshInstallationSaveLocationCheckboxes() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('INSTALLATIONS');
-  if (!sheet) return;
+  if (!sheet) return { task_completed: true };
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < DATA_START_ROW) return;
+  if (lastRow < DATA_START_ROW) return { task_completed: true };
 
   const headerMap = getHeaderMap_(sheet);
-  if (!headerMap.install_id || !headerMap.lead_id || !headerMap.save_location) return;
+  if (!headerMap.install_id || !headerMap.lead_id || !headerMap.save_location) return { task_completed: true };
 
   const savedCursor = Number(properties.getProperty(INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY));
   const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
@@ -298,6 +306,14 @@ function refreshInstallationSaveLocationCheckboxes() {
   properties.setProperty(INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY, String(nextCursor));
 
   Logger.log('refreshInstallationSaveLocationCheckboxes startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' fixed=' + fixed + ' nextCursor=' + nextCursor);
+  return {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    fixed: fixed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
 }
 
 function refreshInstallationSaveLocationCheckboxesAll() {
