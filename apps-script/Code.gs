@@ -143,6 +143,13 @@ function setupCrmUiBatch() {
   );
 }
 
+function resetCrmUiBatchCursor() {
+  PropertiesService
+    .getScriptProperties()
+    .deleteProperty(CRM_UI_BATCH_TASK_CURSOR_KEY);
+  Logger.log('CRM UI batch cursor reset.');
+}
+
 function installCrmTriggers() {
   const ss = SpreadsheetApp.getActive();
   ScriptApp.getProjectTriggers().forEach(trigger => {
