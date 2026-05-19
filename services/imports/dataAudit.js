@@ -10,6 +10,12 @@ const CRM3_LEAD_FIELDS = [
     "zone",
 ];
 
+const CRM3_SAFE_LEAD_RESTORE_FIELDS = [
+    "zone",
+    "customer_type",
+    "sales_owner",
+];
+
 const CRM3_DEAL_FIELDS = [
     "product_model",
     "package_type",
@@ -29,6 +35,14 @@ const CRM3_INSTALLATION_FIELDS = [
     "machine_count",
     "location_url",
     "note",
+];
+
+const CRM3_SAFE_DEAL_RESTORE_FIELDS = [
+    "product_model",
+    "package_type",
+    "price",
+    "full_amount",
+    "payment_slip_url",
 ];
 
 const ACTIVITY_URL_FIELDS = [
@@ -307,6 +321,91 @@ function buildActivitySignature(object, currentLeadId) {
         firstValue(object, ["location_url"]),
         firstValue(object, ["created_at", "activity_date"]),
     ].map(value => String(value || "").trim()).join("|");
+}
+
+function isBlankOrUnknown(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    return !normalized || normalized === "unknown" || normalized === "n/a" || normalized === "-";
+}
+
+function isPresentValue(value) {
+    return !isBlankOrUnknown(value);
+}
+
+function getRestoreFieldValue(object, field) {
+    if (field === "price") return firstValue(object, ["price", "paid_amount", "paid amount"]);
+    if (field === "payment_slip_url") return firstValue(object, ["payment_slip_url", "payment_url", "payment slip url"]);
+    if (field === "machine_count") return firstValue(object, ["machine_count", "quantity", "device_count"]);
+    if (field === "preferred_install_date") return firstValue(object, ["preferred_install_date", "install_date", "install date"]);
+    if (field === "preferred_install_time") return firstValue(object, ["preferred_install_time", "install_time", "time_slot"]);
+    return firstValue(object, [field]);
+}
+
+function buildSafeRestorePatch({ currentObject, sourceObject, fields, allowUnknownCurrent = false }) {
+    const patch = {};
+    const conflicts = [];
+    const skippedEmptySource = [];
+
+    for (const field of fields) {
+        const sourceValue = String(getRestoreFieldValue(sourceObject, field) || "").trim();
+        const currentValue = String(getRestoreFieldValue(currentObject, field) || "").trim();
+
+        if (!isPresentValue(sourceValue)) {
+            skippedEmptySource.push(field);
+            continue;
+        }
+
+        const currentCanBeFilled = allowUnknownCurrent ? isBlankOrUnknown(currentValue) : !currentValue;
+        if (currentCanBeFilled) {
+            patch[field] = sourceValue;
+            continue;
+        }
+
+        if (currentValue !== sourceValue) {
+            conflicts.push({ field, current_value: currentValue, snapshot_value: sourceValue });
+        }
+    }
+
+    return { patch, conflicts, skippedEmptySource };
+}
+
+function buildLeadIdToPhoneMap(items) {
+    const map = new Map();
+
+    for (const item of items) {
+        const leadId = String(firstValue(item.object, ["lead_id"]) || "").trim();
+        const phone = normalizePhone(firstValue(item.object, ["phone"]));
+        if (leadId && phone) map.set(leadId, phone);
+    }
+
+    return map;
+}
+
+function resolveSnapshotPhone(snapshotObject, oldLeadIdToPhone) {
+    const directPhone = normalizePhone(firstValue(snapshotObject, ["phone"]));
+    if (directPhone) return directPhone;
+
+    const oldLeadId = String(firstValue(snapshotObject, ["lead_id"]) || "").trim();
+    if (!oldLeadId) return "";
+    return oldLeadIdToPhone.get(oldLeadId) || "";
+}
+
+function buildActivityUrlKey(object, currentLeadId) {
+    return [
+        currentLeadId,
+        firstValue(object, ["action_type", "activity_type"]) || "Restore URL Evidence",
+        firstValue(object, ["audio_url", "audio_link"]),
+        firstValue(object, ["payment_url", "payment_slip_url"]),
+        firstValue(object, ["location_url"]),
+    ].map(value => String(value || "").trim()).join("|");
+}
+
+function generateRestoreId(prefix) {
+    return `${prefix}-${Date.now()}${Math.floor(Math.random() * 100000)}`;
+}
+
+function nowIsoString() {
+    return new Date().toISOString();
 }
 
 async function handleCrm3RestoreAudit(req, res) {
@@ -724,7 +823,317 @@ async function handleFacebookRawAudit(req, res) {
     }
 }
 
+async function handleCrm3SafeRestore(req, res) {
+    const confirm = String(req.query.confirm || "").trim().toLowerCase() === "true";
+    const dryRun = !confirm || String(req.query.mode || "").trim().toLowerCase() === "dry_run";
+    const sampleLimit = getSampleLimit(req);
+
+    try {
+        const [
+            currentLeadRows,
+            currentDealRows,
+            currentInstallationRows,
+            currentActivityRows,
+            crm3Leads,
+            crm3Deals,
+            crm3Installations,
+            crm3Activities,
+        ] = await Promise.all([
+            googleSheets.getSheetRows("LEADS_MAIN"),
+            googleSheets.getSheetRows("DEALS"),
+            googleSheets.getSheetRows("INSTALLATIONS"),
+            googleSheets.getSheetRows("ACTIVITY_LOG"),
+            readOptionalSheet(req, "crm3_leads_sheet", ["CRM3_LEADS_MAIN", "CRM3_LEADS", "CRM3_SNAPSHOT_LEADS_MAIN", "LEADS_MAIN_CRM3"], "crm3_spreadsheet_id", "CRM3_SNAPSHOT_SPREADSHEET_ID"),
+            readOptionalSheet(req, "crm3_deals_sheet", ["CRM3_DEALS", "CRM3_SNAPSHOT_DEALS", "DEALS_CRM3"], "crm3_spreadsheet_id", "CRM3_SNAPSHOT_SPREADSHEET_ID"),
+            readOptionalSheet(req, "crm3_installations_sheet", ["CRM3_INSTALLATIONS", "CRM3_SNAPSHOT_INSTALLATIONS", "INSTALLATIONS_CRM3"], "crm3_spreadsheet_id", "CRM3_SNAPSHOT_SPREADSHEET_ID"),
+            readOptionalSheet(req, "crm3_activity_sheet", ["CRM3_ACTIVITY_LOG", "CRM3_ACTIVITIES", "ACTIVITY_LOG_CRM3"], "crm3_spreadsheet_id", "CRM3_SNAPSHOT_SPREADSHEET_ID"),
+        ]);
+
+        const currentLeads = rowsToObjects(currentLeadRows);
+        const currentDeals = rowsToObjects(currentDealRows);
+        const currentInstallations = rowsToObjects(currentInstallationRows);
+        const currentActivities = rowsToObjects(currentActivityRows);
+        const oldLeads = rowsToObjects(crm3Leads.rows);
+        const oldDeals = rowsToObjects(crm3Deals.rows);
+        const oldInstallations = rowsToObjects(crm3Installations.rows);
+        const oldActivities = rowsToObjects(crm3Activities.rows);
+        const currentLeadMaps = mapLeadsByPhone(currentLeads);
+        const oldLeadIdToPhone = buildLeadIdToPhoneMap(oldLeads);
+        const currentActivityUrlKeys = new Set(
+            currentActivities.map(item => buildActivityUrlKey(item.object, firstValue(item.object, ["lead_id"])))
+        );
+
+        const leadUpdates = [];
+        const dealUpdates = [];
+        const installationCreates = [];
+        const activityCreates = [];
+        const plannedActivityKeys = new Set();
+        const response = {
+            success: true,
+            dry_run: dryRun,
+            write_enabled: !dryRun,
+            no_writes_performed: dryRun,
+            source_sheets: {
+                crm3_leads: {
+                    sheet_name: crm3Leads.sheetName || null,
+                    spreadsheet_id_source: crm3Leads.spreadsheet_id_source,
+                },
+                crm3_deals: {
+                    sheet_name: crm3Deals.sheetName || null,
+                    spreadsheet_id_source: crm3Deals.spreadsheet_id_source,
+                },
+                crm3_installations: {
+                    sheet_name: crm3Installations.sheetName || null,
+                    spreadsheet_id_source: crm3Installations.spreadsheet_id_source,
+                },
+                crm3_activity_log: {
+                    sheet_name: crm3Activities.sheetName || null,
+                    spreadsheet_id_source: crm3Activities.spreadsheet_id_source,
+                },
+            },
+            counts: {
+                matched_phones: 0,
+                unmatched_phones: 0,
+                leads_update_candidates: 0,
+                leads_updated: 0,
+                deals_update_candidates: 0,
+                deals_updated: 0,
+                installation_create_candidates: 0,
+                created_installations: 0,
+                activity_create_candidates: 0,
+                created_activities: 0,
+                skipped_duplicate_activities: 0,
+                conflicts_skipped: 0,
+                skipped_missing_current_deal: 0,
+                skipped_existing_installation: 0,
+                skipped_missing_phone: 0,
+            },
+            sample_lead_updates: [],
+            sample_deal_updates: [],
+            sample_installation_creates: [],
+            sample_activity_creates: [],
+        };
+
+        for (const item of oldLeads) {
+            const oldLead = item.object;
+            const phone = resolveSnapshotPhone(oldLead, oldLeadIdToPhone);
+            if (!phone) {
+                response.counts.skipped_missing_phone++;
+                continue;
+            }
+
+            const currentLead = currentLeadMaps.byPhone.get(phone);
+            if (!currentLead) {
+                response.counts.unmatched_phones++;
+                continue;
+            }
+
+            response.counts.matched_phones++;
+            const restore = buildSafeRestorePatch({
+                currentObject: currentLead.object,
+                sourceObject: oldLead,
+                fields: CRM3_SAFE_LEAD_RESTORE_FIELDS,
+                allowUnknownCurrent: true,
+            });
+            response.counts.conflicts_skipped += restore.conflicts.length;
+
+            if (Object.keys(restore.patch).length) {
+                leadUpdates.push({
+                    rowNumber: currentLead.rowNumber,
+                    leadId: currentLead.leadId,
+                    phone,
+                    patch: restore.patch,
+                    sourceRow: item.rowNumber,
+                });
+                response.counts.leads_update_candidates++;
+
+                if (response.sample_lead_updates.length < sampleLimit) {
+                    response.sample_lead_updates.push({
+                        current_lead_id: currentLead.leadId,
+                        phone,
+                        source_row: item.rowNumber,
+                        patch: restore.patch,
+                    });
+                }
+            }
+        }
+
+        for (const item of oldDeals) {
+            const oldDeal = item.object;
+            if (!hasAnyField(oldDeal, CRM3_SAFE_DEAL_RESTORE_FIELDS)) continue;
+
+            const phone = resolveSnapshotPhone(oldDeal, oldLeadIdToPhone);
+            const currentLead = currentLeadMaps.byPhone.get(phone);
+            if (!currentLead) continue;
+
+            const currentDeal = findCurrentByLeadId(currentDeals, currentLead.leadId);
+            if (!currentDeal) {
+                response.counts.skipped_missing_current_deal++;
+                continue;
+            }
+
+            const restore = buildSafeRestorePatch({
+                currentObject: currentDeal.object,
+                sourceObject: oldDeal,
+                fields: CRM3_SAFE_DEAL_RESTORE_FIELDS,
+                allowUnknownCurrent: false,
+            });
+            response.counts.conflicts_skipped += restore.conflicts.length;
+
+            if (Object.keys(restore.patch).length) {
+                dealUpdates.push({
+                    rowNumber: currentDeal.rowNumber,
+                    leadId: currentLead.leadId,
+                    phone,
+                    patch: restore.patch,
+                    sourceRow: item.rowNumber,
+                });
+                response.counts.deals_update_candidates++;
+
+                if (response.sample_deal_updates.length < sampleLimit) {
+                    response.sample_deal_updates.push({
+                        current_lead_id: currentLead.leadId,
+                        phone,
+                        source_row: item.rowNumber,
+                        patch: restore.patch,
+                    });
+                }
+            }
+        }
+
+        for (const item of oldInstallations) {
+            const oldInstallation = item.object;
+            if (!hasAnyField(oldInstallation, CRM3_INSTALLATION_FIELDS)) continue;
+
+            const phone = resolveSnapshotPhone(oldInstallation, oldLeadIdToPhone);
+            const currentLead = currentLeadMaps.byPhone.get(phone);
+            if (!currentLead) continue;
+
+            const currentInstallation = findCurrentByLeadId(currentInstallations, currentLead.leadId);
+            if (currentInstallation) {
+                response.counts.skipped_existing_installation++;
+                continue;
+            }
+
+            const location = String(
+                getRestoreFieldValue(oldInstallation, "location")
+                || firstValue(oldInstallation, ["location_url"])
+                || ""
+            ).trim();
+            const installationObject = {
+                install_id: generateRestoreId("INST"),
+                lead_id: currentLead.leadId,
+                phone,
+                install_status: getRestoreFieldValue(oldInstallation, "install_status") || "In Progress",
+                preferred_install_date: getRestoreFieldValue(oldInstallation, "preferred_install_date"),
+                preferred_install_time: getRestoreFieldValue(oldInstallation, "preferred_install_time"),
+                location,
+                location_url: firstValue(oldInstallation, ["location_url"]),
+                machine_count: getRestoreFieldValue(oldInstallation, "machine_count"),
+                note: getRestoreFieldValue(oldInstallation, "note"),
+            };
+
+            installationCreates.push({
+                object: installationObject,
+                sourceRow: item.rowNumber,
+            });
+            response.counts.installation_create_candidates++;
+
+            if (response.sample_installation_creates.length < sampleLimit) {
+                response.sample_installation_creates.push({
+                    current_lead_id: currentLead.leadId,
+                    phone,
+                    source_row: item.rowNumber,
+                    installation: installationObject,
+                });
+            }
+        }
+
+        for (const item of oldActivities) {
+            const oldActivity = item.object;
+            if (!hasAnyField(oldActivity, ACTIVITY_URL_FIELDS)) continue;
+
+            const phone = resolveSnapshotPhone(oldActivity, oldLeadIdToPhone);
+            const currentLead = currentLeadMaps.byPhone.get(phone);
+            if (!currentLead) continue;
+
+            const activityObject = {
+                activity_id: generateRestoreId("ACT"),
+                lead_id: currentLead.leadId,
+                sheet_name: firstValue(oldActivity, ["sheet_name"]) || "CRM3_RESTORE",
+                action_type: firstValue(oldActivity, ["action_type", "activity_type"]) || "restore_url_evidence",
+                note: firstValue(oldActivity, ["note"]),
+                audio_url: firstValue(oldActivity, ["audio_url", "audio_link"]),
+                payment_url: firstValue(oldActivity, ["payment_url", "payment_slip_url"]),
+                location_url: firstValue(oldActivity, ["location_url"]),
+                created_by: "CRM3 Restore",
+                created_at: firstValue(oldActivity, ["created_at", "activity_date"]) || nowIsoString(),
+            };
+            const duplicateKey = buildActivityUrlKey(activityObject, currentLead.leadId);
+
+            if (currentActivityUrlKeys.has(duplicateKey) || plannedActivityKeys.has(duplicateKey)) {
+                response.counts.skipped_duplicate_activities++;
+                continue;
+            }
+
+            plannedActivityKeys.add(duplicateKey);
+            activityCreates.push({
+                object: activityObject,
+                sourceRow: item.rowNumber,
+            });
+            response.counts.activity_create_candidates++;
+
+            if (response.sample_activity_creates.length < sampleLimit) {
+                response.sample_activity_creates.push({
+                    current_lead_id: currentLead.leadId,
+                    phone,
+                    source_row: item.rowNumber,
+                    activity: activityObject,
+                });
+            }
+        }
+
+        if (!dryRun) {
+            for (const update of leadUpdates) {
+                await googleSheets.updateObjectRow("LEADS_MAIN", update.rowNumber, update.patch);
+                response.counts.leads_updated++;
+            }
+
+            for (const update of dealUpdates) {
+                await googleSheets.updateObjectRow("DEALS", update.rowNumber, update.patch);
+                response.counts.deals_updated++;
+            }
+
+            if (installationCreates.length) {
+                await googleSheets.appendObjects("INSTALLATIONS", installationCreates.map(item => item.object));
+            }
+            response.counts.created_installations = installationCreates.length;
+
+            if (activityCreates.length) {
+                await googleSheets.appendObjects("ACTIVITY_LOG", activityCreates.map(item => item.object));
+            }
+            response.counts.created_activities = activityCreates.length;
+        }
+
+        if (dryRun) {
+            response.counts.leads_updated = 0;
+            response.counts.deals_updated = 0;
+            response.counts.created_installations = 0;
+            response.counts.created_activities = 0;
+        }
+
+        return res.status(200).json(response);
+    } catch (err) {
+        return res.status(500).json({
+            success: false,
+            dry_run: dryRun,
+            error: err.message,
+        });
+    }
+}
+
 module.exports = {
     handleCrm3RestoreAudit,
     handleFacebookRawAudit,
+    handleCrm3SafeRestore,
 };
