@@ -1,7 +1,7 @@
 // Navigation helpers for Open Deal checkbox actions and ACTIVITY_LOG open_audio selection.
 const LEAD_MAIN_STATUS_VALUES = ['New', 'Ongoing', 'Installed', 'Done', 'Cancelled'];
 const LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY = 'LEADS_MAIN_STATUS_REFRESH_NEXT_ROW';
-const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 50;
+const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 100;
 function onSelectionChange(e) {
   if (!e || !e.range) return;
 
@@ -133,7 +133,7 @@ function ensureLeadMainCheckboxesForRow(row, optionalSheet) {
 
 function refreshLeadMainCheckboxesLight() {
   const cursorKey = 'LEADS_MAIN_CHECKBOX_REFRESH_NEXT_ROW';
-  const batchSize = 50;
+  const batchSize = 100;
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
   if (!sheet) return { task_completed: true };
