@@ -477,35 +477,9 @@ function setupLeadMainStatusConditionalFormatting_() {
   sheet.setConditionalFormatRules(existingRules.concat(statusRules));
 }
 
-function setupLeadMainMetadataHeaders_() {
-  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
-  if (!sheet) return;
-
-  const headers = [
-    'Lead Form Name',
-    'Ad Name',
-    'Ad Set Name',
-    'Campaign Name',
-    'Facebook Created Time',
-  ];
-  const thaiLabels = [
-    '\u0e0a\u0e37\u0e48\u0e2d\u0e1f\u0e2d\u0e23\u0e4c\u0e21\u0e25\u0e35\u0e14',
-    '\u0e0a\u0e37\u0e48\u0e2d\u0e42\u0e06\u0e29\u0e13\u0e32',
-    '\u0e0a\u0e37\u0e48\u0e2d\u0e0a\u0e38\u0e14\u0e42\u0e06\u0e29\u0e13\u0e32',
-    '\u0e0a\u0e37\u0e48\u0e2d\u0e41\u0e04\u0e21\u0e40\u0e1b\u0e0d',
-    '\u0e27\u0e31\u0e19\u0e17\u0e35\u0e48\u0e2a\u0e23\u0e49\u0e32\u0e07\u0e25\u0e35\u0e14\u0e08\u0e32\u0e01 Facebook',
-  ];
-  const startColumn = 20;
-  const requiredLastColumn = startColumn + headers.length - 1;
-  if (sheet.getMaxColumns() < requiredLastColumn) {
-    sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredLastColumn - sheet.getMaxColumns());
-  }
-  sheet.getRange(HEADER_ROW, startColumn, 1, headers.length).setValues([headers]);
-  sheet.getRange(2, startColumn, 1, thaiLabels.length).setValues([thaiLabels]);
-}
-
 function applyCrmDateTimeFormats_() {
   const ss = SpreadsheetApp.getActive();
+  const gregorianDateTimeFormat = '[$-en-US]MM/dd/yyyy HH:mm';
   const targets = {
     LEADS_MAIN: ['latest_follow_up_at', 'created_at', 'updated_at', 'facebook_created_time'],
     LEAD_DETAILS: ['facebook_created_time'],
@@ -522,20 +496,42 @@ function applyCrmDateTimeFormats_() {
     targets[sheetName].forEach(header => {
       const column = headerMap[header];
       if (!column) return;
-      sheet.getRange(DATA_START_ROW, column, sheet.getLastRow() - DATA_START_ROW + 1, 1).setNumberFormat('MM/dd/yyyy HH:mm');
+      sheet.getRange(DATA_START_ROW, column, sheet.getLastRow() - DATA_START_ROW + 1, 1).setNumberFormat(gregorianDateTimeFormat);
     });
   });
 }
 
-function setupLeadMainBasicFilter_() {
+function removeLeadMainBroadFilter_() {
   const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
   if (!sheet) return;
 
-  const lastRow = Math.max(sheet.getLastRow(), DATA_START_ROW);
-  const lastColumn = sheet.getLastColumn();
-  if (!sheet.getFilter()) {
-    sheet.getRange(HEADER_ROW, 1, lastRow - HEADER_ROW + 1, lastColumn).createFilter();
+  const filter = sheet.getFilter();
+  if (filter) filter.remove();
+}
+
+function sortLeadsByFacebookCreatedTimeAsc() {
+  sortLeadsByFacebookCreatedTime_(true);
+}
+
+function sortLeadsByFacebookCreatedTimeDesc() {
+  sortLeadsByFacebookCreatedTime_(false);
+}
+
+function sortLeadsByFacebookCreatedTime_(ascending) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  const sortColumn = headerMap.facebook_created_time;
+  if (!sortColumn) {
+    Logger.log('Cannot sort LEADS_MAIN: Facebook Created Time column is missing.');
+    return;
   }
+
+  removeLeadMainBroadFilter_();
+  sheet
+    .getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn())
+    .sort({ column: sortColumn, ascending: Boolean(ascending) });
 }
 
 function setupLeadMainRowUi(row, optionalSheet) {
@@ -560,11 +556,10 @@ function refreshOpenDealCheckboxForRow_(sheet, row) {
 }
 
 function setupLeadMainUi() {
-  setupLeadMainMetadataHeaders_();
   resetLeadMainCheckboxRefreshCursor();
   resetLeadMainStatusDropdownRefreshCursor();
   applyCrmDateTimeFormats_();
-  setupLeadMainBasicFilter_();
+  removeLeadMainBroadFilter_();
   setupLeadMainStatusConditionalFormatting_();
   Logger.log('setupLeadMainUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level checkboxes and dropdowns.');
 }
