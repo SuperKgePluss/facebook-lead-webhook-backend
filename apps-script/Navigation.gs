@@ -480,12 +480,18 @@ function setupLeadMainStatusConditionalFormatting_() {
 function applyCrmDateTimeFormats_() {
   const ss = SpreadsheetApp.getActive();
   const gregorianDateTimeFormat = '[$-en-US]MM/dd/yyyy HH:mm';
+  try {
+    ss.setSpreadsheetTimeZone('Asia/Bangkok');
+  } catch (err) {
+    Logger.log('Unable to set spreadsheet timezone safely: ' + err.message);
+  }
+
   const targets = {
     LEADS_MAIN: ['latest_follow_up_at', 'created_at', 'updated_at', 'facebook_created_time'],
     LEAD_DETAILS: ['facebook_created_time'],
-    DEALS: ['payment_date'],
-    INSTALLATIONS: ['preferred_install_date'],
-    ACTIVITY_LOG: ['created_at'],
+    DEALS: ['payment_date', 'deal_date', 'created_at', 'updated_at'],
+    INSTALLATIONS: ['preferred_install_date', 'install_date', 'created_at', 'updated_at'],
+    ACTIVITY_LOG: ['created_at', 'activity_date'],
     SUMMARY_DAILY: ['date', 'created_at', 'updated_at'],
   };
 
@@ -496,9 +502,126 @@ function applyCrmDateTimeFormats_() {
     targets[sheetName].forEach(header => {
       const column = headerMap[header];
       if (!column) return;
-      sheet.getRange(DATA_START_ROW, column, sheet.getLastRow() - DATA_START_ROW + 1, 1).setNumberFormat(gregorianDateTimeFormat);
+      normalizeCrmDateTimeColumn_(sheet, column, gregorianDateTimeFormat);
     });
   });
+}
+
+function normalizeCrmDateTimeColumn_(sheet, column, numberFormat) {
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  if (rowCount <= 0) return;
+
+  const range = sheet.getRange(DATA_START_ROW, column, rowCount, 1);
+  const values = range.getValues();
+  let changed = false;
+  const normalizedValues = values.map(row => {
+    const parsedDate = parseCrmDateTimeValue_(row[0]);
+    if (!parsedDate) return row;
+    changed = true;
+    return [parsedDate];
+  });
+
+  if (changed) {
+    range.setValues(normalizedValues);
+  }
+  range.setNumberFormat(numberFormat);
+}
+
+function parseCrmDateTimeValue_(value) {
+  if (value === null || value === undefined || value === '') return null;
+
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    const year = value.getFullYear();
+    if (year > 2400) {
+      return new Date(
+        year - 543,
+        value.getMonth(),
+        value.getDate(),
+        value.getHours(),
+        value.getMinutes(),
+        value.getSeconds()
+      );
+    }
+    return value;
+  }
+
+  if (typeof value === 'number' && isFinite(value) && value > 20000) {
+    const date = new Date(Math.round((value - 25569) * 86400 * 1000));
+    return isNaN(date.getTime()) ? null : date;
+  }
+
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (isoMatch) {
+    return buildValidCrmDate_(
+      Number(isoMatch[1]),
+      Number(isoMatch[2]),
+      Number(isoMatch[3]),
+      Number(isoMatch[4] || 0),
+      Number(isoMatch[5] || 0),
+      Number(isoMatch[6] || 0)
+    );
+  }
+
+  const slashMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!slashMatch) return null;
+
+  const first = Number(slashMatch[1]);
+  const second = Number(slashMatch[2]);
+  let year = Number(slashMatch[3]);
+  if (year > 2400) year -= 543;
+  if (year < 100) year += year >= 70 ? 1900 : 2000;
+
+  const hour = Number(slashMatch[4] || 0);
+  const minute = Number(slashMatch[5] || 0);
+  const secondValue = Number(slashMatch[6] || 0);
+
+  if (first > 12) {
+    return buildValidCrmDate_(year, second, first, hour, minute, secondValue);
+  }
+  return buildValidCrmDate_(year, first, second, hour, minute, secondValue);
+}
+
+function buildValidCrmDate_(year, month, day, hour, minute, second) {
+  const date = new Date(year, month - 1, day, hour, minute, second || 0);
+  if (
+    date.getFullYear() !== year
+    || date.getMonth() !== month - 1
+    || date.getDate() !== day
+    || date.getHours() !== hour
+    || date.getMinutes() !== minute
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function cleanupLeadMainUnusedMarketingMetadataColumns() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet) return { hidden_columns: 0 };
+
+  const deprecatedHeaders = {
+    lead_form_name: true,
+    ad_name: true,
+    adset_name: true,
+    campaign_name: true,
+  };
+  const headers = sheet.getRange(HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
+  let hiddenColumns = 0;
+
+  headers.forEach((header, index) => {
+    const normalizedHeader = normalizeHeaderName_(header);
+    if (!deprecatedHeaders[normalizedHeader]) return;
+    const column = index + 1;
+    sheet.hideColumns(column);
+    hiddenColumns++;
+  });
+
+  const result = { hidden_columns: hiddenColumns };
+  Logger.log(JSON.stringify(result));
+  return result;
 }
 
 function removeLeadMainBroadFilter_() {
@@ -559,6 +682,7 @@ function setupLeadMainUi() {
   resetLeadMainCheckboxRefreshCursor();
   resetLeadMainStatusDropdownRefreshCursor();
   applyCrmDateTimeFormats_();
+  cleanupLeadMainUnusedMarketingMetadataColumns();
   removeLeadMainBroadFilter_();
   setupLeadMainStatusConditionalFormatting_();
   Logger.log('setupLeadMainUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level checkboxes and dropdowns.');
