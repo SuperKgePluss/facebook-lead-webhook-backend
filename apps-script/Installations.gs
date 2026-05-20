@@ -1,5 +1,5 @@
 // INSTALLATIONS sheet setup, row-level status dropdowns, and Lead Status propagation.
-const INSTALLATION_STATUS_VALUES = ['In Progress', 'Installed', 'Cancelled'];
+const INSTALLATION_STATUS_VALUES = ['Pending', 'Scheduled', 'Installed', 'Cancelled'];
 const INSTALLATION_STATUS_REFRESH_CURSOR_KEY = 'INSTALLATION_STATUS_REFRESH_NEXT_ROW';
 const INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY = 'INSTALLATION_SAVE_LOCATION_REFRESH_NEXT_ROW';
 const INSTALLATION_STATUS_REFRESH_BATCH_SIZE = 70;
@@ -41,11 +41,13 @@ function normalizeInstallationStatusForUi_(value) {
   const lower = raw.toLowerCase();
 
   if (lower === 'installed') return 'Installed';
+  if (lower === 'scheduled' || lower.indexOf('schedule') !== -1) return 'Scheduled';
+  if (lower === 'pending' || lower === 'in progress' || lower.indexOf('progress') !== -1) return 'Pending';
   if (lower === 'cancelled' || lower === 'canceled') return 'Cancelled';
   if (lower.indexOf('cancel') !== -1) return 'Cancelled';
   if (lower.indexOf('install') !== -1 && lower.indexOf('progress') === -1) return 'Installed';
 
-  return 'In Progress';
+  return 'Pending';
 }
 
 function setupInstallationsUi() {
@@ -427,14 +429,14 @@ function handleOpenInstallationEdit_(e, sheet, row) {
       install_id: 'INST-' + Date.now(),
       lead_id: leadId,
       phone: phone,
-      install_status: 'In Progress',
+      install_status: 'Pending',
     });
     created = true;
   } else {
     const installation = getRowObject_(installSheet, installRow);
     const updates = {};
     if (!String(installation.phone || '').trim() && phone) updates.phone = phone;
-    if (!String(installation.install_status || '').trim()) updates.install_status = 'In Progress';
+    if (!String(installation.install_status || '').trim()) updates.install_status = 'Pending';
     if (Object.keys(updates).length) {
       setRowObjectValues_(installSheet, installRow, updates);
     }
@@ -568,7 +570,8 @@ function handleInstallationStatusEdit_(e) {
   const leadId = String(rowObject.lead_id || '').trim();
   const installStatus = normalizeInstallationStatusForUi_(rowObject.install_status);
   const leadStatus = {
-    'In Progress': '',
+    Pending: '',
+    Scheduled: '',
     Installed: 'Done',
     Cancelled: 'Cancelled',
   }[installStatus];

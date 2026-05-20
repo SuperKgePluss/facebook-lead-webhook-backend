@@ -357,14 +357,17 @@ function ensureDealsOpenInstallationCheckboxForRow(row, optionalSheet) {
   const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
   const cell = sheet.getRange(row, openInstallationColumn);
   let changed = ensureDealsPhoneForRow(row, sheet);
+  const shouldBeChecked = String(cell.getValue() || '').trim().toUpperCase() === 'TRUE';
 
   if (dealId && leadId) {
     if (!isCheckboxCell_(cell)) {
       cell.insertCheckboxes();
       changed = true;
     }
-    if (String(cell.getValue()).toUpperCase() !== 'TRUE') {
-      cell.setValue(false);
+    const currentChecked = String(cell.getValue() || '').trim().toUpperCase() === 'TRUE';
+    if (currentChecked !== shouldBeChecked) {
+      cell.setValue(shouldBeChecked);
+      changed = true;
     }
     return changed;
   }
