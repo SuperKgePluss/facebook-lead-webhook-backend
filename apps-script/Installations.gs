@@ -158,13 +158,14 @@ function ensureInstallationStatusDropdownForRow(row, optionalSheet) {
   let changed = false;
 
   if (installId && leadId) {
-    if (!isInstallationStatusDropdownCell_(statusCell)) {
-      statusCell.setDataValidation(getInstallationStatusValidation_());
-      changed = true;
-    }
     const normalizedStatus = normalizeInstallationStatusForUi_(currentStatus);
     if (!currentStatus || currentStatus !== normalizedStatus) {
+      statusCell.clearDataValidations();
       statusCell.setValue(normalizedStatus);
+      changed = true;
+    }
+    if (!isInstallationStatusDropdownCell_(statusCell)) {
+      statusCell.setDataValidation(getInstallationStatusValidation_());
       changed = true;
     }
     return changed;
@@ -191,11 +192,17 @@ function ensureInstallationSaveLocationCheckboxForRow(row, optionalSheet) {
   const installId = String(sheet.getRange(row, installIdColumn).getValue() || '').trim();
   const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
   const cell = sheet.getRange(row, saveLocationColumn);
+  const shouldBeChecked = String(cell.getValue() || '').trim().toUpperCase() === 'TRUE';
   let changed = false;
 
   if (installId && leadId) {
     if (!isCheckboxCell_(cell)) {
       cell.insertCheckboxes();
+      changed = true;
+    }
+    const currentChecked = String(cell.getValue() || '').trim().toUpperCase() === 'TRUE';
+    if (currentChecked !== shouldBeChecked) {
+      cell.setValue(shouldBeChecked);
       changed = true;
     }
     return changed;
