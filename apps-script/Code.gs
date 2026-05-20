@@ -15,6 +15,7 @@ function normalizeHeaderName_(headerName) {
   const aliases = {
     facebook_lead_id: 'facebook_leadgen_id',
     fb_lead_id: 'facebook_leadgen_id',
+    ad_set_name: 'adset_name',
     activity_type: 'action_type',
     activity_result: 'new_value',
     result: 'new_value',
@@ -153,7 +154,7 @@ function resetCrmUiBatchCursor() {
 function installCrmTriggers() {
   const ss = SpreadsheetApp.getActive();
   ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'onEdit') {
+    if (trigger.getHandlerFunction() === 'onEdit' || trigger.getHandlerFunction() === 'onChange') {
       ScriptApp.deleteTrigger(trigger);
     }
   });
@@ -163,6 +164,37 @@ function installCrmTriggers() {
     .forSpreadsheet(ss)
     .onEdit()
     .create();
+
+  ScriptApp
+    .newTrigger('onChange')
+    .forSpreadsheet(ss)
+    .onChange()
+    .create();
+}
+
+function onChange(e) {
+  setupRecentlyAppendedRows_();
+}
+
+function setupRecentlyAppendedRows_() {
+  const ss = SpreadsheetApp.getActive();
+  const leadSheet = ss.getSheetByName('LEADS_MAIN');
+  if (leadSheet && typeof setupLeadMainRowUi === 'function') {
+    const lastRow = leadSheet.getLastRow();
+    const startRow = Math.max(DATA_START_ROW, lastRow - 49);
+    for (let row = startRow; row <= lastRow; row++) {
+      setupLeadMainRowUi(row, leadSheet);
+    }
+  }
+
+  const dealsSheet = ss.getSheetByName('DEALS');
+  if (dealsSheet && typeof setupDealsRowUi === 'function') {
+    const lastRow = dealsSheet.getLastRow();
+    const startRow = Math.max(DATA_START_ROW, lastRow - 49);
+    for (let row = startRow; row <= lastRow; row++) {
+      setupDealsRowUi(row, dealsSheet);
+    }
+  }
 }
 
 function getEditedHeader_(sheet, column) {
@@ -218,6 +250,8 @@ function onEdit(e) {
   normalizeLeadMainRow(sheet, e.range.getRow());
   refreshOpenDealCheckboxForRow_(sheet, e.range.getRow());
   ensureLeadMainStatusDropdownForRow(e.range.getRow(), sheet);
+  ensureLeadMainSalesOwnerDropdownForRow(e.range.getRow(), sheet);
+  ensureLeadMainCustomerTypeDropdownForRow(e.range.getRow(), sheet);
 
   if (editedHeader === 'lead_status') {
     createLeadStatusActivity_(sheet, e.range.getRow(), e.oldValue || '', e.value || '');

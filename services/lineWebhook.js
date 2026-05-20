@@ -8,12 +8,21 @@ function generateLineImportId(prefix) {
 }
 
 function formatLineDateTime(date = new Date()) {
-    const pad = value => String(value).padStart(2, "0");
-    return [
-        date.getFullYear(),
-        pad(date.getMonth() + 1),
-        pad(date.getDate()),
-    ].join("-") + ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Bangkok",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+    }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+    }, {});
+
+    return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
 }
 
 function verifyLineSignature(rawBody, signature, channelSecret) {

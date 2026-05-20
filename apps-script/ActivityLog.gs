@@ -169,5 +169,120 @@ function debugFollowUpForActiveRow() {
   Logger.log('Audio root folder id: ' + AUDIO_ROOT_FOLDER_ID);
 
   const match = findLatestLeadAudioFile_(lead.lead_id);
-  Logger.log(match.file ? 'Matched audio file: ' + match.fileName + ' / ' + match.file.getId() + ' parsed=' + match.parsedTimestamp + ' matches=' + match.matchCount : 'No matching audio file found. Expected format: ' + lead.lead_id + '_YYYYMMDD_HH_MM.ext or ' + lead.lead_id + '_DDMMYYYY_HH_MM.ext');
+  Logger.log(match.file ? 'Matched audio file: ' + match.fileName + ' / ' + match.file.getId() + ' parsed=' + match.parsedTimestamp + ' matches=' + match.matchCount : 'No matching audio file found. Expected format: ' + lead.lead_id + '_YYYYMMDD_HH_MM.ext, ' + lead.lead_id + '_DDMMYYYY_HH_MM.ext, or ' + lead.lead_id + '_MMDDYYYY_HH_MM.ext');
+}
+
+function syncLeadStatusFromActivityLogDryRun() {
+  return syncLeadStatusFromActivityLog_(true);
+}
+
+function syncLeadStatusFromActivityLogApply() {
+  return syncLeadStatusFromActivityLog_(false);
+}
+
+function syncLeadStatusFromActivityLog_(dryRun) {
+  const ss = SpreadsheetApp.getActive();
+  const activitySheet = ss.getSheetByName('ACTIVITY_LOG');
+  const leadSheet = ss.getSheetByName('LEADS_MAIN');
+  if (!activitySheet || !leadSheet || activitySheet.getLastRow() < DATA_START_ROW || leadSheet.getLastRow() < DATA_START_ROW) {
+    return { dry_run: dryRun, checked: 0, updates: 0, samples: [] };
+  }
+
+  const activityMap = getHeaderMap_(activitySheet);
+  const leadMap = getHeaderMap_(leadSheet);
+  if (!activityMap.lead_id || !activityMap.lead_status || !leadMap.lead_id || !leadMap.lead_status) {
+    return { dry_run: dryRun, checked: 0, updates: 0, samples: [], error: 'missing_required_headers' };
+  }
+
+  const activityValues = activitySheet
+    .getRange(DATA_START_ROW, 1, activitySheet.getLastRow() - DATA_START_ROW + 1, activitySheet.getLastColumn())
+    .getValues();
+  const latestByLeadId = {};
+
+  activityValues.forEach((row, index) => {
+    const leadId = String(row[activityMap.lead_id - 1] || '').trim();
+    const leadStatus = String(row[activityMap.lead_status - 1] || '').trim();
+    if (!leadId || !leadStatus || leadStatus === 'New') return;
+
+    const createdAtColumn = activityMap.created_at;
+    const createdAtValue = createdAtColumn ? row[createdAtColumn - 1] : '';
+    const createdAt = createdAtValue instanceof Date && !isNaN(createdAtValue.getTime())
+      ? createdAtValue.getTime()
+      : 0;
+    const sortKey = createdAt || (DATA_START_ROW + index);
+    if (!latestByLeadId[leadId] || latestByLeadId[leadId].sortKey <= sortKey) {
+      latestByLeadId[leadId] = {
+        leadStatus: normalizeLeadStatusForSync_(leadStatus),
+        sortKey: sortKey,
+      };
+    }
+  });
+
+  const leadValues = leadSheet
+    .getRange(DATA_START_ROW, 1, leadSheet.getLastRow() - DATA_START_ROW + 1, leadSheet.getLastColumn())
+    .getValues();
+  const samples = [];
+  let updates = 0;
+
+  leadValues.forEach((row, index) => {
+    const leadId = String(row[leadMap.lead_id - 1] || '').trim();
+    if (!leadId || !latestByLeadId[leadId]) return;
+
+    const currentStatus = normalizeLeadStatusForSync_(row[leadMap.lead_status - 1]);
+    const nextStatus = latestByLeadId[leadId].leadStatus;
+    if (!nextStatus || nextStatus === 'New' || currentStatus === nextStatus) return;
+    if (!shouldApplyLeadStatusFromActivity_(currentStatus, nextStatus)) return;
+
+    updates++;
+    if (samples.length < 10) {
+      samples.push({
+        lead_id: leadId,
+        old_status: currentStatus,
+        new_status: nextStatus,
+        row: DATA_START_ROW + index,
+      });
+    }
+    if (!dryRun) {
+      leadSheet.getRange(DATA_START_ROW + index, leadMap.lead_status).setValue(nextStatus);
+      if (typeof ensureLeadMainStatusDropdownForRow === 'function') {
+        ensureLeadMainStatusDropdownForRow(DATA_START_ROW + index, leadSheet);
+      }
+    }
+  });
+
+  if (!dryRun && typeof setupLeadMainStatusConditionalFormatting_ === 'function') {
+    setupLeadMainStatusConditionalFormatting_();
+  }
+
+  const result = {
+    dry_run: dryRun,
+    checked: leadValues.length,
+    updates: updates,
+    samples: samples,
+  };
+  Logger.log(JSON.stringify(result));
+  return result;
+}
+
+function normalizeLeadStatusForSync_(status) {
+  const value = String(status || '').trim();
+  const lower = value.toLowerCase();
+  if (!value) return 'New';
+  if (lower === 'done' || lower === 'closed' || lower === 'closed won') return 'Done';
+  if (lower === 'cancelled' || lower === 'canceled' || lower === 'not interested') return 'Cancelled';
+  if (lower === 'installed') return 'Installed';
+  if (lower === 'ongoing' || lower === 'contacted' || lower === 'interested' || lower === 'follow-up' || lower === 'pending') return 'Ongoing';
+  if (lower === 'new') return 'New';
+  return value;
+}
+
+function shouldApplyLeadStatusFromActivity_(currentStatus, nextStatus) {
+  const rank = {
+    New: 1,
+    Ongoing: 2,
+    Installed: 3,
+    Done: 4,
+    Cancelled: 5,
+  };
+  return (rank[nextStatus] || 0) >= (rank[currentStatus] || 0);
 }

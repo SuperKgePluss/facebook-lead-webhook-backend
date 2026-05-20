@@ -376,15 +376,20 @@ function formatDateTimeForSheet(date = new Date()) {
         return "";
     }
 
-    return date.toLocaleString("th-TH", {
+    const parts = new Intl.DateTimeFormat("en-US", {
         timeZone: "Asia/Bangkok",
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
-        hour12: false,
-    });
+        hourCycle: "h23",
+    }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+    }, {});
+
+    return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
 }
 
 function formatFacebookDateTimeForSheet(date = new Date()) {
@@ -392,21 +397,20 @@ function formatFacebookDateTimeForSheet(date = new Date()) {
         return "";
     }
 
-    const parts = new Intl.DateTimeFormat("en-CA", {
+    const parts = new Intl.DateTimeFormat("en-US", {
         timeZone: "Asia/Bangkok",
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
-        second: "2-digit",
         hourCycle: "h23",
     }).formatToParts(date).reduce((acc, part) => {
         acc[part.type] = part.value;
         return acc;
     }, {});
 
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+    return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
 }
 
 function getFacebookCreatedTimeForSheet(leadData) {

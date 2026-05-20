@@ -568,8 +568,8 @@ function handleInstallationStatusEdit_(e) {
   const leadId = String(rowObject.lead_id || '').trim();
   const installStatus = normalizeInstallationStatusForUi_(rowObject.install_status);
   const leadStatus = {
-    'In Progress': 'Installed',
-    Installed: 'Installed',
+    'In Progress': '',
+    Installed: 'Done',
     Cancelled: 'Cancelled',
   }[installStatus];
 

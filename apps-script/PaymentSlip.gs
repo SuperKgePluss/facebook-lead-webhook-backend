@@ -270,6 +270,7 @@ function ensureDealsPaymentStatusDropdownForRow(row, optionalSheet) {
   const statusCell = sheet.getRange(row, paymentStatusColumn);
   const currentStatus = String(statusCell.getValue() || '').trim();
   let changed = ensureDealsPhoneForRow(row, sheet);
+  if (ensureDealsPaidAmountValidationForRow(row, sheet)) changed = true;
 
   if (dealId && leadId) {
     if (!isDealsPaymentStatusDropdownCell_(statusCell)) {
@@ -288,6 +289,57 @@ function ensureDealsPaymentStatusDropdownForRow(row, optionalSheet) {
     changed = true;
   }
 
+  return changed;
+}
+
+function ensureDealsPaidAmountValidationForRow(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet || sheet.getName() !== 'DEALS' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const dealIdColumn = headerMap.deal_id;
+  const leadIdColumn = headerMap.lead_id;
+  const paidAmountColumn = headerMap.price || headerMap.paid_amount;
+  if (!dealIdColumn || !leadIdColumn || !paidAmountColumn) return false;
+
+  const dealId = String(sheet.getRange(row, dealIdColumn).getValue() || '').trim();
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  const cell = sheet.getRange(row, paidAmountColumn);
+
+  if (dealId && leadId) {
+    const validation = SpreadsheetApp.newDataValidation()
+      .requireNumberGreaterThanOrEqualTo(0)
+      .setAllowInvalid(false)
+      .build();
+    const existing = cell.getDataValidation();
+    const needsValidation = !existing
+      || existing.getCriteriaType() !== SpreadsheetApp.DataValidationCriteria.NUMBER_GREATER_THAN_OR_EQUAL_TO;
+    if (needsValidation) {
+      cell.setDataValidation(validation);
+      cell.setNumberFormat('#,##0.00');
+      return true;
+    }
+    cell.setNumberFormat('#,##0.00');
+    return false;
+  }
+
+  if (!dealId && !leadId && !String(cell.getValue() || '').trim() && cell.getDataValidation()) {
+    cell.clearDataValidations();
+    return true;
+  }
+
+  return false;
+}
+
+function setupDealsRowUi(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('DEALS');
+  if (!sheet || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  let changed = false;
+  if (ensureDealsPhoneForRow(row, sheet)) changed = true;
+  if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) changed = true;
+  if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) changed = true;
+  if (ensureDealsPaidAmountValidationForRow(row, sheet)) changed = true;
   return changed;
 }
 
@@ -349,6 +401,7 @@ function refreshDealsPaymentStatusDropdownsLight() {
     checked++;
     if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
     if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
+    if (ensureDealsPaidAmountValidationForRow(row, sheet)) fixed++;
   }
 
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
@@ -383,6 +436,7 @@ function refreshDealsPaymentStatusDropdownsAll() {
     checked++;
     if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
     if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
+    if (ensureDealsPaidAmountValidationForRow(row, sheet)) fixed++;
   }
 
   setupDealsPaymentStatusConditionalFormatting_();

@@ -35,6 +35,9 @@ const SYNC_STATE_HEADERS = [
 const HEADER_ALIASES = {
     facebook_lead_id: "facebook_leadgen_id",
     fb_lead_id: "facebook_leadgen_id",
+    lead_form_name: "lead_form_name",
+    ad_set_name: "adset_name",
+    adset_name: "adset_name",
     paid_amount: "price",
     install_date: "preferred_install_date",
     install_time: "preferred_install_time",
@@ -128,15 +131,20 @@ function formatDateTimeForSheet(date = new Date()) {
         return "";
     }
 
-    return date.toLocaleString("th-TH", {
+    const parts = new Intl.DateTimeFormat("en-US", {
         timeZone: "Asia/Bangkok",
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
-        hour12: false,
-    });
+        hourCycle: "h23",
+    }).formatToParts(date).reduce((acc, part) => {
+        acc[part.type] = part.value;
+        return acc;
+    }, {});
+
+    return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
 }
 
 function columnToLetter(columnNumber) {

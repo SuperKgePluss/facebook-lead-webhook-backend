@@ -3,7 +3,8 @@ const LEAD_MAIN_STATUS_VALUES = ['New', 'Ongoing', 'Installed', 'Done', 'Cancell
 const LEAD_MAIN_STATUS_REFRESH_CURSOR_KEY = 'LEADS_MAIN_STATUS_REFRESH_NEXT_ROW';
 const LEAD_MAIN_STATUS_REFRESH_BATCH_SIZE = 70;
 const LEAD_MAIN_SALES_OWNER_SETTING_HEADERS = ['Sales Owner', 'Sales Owners', 'sales_owner'];
-var LEAD_MAIN_SALES_OWNER_VALUES_CACHE_ = null;
+const LEAD_MAIN_CUSTOMER_TYPE_SETTING_HEADERS = ['Customer Type', 'Customer Types', 'customer_type'];
+var SETTINGS_VALUES_CACHE_ = {};
 function onSelectionChange(e) {
   if (!e || !e.range) return;
 
@@ -203,12 +204,13 @@ function getLeadMainStatusValidation_() {
 }
 
 function getSettingsValuesForHeaders_(candidateHeaders) {
-  if (LEAD_MAIN_SALES_OWNER_VALUES_CACHE_) return LEAD_MAIN_SALES_OWNER_VALUES_CACHE_;
+  const cacheKey = candidateHeaders.map(header => normalizeHeaderName_(header)).join('|');
+  if (SETTINGS_VALUES_CACHE_[cacheKey]) return SETTINGS_VALUES_CACHE_[cacheKey];
 
   const sheet = SpreadsheetApp.getActive().getSheetByName('SETTINGS');
   if (!sheet || sheet.getLastRow() < DATA_START_ROW) {
-    LEAD_MAIN_SALES_OWNER_VALUES_CACHE_ = [];
-    return LEAD_MAIN_SALES_OWNER_VALUES_CACHE_;
+    SETTINGS_VALUES_CACHE_[cacheKey] = [];
+    return SETTINGS_VALUES_CACHE_[cacheKey];
   }
 
   const headerMap = getHeaderMap_(sheet);
@@ -236,13 +238,13 @@ function getSettingsValuesForHeaders_(candidateHeaders) {
       .forEach(row => {
         const setting = normalizeHeaderName_(row[settingColumn - 1]);
         const value = String(row[valueColumn - 1] || '').trim();
-        if ((setting === 'sales_owner' || setting === 'sales_owners') && value && values.indexOf(value) === -1) {
+        if (candidateHeaders.map(header => normalizeHeaderName_(header)).indexOf(setting) !== -1 && value && values.indexOf(value) === -1) {
           values.push(value);
         }
       });
   }
 
-  LEAD_MAIN_SALES_OWNER_VALUES_CACHE_ = values;
+  SETTINGS_VALUES_CACHE_[cacheKey] = values;
   return values;
 }
 
@@ -271,6 +273,38 @@ function ensureLeadMainSalesOwnerDropdownForRow(row, optionalSheet) {
   const phone = String(sheet.getRange(row, phoneColumn).getValue() || '').trim();
   const cell = sheet.getRange(row, salesOwnerColumn);
   const values = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
+  if (!values.length) return false;
+
+  if (leadId && phone) {
+    if (!isValueInListDropdownCell_(cell, values)) {
+      cell.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(true).build());
+      return true;
+    }
+    return false;
+  }
+
+  if (!leadId && !phone && !String(cell.getValue() || '').trim() && cell.getDataValidation()) {
+    cell.clearDataValidations();
+    return true;
+  }
+
+  return false;
+}
+
+function ensureLeadMainCustomerTypeDropdownForRow(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet || sheet.getName() !== 'LEADS_MAIN' || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  const phoneColumn = headerMap.phone;
+  const customerTypeColumn = headerMap.customer_type;
+  if (!leadIdColumn || !phoneColumn || !customerTypeColumn) return false;
+
+  const leadId = String(sheet.getRange(row, leadIdColumn).getValue() || '').trim();
+  const phone = String(sheet.getRange(row, phoneColumn).getValue() || '').trim();
+  const cell = sheet.getRange(row, customerTypeColumn);
+  const values = getSettingsValuesForHeaders_(LEAD_MAIN_CUSTOMER_TYPE_SETTING_HEADERS);
   if (!values.length) return false;
 
   if (leadId && phone) {
@@ -348,6 +382,7 @@ function refreshLeadMainStatusDropdownsLight() {
     checked++;
     if (ensureLeadMainStatusDropdownForRow(row, sheet)) fixed++;
     if (ensureLeadMainSalesOwnerDropdownForRow(row, sheet)) fixed++;
+    if (ensureLeadMainCustomerTypeDropdownForRow(row, sheet)) fixed++;
   }
 
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
@@ -382,6 +417,7 @@ function refreshLeadMainStatusDropdownsAll() {
     checked++;
     if (ensureLeadMainStatusDropdownForRow(row, sheet)) fixed++;
     if (ensureLeadMainSalesOwnerDropdownForRow(row, sheet)) fixed++;
+    if (ensureLeadMainCustomerTypeDropdownForRow(row, sheet)) fixed++;
   }
 
   setupLeadMainStatusConditionalFormatting_();
@@ -419,13 +455,11 @@ function setupLeadMainStatusConditionalFormatting_() {
   const range = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, lastColumn);
   const statusColumnLetter = columnToLetter_(statusColumn);
   const statusColors = {
-    New: '#ffffff',
-    Ongoing: '#fff2cc',
-    Installed: '#d9eaf7',
     Done: '#d9ead3',
     Cancelled: '#f4cccc',
   };
-  const managedFormulas = LEAD_MAIN_STATUS_VALUES.map(status => '=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"');
+  const managedStatuses = ['Done', 'Cancelled'];
+  const managedFormulas = managedStatuses.map(status => '=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"');
 
   const existingRules = sheet.getConditionalFormatRules().filter(rule => {
     const condition = rule.getBooleanCondition();
@@ -433,7 +467,7 @@ function setupLeadMainStatusConditionalFormatting_() {
     return !values.some(value => managedFormulas.indexOf(String(value)) !== -1);
   });
 
-  const statusRules = LEAD_MAIN_STATUS_VALUES.map(status => SpreadsheetApp
+  const statusRules = managedStatuses.map(status => SpreadsheetApp
     .newConditionalFormatRule()
     .whenFormulaSatisfied('=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"')
     .setBackground(statusColors[status])
@@ -441,6 +475,80 @@ function setupLeadMainStatusConditionalFormatting_() {
     .build());
 
   sheet.setConditionalFormatRules(existingRules.concat(statusRules));
+}
+
+function setupLeadMainMetadataHeaders_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet) return;
+
+  const headers = [
+    'Lead Form Name',
+    'Ad Name',
+    'Ad Set Name',
+    'Campaign Name',
+    'Facebook Created Time',
+  ];
+  const thaiLabels = [
+    '\u0e0a\u0e37\u0e48\u0e2d\u0e1f\u0e2d\u0e23\u0e4c\u0e21\u0e25\u0e35\u0e14',
+    '\u0e0a\u0e37\u0e48\u0e2d\u0e42\u0e06\u0e29\u0e13\u0e32',
+    '\u0e0a\u0e37\u0e48\u0e2d\u0e0a\u0e38\u0e14\u0e42\u0e06\u0e29\u0e13\u0e32',
+    '\u0e0a\u0e37\u0e48\u0e2d\u0e41\u0e04\u0e21\u0e40\u0e1b\u0e0d',
+    '\u0e27\u0e31\u0e19\u0e17\u0e35\u0e48\u0e2a\u0e23\u0e49\u0e32\u0e07\u0e25\u0e35\u0e14\u0e08\u0e32\u0e01 Facebook',
+  ];
+  const startColumn = 20;
+  const requiredLastColumn = startColumn + headers.length - 1;
+  if (sheet.getMaxColumns() < requiredLastColumn) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), requiredLastColumn - sheet.getMaxColumns());
+  }
+  sheet.getRange(HEADER_ROW, startColumn, 1, headers.length).setValues([headers]);
+  sheet.getRange(2, startColumn, 1, thaiLabels.length).setValues([thaiLabels]);
+}
+
+function applyCrmDateTimeFormats_() {
+  const ss = SpreadsheetApp.getActive();
+  const targets = {
+    LEADS_MAIN: ['latest_follow_up_at', 'created_at', 'updated_at', 'facebook_created_time'],
+    LEAD_DETAILS: ['facebook_created_time'],
+    DEALS: ['payment_date'],
+    INSTALLATIONS: ['preferred_install_date'],
+    ACTIVITY_LOG: ['created_at'],
+    SUMMARY_DAILY: ['date', 'created_at', 'updated_at'],
+  };
+
+  Object.keys(targets).forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() < DATA_START_ROW) return;
+    const headerMap = getHeaderMap_(sheet);
+    targets[sheetName].forEach(header => {
+      const column = headerMap[header];
+      if (!column) return;
+      sheet.getRange(DATA_START_ROW, column, sheet.getLastRow() - DATA_START_ROW + 1, 1).setNumberFormat('MM/dd/yyyy HH:mm');
+    });
+  });
+}
+
+function setupLeadMainBasicFilter_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet) return;
+
+  const lastRow = Math.max(sheet.getLastRow(), DATA_START_ROW);
+  const lastColumn = sheet.getLastColumn();
+  if (!sheet.getFilter()) {
+    sheet.getRange(HEADER_ROW, 1, lastRow - HEADER_ROW + 1, lastColumn).createFilter();
+  }
+}
+
+function setupLeadMainRowUi(row, optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!sheet || row < DATA_START_ROW || row > sheet.getLastRow()) return false;
+
+  let changed = false;
+  normalizeLeadMainRow(sheet, row);
+  refreshOpenDealCheckboxForRow_(sheet, row);
+  if (ensureLeadMainStatusDropdownForRow(row, sheet)) changed = true;
+  if (ensureLeadMainSalesOwnerDropdownForRow(row, sheet)) changed = true;
+  if (ensureLeadMainCustomerTypeDropdownForRow(row, sheet)) changed = true;
+  return changed;
 }
 
 function refreshOpenDealCheckboxes() {
@@ -452,8 +560,11 @@ function refreshOpenDealCheckboxForRow_(sheet, row) {
 }
 
 function setupLeadMainUi() {
+  setupLeadMainMetadataHeaders_();
   resetLeadMainCheckboxRefreshCursor();
   resetLeadMainStatusDropdownRefreshCursor();
+  applyCrmDateTimeFormats_();
+  setupLeadMainBasicFilter_();
   setupLeadMainStatusConditionalFormatting_();
   Logger.log('setupLeadMainUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level checkboxes and dropdowns.');
 }

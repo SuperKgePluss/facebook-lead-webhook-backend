@@ -180,37 +180,51 @@ function parseEvidenceDatePart_(datePart, hour, minute) {
   const rawDate = String(datePart || '');
   const rawHour = String(hour || '');
   const rawMinute = String(minute || '');
-  let year = '';
-  let month = '';
-  let day = '';
+  const candidates = [];
 
   if (/^(19|20)\d{6}$/.test(rawDate)) {
-    year = rawDate.slice(0, 4);
-    month = rawDate.slice(4, 6);
-    day = rawDate.slice(6, 8);
+    candidates.push({
+      year: rawDate.slice(0, 4),
+      month: rawDate.slice(4, 6),
+      day: rawDate.slice(6, 8),
+    });
   } else if (/^\d{4}(19|20)\d{2}$/.test(rawDate)) {
-    day = rawDate.slice(0, 2);
-    month = rawDate.slice(2, 4);
-    year = rawDate.slice(4, 8);
+    candidates.push({
+      year: rawDate.slice(4, 8),
+      month: rawDate.slice(2, 4),
+      day: rawDate.slice(0, 2),
+    });
+    candidates.push({
+      year: rawDate.slice(4, 8),
+      month: rawDate.slice(0, 2),
+      day: rawDate.slice(2, 4),
+    });
   } else {
     return null;
   }
 
-  const date = new Date(Number(year), Number(month) - 1, Number(day), Number(rawHour), Number(rawMinute));
-  if (
-    date.getFullYear() !== Number(year)
-    || date.getMonth() !== Number(month) - 1
-    || date.getDate() !== Number(day)
-    || date.getHours() !== Number(rawHour)
-    || date.getMinutes() !== Number(rawMinute)
-  ) {
-    return null;
+  for (let i = 0; i < candidates.length; i++) {
+    const year = candidates[i].year;
+    const month = candidates[i].month;
+    const day = candidates[i].day;
+    const date = new Date(Number(year), Number(month) - 1, Number(day), Number(rawHour), Number(rawMinute));
+    if (
+      date.getFullYear() !== Number(year)
+      || date.getMonth() !== Number(month) - 1
+      || date.getDate() !== Number(day)
+      || date.getHours() !== Number(rawHour)
+      || date.getMinutes() !== Number(rawMinute)
+    ) {
+      continue;
+    }
+
+    return {
+      timestampKey: year + month + day + rawHour + rawMinute,
+      parsedTimestamp: year + '-' + month + '-' + day + ' ' + rawHour + ':' + rawMinute,
+    };
   }
 
-  return {
-    timestampKey: year + month + day + rawHour + rawMinute,
-    parsedTimestamp: year + '-' + month + '-' + day + ' ' + rawHour + ':' + rawMinute,
-  };
+  return null;
 }
 
 function escapeRegExp_(value) {
