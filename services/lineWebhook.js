@@ -78,21 +78,6 @@ function buildLineActivityNote(data, messageText) {
     ].filter(Boolean).join("\n");
 }
 
-async function findLeadDetailByLeadId(leadId) {
-    const rows = await googleSheets.getSheetRows("LEAD_DETAILS");
-    const headers = rows[0] || [];
-    const target = String(leadId || "").trim();
-
-    for (let i = 2; i < rows.length; i++) {
-        const object = googleSheets.rowToObject(headers, rows[i]);
-        if (String(object.lead_id || "").trim() === target) {
-            return { ...object, rowNumber: i + 1 };
-        }
-    }
-
-    return null;
-}
-
 function findLineLeadByPhone(headers, rows, phone) {
     const target = googleSheets.normalizePhone(phone);
     if (!target) return null;
@@ -150,17 +135,7 @@ async function upsertLineLead(data, messageText) {
         original_customer_name: data.customer_name,
         created_source: "LINE",
     };
-    const existingDetail = await findLeadDetailByLeadId(leadId);
-    if (existingDetail?.rowNumber) {
-        const detailUpdate = { lead_id: leadId };
-        for (const [key, value] of Object.entries(detailObject)) {
-            if (key === "lead_id") continue;
-            if (String(value || "").trim()) detailUpdate[key] = value;
-        }
-        await googleSheets.updateObjectRow("LEAD_DETAILS", existingDetail.rowNumber, detailUpdate);
-    } else {
-        await googleSheets.appendObjects("LEAD_DETAILS", [detailObject]);
-    }
+    await googleSheets.upsertLeadDetailObject(detailObject);
 
     await googleSheets.appendObjects("ACTIVITY_LOG", [{
         activity_id: generateLineImportId("ACT"),

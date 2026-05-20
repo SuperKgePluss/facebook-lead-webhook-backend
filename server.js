@@ -24,6 +24,7 @@ const { handleLegacyCrm2Import } = require("./services/imports/legacyCrm2Import"
 const { handleLegacyCrm1Import } = require("./services/imports/legacyCrm1Import");
 const { handleLegacyLeadStatusCleanup } = require("./services/imports/legacyCleanup");
 const { handleCrm3RestoreAudit, handleFacebookRawAudit, handleCrm3SafeRestore } = require("./services/imports/dataAudit");
+const { handleLeadDetailsRepair, handleDealsPhoneRepair } = require("./services/dataStabilization");
 const { handleLineWebhook } = require("./services/lineWebhook");
 
 const app = express();
@@ -1628,6 +1629,8 @@ app.post("/import/legacy/cleanup-lead-status", handleLegacyLeadStatusCleanup);
 app.get("/audit/crm3-restore", requireSyncSecretMiddleware, handleCrm3RestoreAudit);
 app.get("/audit/facebook-raw", requireSyncSecretMiddleware, handleFacebookRawAudit);
 app.post("/restore/crm3-safe", requireSyncSecretMiddleware, handleCrm3SafeRestore);
+app.post("/repair/lead-details", requireSyncSecretMiddleware, handleLeadDetailsRepair);
+app.post("/repair/deals-phone", requireSyncSecretMiddleware, handleDealsPhoneRepair);
 app.post("/webhook/line", handleLineWebhook);
 
 app.listen(PORT, () => {

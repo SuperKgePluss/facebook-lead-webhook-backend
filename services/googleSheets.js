@@ -439,6 +439,58 @@ function getObjectValueForCanonicalHeader(object, canonicalHeader) {
     return "";
 }
 
+function isNonEmptyValue(value) {
+    return String(value ?? "").trim() !== "";
+}
+
+function mergeObjectPreserveExisting(existingObject = {}, incomingObject = {}) {
+    const merged = { ...existingObject };
+
+    for (const [key, value] of Object.entries(incomingObject)) {
+        if (!isNonEmptyValue(value)) continue;
+        if (!isNonEmptyValue(merged[key])) merged[key] = value;
+    }
+
+    return merged;
+}
+
+function getLeadDetailDedupeKeys(object = {}) {
+    const facebookLeadgenId = String(object.facebook_leadgen_id || "").trim();
+    const phone = normalizePhone(object.raw_phone || object.phone);
+    const leadId = String(object.lead_id || "").trim();
+
+    return {
+        facebookLeadgenId,
+        phone,
+        leadId,
+    };
+}
+
+function findLeadDetailRowForObject(headers, rows, detailObject = {}) {
+    const incoming = getLeadDetailDedupeKeys(detailObject);
+    let phoneMatch = null;
+    let leadIdMatch = null;
+
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const rowObject = rowToObject(headers, rows[i] || []);
+        const existing = getLeadDetailDedupeKeys(rowObject);
+
+        if (incoming.facebookLeadgenId && existing.facebookLeadgenId === incoming.facebookLeadgenId) {
+            return { ...rowObject, rowNumber: i + 1, matchType: "facebook_leadgen_id" };
+        }
+
+        if (!phoneMatch && incoming.phone && existing.phone === incoming.phone) {
+            phoneMatch = { ...rowObject, rowNumber: i + 1, matchType: "raw_phone" };
+        }
+
+        if (!leadIdMatch && incoming.leadId && existing.leadId === incoming.leadId) {
+            leadIdMatch = { ...rowObject, rowNumber: i + 1, matchType: "lead_id" };
+        }
+    }
+
+    return phoneMatch || leadIdMatch;
+}
+
 function normalizeSheetObject(sheetName, object = {}) {
     const normalizedObject = { ...object };
 
@@ -594,6 +646,69 @@ async function updateObjectRows(sheetName, updates, chunkSize = 100) {
     }
 
     return updates.length;
+}
+
+async function upsertLeadDetailObject(detailObject) {
+    const rows = await getSheetRows(SHEETS.LEAD_DETAILS);
+    const headers = rows[HEADER_ROW - 1] || [];
+    const existing = findLeadDetailRowForObject(headers, rows, detailObject);
+
+    if (existing?.rowNumber) {
+        const merged = mergeObjectPreserveExisting(existing, detailObject);
+        await updateObjectRow(SHEETS.LEAD_DETAILS, existing.rowNumber, merged);
+        return {
+            action: "updated_existing",
+            rowNumber: existing.rowNumber,
+            matchType: existing.matchType,
+        };
+    }
+
+    const appendedRows = await appendObjects(SHEETS.LEAD_DETAILS, [detailObject]);
+    return {
+        action: "created",
+        rowNumber: appendedRows[0] || null,
+        matchType: "",
+    };
+}
+
+async function deleteSheetRows(sheetName, rowNumbers) {
+    const rowsToDelete = Array.from(new Set(
+        (Array.isArray(rowNumbers) ? rowNumbers : [])
+            .map(row => Number(row))
+            .filter(row => Number.isInteger(row) && row >= DATA_START_ROW)
+    )).sort((a, b) => b - a);
+
+    if (!rowsToDelete.length) return 0;
+
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    const spreadsheet = await sheets.spreadsheets.get({
+        spreadsheetId,
+        fields: "sheets.properties",
+    });
+    const sheet = (spreadsheet.data.sheets || [])
+        .find(item => item.properties?.title === sheetName);
+
+    if (!sheet?.properties?.sheetId && sheet?.properties?.sheetId !== 0) {
+        throw new Error(`Missing sheet for row deletion: ${sheetName}`);
+    }
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+            requests: rowsToDelete.map(rowNumber => ({
+                deleteDimension: {
+                    range: {
+                        sheetId: sheet.properties.sheetId,
+                        dimension: "ROWS",
+                        startIndex: rowNumber - 1,
+                        endIndex: rowNumber,
+                    },
+                },
+            })),
+        },
+    });
+
+    return rowsToDelete.length;
 }
 
 function findLeadByPhone(headers, rows, phone) {
@@ -843,6 +958,28 @@ async function appendLeadsToSheetBatch(leads) {
             .filter(Boolean)
     );
 
+    const queueLeadDetailWrite = (detailObject) => {
+        const existingDetail = findLeadDetailRowForObject(detailHeaders, inMemoryDetailRows, detailObject);
+
+        if (existingDetail?.rowNumber) {
+            const mergedDetail = mergeObjectPreserveExisting(existingDetail, detailObject);
+
+            for (const group of groupObjectRanges(detailHeaders, existingDetail.rowNumber, mergedDetail)) {
+                updateData.push({
+                    range: `${SHEETS.LEAD_DETAILS}!${group.rangeSuffix}`,
+                    values: group.values,
+                });
+            }
+
+            inMemoryDetailRows[existingDetail.rowNumber - 1] = objectToRow(detailHeaders, mergedDetail);
+            return;
+        }
+
+        newDetailObjects.push(detailObject);
+        inMemoryDetailRows[nextDetailRow - 1] = objectToRow(detailHeaders, detailObject);
+        nextDetailRow++;
+    };
+
     for (const lead of leads) {
         const leadgenId = String(lead.facebook_leadgen_id || "").trim();
         const normalizedPhone = normalizePhone(lead.phone);
@@ -883,14 +1020,12 @@ async function appendLeadsToSheetBatch(leads) {
             const dealObject = buildDealObject(dealId, leadId, lead);
 
             newLeadObjects.push(leadObject);
-            newDetailObjects.push(detailObject);
+            queueLeadDetailWrite(detailObject);
             newDealObjects.push(dealObject);
 
             inMemoryLeadRows[nextLeadRow - 1] = objectToRow(leadHeaders, leadObject);
-            inMemoryDetailRows[nextDetailRow - 1] = objectToRow(detailHeaders, detailObject);
             inMemoryDealRows[nextDealRow - 1] = objectToRow(dealHeaders, dealObject);
             nextLeadRow++;
-            nextDetailRow++;
             nextDealRow++;
             seenLeadgenIds.add(leadgenId);
             affectedRows.add(leadRowNumber);
@@ -921,9 +1056,7 @@ async function appendLeadsToSheetBatch(leads) {
             });
         }
 
-        newDetailObjects.push(detailObject);
-        inMemoryDetailRows[nextDetailRow - 1] = objectToRow(detailHeaders, detailObject);
-        nextDetailRow++;
+        queueLeadDetailWrite(detailObject);
 
         let dealId = latestDeal?.deal_id || "";
 
@@ -1032,6 +1165,8 @@ module.exports = {
     appendObjects,
     updateObjectRow,
     updateObjectRows,
+    upsertLeadDetailObject,
+    deleteSheetRows,
     normalizePhone,
     normalizeHeaderName,
 };
