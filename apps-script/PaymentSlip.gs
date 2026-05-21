@@ -339,7 +339,6 @@ function setupDealsRowUi(row, optionalSheet) {
   if (ensureDealsPhoneForRow(row, sheet)) changed = true;
   if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) changed = true;
   if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) changed = true;
-  if (ensureDealsPaidAmountValidationForRow(row, sheet)) changed = true;
   return changed;
 }
 
@@ -404,7 +403,6 @@ function refreshDealsPaymentStatusDropdownsLight() {
     checked++;
     if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
     if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
-    if (ensureDealsPaidAmountValidationForRow(row, sheet)) fixed++;
   }
 
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
@@ -439,7 +437,6 @@ function refreshDealsPaymentStatusDropdownsAll() {
     checked++;
     if (ensureDealsPaymentStatusDropdownForRow(row, sheet)) fixed++;
     if (ensureDealsOpenInstallationCheckboxForRow(row, sheet)) fixed++;
-    if (ensureDealsPaidAmountValidationForRow(row, sheet)) fixed++;
   }
 
   setupDealsPaymentStatusConditionalFormatting_();

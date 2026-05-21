@@ -96,7 +96,6 @@ function setupCrmUiLight() {
   setupLeadMainUi();
   setupDealsPaymentUi();
   setupInstallationsUi();
-  applyCrmDateTimeFormats_();
   PropertiesService
     .getScriptProperties()
     .setProperty(CRM_UI_BATCH_TASK_CURSOR_KEY, CRM_UI_BATCH_TASKS[0]);
