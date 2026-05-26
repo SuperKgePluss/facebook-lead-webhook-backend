@@ -258,6 +258,39 @@ function buildCrm2FollowUpAudit(rawRows, rawHeaders, knownLeadsByPhone, existing
     return audit;
 }
 
+function summarizeCrm2FollowUpCandidatesByRow(candidates) {
+    const byKey = new Map();
+
+    for (const candidate of candidates || []) {
+        const key = `${candidate.source_row_number}|${candidate.phone || ""}`;
+        if (!byKey.has(key)) {
+            byKey.set(key, {
+                source_row_number: candidate.source_row_number,
+                phone: candidate.phone,
+                customer_name: candidate.customer_name,
+                matched_lead_id: candidate.matched_lead_id,
+                matched_existing_lead: candidate.matched_existing_lead,
+                duplicate_risk: false,
+                candidate_count: 0,
+                raw_crm2_values: [],
+            });
+        }
+
+        const item = byKey.get(key);
+        item.duplicate_risk = item.duplicate_risk || Boolean(candidate.duplicate_risk);
+        item.candidate_count++;
+        item.raw_crm2_values.push({
+            source_column_letter: candidate.source_column_letter,
+            source_column_index: candidate.source_column_index,
+            source_column_name: candidate.source_column_name,
+            candidate_type: candidate.candidate_type,
+            raw_text: candidate.raw_text,
+        });
+    }
+
+    return Array.from(byKey.values()).sort((a, b) => a.source_row_number - b.source_row_number);
+}
+
 function getLegacyAudioUrls(rowObject, debugCounters) {
     const urls = [];
 
@@ -530,6 +563,9 @@ async function handleLegacyCrm2Import(req, res) {
             knownLeadsByPhone,
             existingActivityTextByLeadId
         );
+        const crm2FollowUpAllCandidateRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.all_candidate_details);
+        const crm2FollowUpUnmatchedRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.unmatched_phone_row_details);
+        const crm2FollowUpDuplicateRiskRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.possible_duplicate_details);
 
         for (let i = 1; i < rawRows.length; i++) {
             const row = rawRows[i];
@@ -859,8 +895,11 @@ async function handleLegacyCrm2Import(req, res) {
             crm2_legacy_followup_import_enabled: false,
             crm2_legacy_followup_import_mode: "audit_only",
             crm2_followup_all_candidate_activity_rows: crm2FollowUpAudit.all_candidate_details,
+            crm2_followup_all_candidate_rows_grouped: crm2FollowUpAllCandidateRows,
             crm2_followup_duplicate_risk_rows: crm2FollowUpAudit.possible_duplicate_details,
+            crm2_followup_duplicate_risk_rows_grouped: crm2FollowUpDuplicateRiskRows,
             crm2_followup_unmatched_phone_rows_detail: crm2FollowUpAudit.unmatched_phone_row_details,
+            crm2_followup_unmatched_phone_rows_grouped: crm2FollowUpUnmatchedRows,
             crm2_followup_l_to_o_audit: crm2FollowUpAudit,
             crm2_followup_total_rows_scanned: crm2FollowUpAudit.total_crm2_rows_scanned,
             crm2_followup_rows_with_any_l_to_o_value: crm2FollowUpAudit.rows_with_any_l_to_o_value,
