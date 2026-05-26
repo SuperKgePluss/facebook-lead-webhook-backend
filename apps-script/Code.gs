@@ -3,6 +3,7 @@ const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 const CRM_UI_BATCH_TASK_CURSOR_KEY = 'CRM_UI_BATCH_CURRENT_TASK';
 const CRM_UI_BATCH_TASKS = [
+  'leads_view_sync',
   'lead_main_checkboxes',
   'lead_main_status_dropdowns',
   'deals_payment_status',
@@ -93,6 +94,7 @@ function setupCrmUi() {
 
 function setupCrmUiLight() {
   setupLeadMainUi();
+  setupLeadsViewUi();
   setupDealsPaymentUi();
   setupInstallationsUi();
   PropertiesService
@@ -112,7 +114,9 @@ function setupCrmUiBatch() {
     return;
   }
 
-  if (currentTask === 'lead_main_checkboxes') {
+  if (currentTask === 'leads_view_sync') {
+    result = refreshLeadsViewLight();
+  } else if (currentTask === 'lead_main_checkboxes') {
     result = refreshLeadMainCheckboxesLight();
   } else if (currentTask === 'lead_main_status_dropdowns') {
     result = refreshLeadMainStatusDropdownsLight();
@@ -192,6 +196,10 @@ function setupRecentlyAppendedRows_() {
       setupDealsRowUi(row, dealsSheet);
     }
   }
+
+  if (typeof refreshLeadsViewLight === 'function') {
+    refreshLeadsViewLight();
+  }
 }
 
 function getEditedHeader_(sheet, column) {
@@ -221,6 +229,11 @@ function onEdit(e) {
     ensureInstallationStatusDropdownForRow(e.range.getRow(), sheet);
     // Location links are now manual. Save Location auto-fetch is disabled by client request.
     handleInstallationStatusEdit_(e);
+    return;
+  }
+
+  if (sheet.getName() === 'LEADS') {
+    handleLeadsViewEdit_(e, sheet, e.range.getRow());
     return;
   }
 
