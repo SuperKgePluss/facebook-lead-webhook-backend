@@ -118,6 +118,7 @@ function buildCrm2FollowUpAuditCandidate({
     sourceColumnIndex,
     sourceColumnName,
     rawValue,
+    rawPhone,
     cleanPhone,
     existingLead,
     customerName,
@@ -135,6 +136,8 @@ function buildCrm2FollowUpAuditCandidate({
         source_column_name: sourceColumnName,
         candidate_type: candidateType || "legacy_follow_up_cell",
         raw_text: rawValue,
+        raw_phone: rawPhone,
+        normalized_phone: cleanPhone,
         phone: cleanPhone,
         customer_name: customerName,
         matched_lead_id: leadId,
@@ -230,6 +233,7 @@ function buildCrm2FollowUpAudit(rawRows, rawHeaders, knownLeadsByPhone, existing
                 sourceColumnIndex: cell.index + 1,
                 sourceColumnName: cell.header,
                 rawValue: cell.raw_value,
+                rawPhone: phone,
                 cleanPhone,
                 existingLead,
                 customerName,
@@ -266,7 +270,9 @@ function summarizeCrm2FollowUpCandidatesByRow(candidates) {
         if (!byKey.has(key)) {
             byKey.set(key, {
                 source_row_number: candidate.source_row_number,
-                phone: candidate.phone,
+                raw_phone: candidate.raw_phone,
+                normalized_phone: candidate.normalized_phone,
+                phone: candidate.normalized_phone,
                 customer_name: candidate.customer_name,
                 matched_lead_id: candidate.matched_lead_id,
                 matched_existing_lead: candidate.matched_existing_lead,
@@ -301,6 +307,9 @@ function buildCrm2FollowUpCandidatesByRow(candidates) {
             action: "would_create_legacy_follow_up_activity",
             lead_id: candidate.matched_lead_id || "(unmatched phone)",
             source_row_number: candidate.source_row_number,
+            raw_phone: candidate.raw_phone,
+            normalized_phone: candidate.normalized_phone,
+            customer_name: candidate.customer_name,
             source_column_letter: candidate.source_column_letter,
             source_column_index: candidate.source_column_index,
             source_column_name: candidate.source_column_name,
@@ -314,6 +323,105 @@ function buildCrm2FollowUpCandidatesByRow(candidates) {
     }
 
     return byRow;
+}
+
+function parseCrm2FollowUpLogOnlyMode(req) {
+    const rawMode = String(req.query.mode || "").trim().toLowerCase();
+    const rawFlag = String(req.query.crm2_followup_log_only ?? req.query.followup_log_only ?? "").trim().toLowerCase();
+    return rawMode === "crm2_followup_log_only" || rawFlag === "true" || rawFlag === "1";
+}
+
+function parseCrm2ConfirmWrite(req) {
+    const rawConfirm = String(req.query.confirm || "").trim().toLowerCase();
+    return rawConfirm === "true" || rawConfirm === "1" || rawConfirm === "yes";
+}
+
+function buildCrm2WouldCreateLeadRows(rawRows, rawHeaders, knownLeadsByPhone, candidateSourceRows = null) {
+    const rows = [];
+
+    for (let i = 1; i < rawRows.length; i++) {
+        const sourceRowNumber = i + 1;
+        if (candidateSourceRows && !candidateSourceRows.has(sourceRowNumber)) continue;
+
+        const row = rawRows[i];
+        if (!row || row.every(cell => String(cell || "").trim() === "")) continue;
+
+        const rowObject = googleSheets.rowToObject(rawHeaders, row);
+        const rawPhone = getCrm2Value(rowObject, "phone_number");
+        const cleanPhone = normalizeLegacyImportPhone(rawPhone, googleSheets);
+        if (!cleanPhone || knownLeadsByPhone.has(cleanPhone)) continue;
+
+        rows.push({
+            source_row_number: sourceRowNumber,
+            customer_name: getCrm2Value(rowObject, "name"),
+            raw_phone: rawPhone,
+            normalized_phone: cleanPhone,
+            matched_lead_id: "",
+            matched_existing_lead: false,
+            reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+            raw_crm2_values: rowObject,
+        });
+    }
+
+    return rows;
+}
+
+function buildCrm2FollowUpLogOnlyPlan(crm2FollowUpAudit) {
+    const candidatesToAppend = [];
+    const duplicateCandidatesSkipped = [];
+    const unmatchedCandidatesSkipped = [];
+    const internalDuplicateCandidatesSkipped = [];
+    const seenPlannedNotes = new Set();
+
+    for (const candidate of crm2FollowUpAudit.all_candidate_details || []) {
+        if (!candidate.matched_lead_id) {
+            unmatchedCandidatesSkipped.push({
+                ...candidate,
+                reason_skipped: "unmatched_phone_no_existing_lead_id",
+            });
+            continue;
+        }
+
+        if (candidate.duplicate_risk) {
+            duplicateCandidatesSkipped.push({
+                ...candidate,
+                reason_skipped: "possible_duplicate_existing_activity_note",
+            });
+            continue;
+        }
+
+        const note = `[CRM2 ${candidate.source_column_name}]\n${candidate.raw_text}`;
+        const plannedKey = `${candidate.matched_lead_id}|${normalizeCrm2AuditText(note)}`;
+        if (seenPlannedNotes.has(plannedKey)) {
+            internalDuplicateCandidatesSkipped.push({
+                ...candidate,
+                reason_skipped: "duplicate_within_current_crm2_log_only_batch",
+            });
+            continue;
+        }
+        seenPlannedNotes.add(plannedKey);
+
+        candidatesToAppend.push({
+            ...candidate,
+            note,
+            activity_object: {
+                activity_id: generateImportId("ACT"),
+                lead_id: candidate.matched_lead_id,
+                sheet_name: "CRM2 Legacy Import",
+                action_type: "Legacy Follow-up",
+                note,
+                created_by: "CRM2 Import",
+                created_at: formatLegacyDateForSheet(new Date()),
+            },
+        });
+    }
+
+    return {
+        candidates_to_append: candidatesToAppend,
+        duplicate_candidates_skipped: duplicateCandidatesSkipped,
+        unmatched_candidates_skipped: unmatchedCandidatesSkipped,
+        internal_duplicate_candidates_skipped: internalDuplicateCandidatesSkipped,
+    };
 }
 
 function getLegacyAudioUrls(rowObject, debugCounters) {
@@ -480,6 +588,8 @@ function buildLegacyActivityObjects(activityPreviews, leadId, salesOwner) {
 
 async function handleLegacyCrm2Import(req, res) {
     const dryRun = parseDryRunParam(req);
+    const crm2FollowUpLogOnly = parseCrm2FollowUpLogOnlyMode(req);
+    const confirmWrite = parseCrm2ConfirmWrite(req);
 
     try {
         const { sheets, spreadsheetId } = await googleSheets.createSheetsClient();
@@ -592,6 +702,100 @@ async function handleLegacyCrm2Import(req, res) {
         const crm2FollowUpUnmatchedRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.unmatched_phone_row_details);
         const crm2FollowUpDuplicateRiskRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.possible_duplicate_details);
         const crm2FollowUpCandidatesByRow = buildCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.all_candidate_details);
+
+        if (crm2FollowUpLogOnly) {
+            if (!dryRun && !confirmWrite) {
+                return res.status(400).json({
+                    success: false,
+                    dry_run: dryRun,
+                    mode: "crm2_followup_log_only",
+                    error: "confirm=true is required for CRM2 follow-up log-only writes.",
+                    no_write_performed: true,
+                    required_params_for_real_import: {
+                        crm2_followup_log_only: "true",
+                        dry_run: "false",
+                        confirm: "true",
+                    },
+                });
+            }
+
+            const logOnlyPlan = buildCrm2FollowUpLogOnlyPlan(crm2FollowUpAudit);
+            const candidateSourceRows = new Set(
+                (crm2FollowUpAudit.all_candidate_details || []).map(candidate => candidate.source_row_number)
+            );
+            const wouldCreateLeadRowsSkipped = buildCrm2WouldCreateLeadRows(
+                rawRows,
+                rawHeaders,
+                knownLeadsByPhone,
+                candidateSourceRows
+            );
+            const matchedCandidates = (crm2FollowUpAudit.all_candidate_details || [])
+                .filter(candidate => candidate.matched_lead_id);
+            const activityObjectsToAppend = logOnlyPlan.candidates_to_append
+                .map(candidate => candidate.activity_object);
+            let appendedActivities = 0;
+            let failedActivityRows = 0;
+            const failedActivitySamples = [];
+
+            if (!dryRun && activityObjectsToAppend.length) {
+                try {
+                    await googleSheets.appendObjects("ACTIVITY_LOG", activityObjectsToAppend);
+                    appendedActivities = activityObjectsToAppend.length;
+                } catch (err) {
+                    for (const activityObject of activityObjectsToAppend) {
+                        try {
+                            await googleSheets.appendObjects("ACTIVITY_LOG", [activityObject]);
+                            appendedActivities++;
+                        } catch (rowErr) {
+                            failedActivityRows++;
+                            if (failedActivitySamples.length < 10) {
+                                failedActivitySamples.push({
+                                    lead_id: activityObject.lead_id,
+                                    action_type: activityObject.action_type,
+                                    note: activityObject.note,
+                                    error: rowErr.message,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            return res.json({
+                success: true,
+                dry_run: dryRun,
+                mode: "crm2_followup_log_only",
+                received_query: req.query,
+                source_sheet_name: rawSheet.sheetName,
+                total_rows_scanned: crm2FollowUpAudit.total_crm2_rows_scanned,
+                total_followup_candidates_found: crm2FollowUpAudit.all_candidate_details.length,
+                matched_existing_lead_candidates: matchedCandidates.length,
+                candidates_to_append: logOnlyPlan.candidates_to_append.length,
+                appended_activities: appendedActivities,
+                duplicate_candidates_skipped: logOnlyPlan.duplicate_candidates_skipped.length,
+                unmatched_phone_candidates_skipped: logOnlyPlan.unmatched_candidates_skipped.length,
+                would_create_lead_rows_skipped: wouldCreateLeadRowsSkipped.length,
+                internal_duplicate_candidates_skipped: logOnlyPlan.internal_duplicate_candidates_skipped.length,
+                failed_activity_rows: failedActivityRows,
+                no_leads_created: true,
+                no_leads_updated: true,
+                no_lead_details_updated: true,
+                no_deals_updated: true,
+                no_installations_updated: true,
+                write_guard: dryRun
+                    ? "dry_run=true; no writes performed"
+                    : "log-only write completed; only ACTIVITY_LOG append was allowed",
+                candidates_matched_to_existing_lead_id: matchedCandidates,
+                candidates_to_append_details: logOnlyPlan.candidates_to_append,
+                duplicate_candidates_skipped_details: logOnlyPlan.duplicate_candidates_skipped,
+                unmatched_phone_rows_skipped_details: summarizeCrm2FollowUpCandidatesByRow(logOnlyPlan.unmatched_candidates_skipped),
+                unmatched_phone_candidates_skipped_details: logOnlyPlan.unmatched_candidates_skipped,
+                would_create_lead_rows_skipped_details: wouldCreateLeadRowsSkipped,
+                internal_duplicate_candidates_skipped_details: logOnlyPlan.internal_duplicate_candidates_skipped,
+                failed_activity_samples: failedActivitySamples,
+                crm2_followup_l_to_o_audit: crm2FollowUpAudit,
+            });
+        }
 
         for (let i = 1; i < rawRows.length; i++) {
             const row = rawRows[i];
