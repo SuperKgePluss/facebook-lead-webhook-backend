@@ -144,7 +144,7 @@ function buildCrm2FollowUpAuditCandidate({
             lead_id: leadId,
             sheet_name: "CRM2 Legacy Import",
             action_type: "Legacy Follow-up",
-            note: `[CRM2 ${sourceColumnName}] ${rawValue}`,
+            note: `[CRM2 ${sourceColumnName}]\n${rawValue}`,
             created_by: "CRM2 Import",
         } : null,
     };
@@ -289,6 +289,31 @@ function summarizeCrm2FollowUpCandidatesByRow(candidates) {
     }
 
     return Array.from(byKey.values()).sort((a, b) => a.source_row_number - b.source_row_number);
+}
+
+function buildCrm2FollowUpCandidatesByRow(candidates) {
+    const byRow = new Map();
+
+    for (const candidate of candidates || []) {
+        if (!byRow.has(candidate.source_row_number)) byRow.set(candidate.source_row_number, []);
+        byRow.get(candidate.source_row_number).push({
+            target_sheet: "ACTIVITY_LOG",
+            action: "would_create_legacy_follow_up_activity",
+            lead_id: candidate.matched_lead_id || "(unmatched phone)",
+            source_row_number: candidate.source_row_number,
+            source_column_letter: candidate.source_column_letter,
+            source_column_index: candidate.source_column_index,
+            source_column_name: candidate.source_column_name,
+            candidate_type: candidate.candidate_type,
+            action_type: "Legacy Follow-up",
+            note: `[CRM2 ${candidate.source_column_name}]\n${candidate.raw_text}`,
+            raw_text: candidate.raw_text,
+            duplicate_risk: candidate.duplicate_risk,
+            import_enabled: false,
+        });
+    }
+
+    return byRow;
 }
 
 function getLegacyAudioUrls(rowObject, debugCounters) {
@@ -566,6 +591,7 @@ async function handleLegacyCrm2Import(req, res) {
         const crm2FollowUpAllCandidateRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.all_candidate_details);
         const crm2FollowUpUnmatchedRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.unmatched_phone_row_details);
         const crm2FollowUpDuplicateRiskRows = summarizeCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.possible_duplicate_details);
+        const crm2FollowUpCandidatesByRow = buildCrm2FollowUpCandidatesByRow(crm2FollowUpAudit.all_candidate_details);
 
         for (let i = 1; i < rawRows.length; i++) {
             const row = rawRows[i];
@@ -649,9 +675,12 @@ async function handleLegacyCrm2Import(req, res) {
                 wouldCreateLead++;
                 wouldCreateLeadDetails.push({
                     source_row_number: i + 1,
-                    phone,
+                    raw_phone: phone,
                     normalized_phone: cleanPhone,
                     customer_name: name,
+                    matched_lead_id: "",
+                    matched_existing_lead: false,
+                    create_reason: "no_existing_lead_matched_by_normalized_phone",
                     source: cleanedSource,
                     lead_status: cleanedLeadStatus,
                     sales_owner: salesperson,
@@ -661,6 +690,7 @@ async function handleLegacyCrm2Import(req, res) {
                     preferred_call_day: cleanedPreferredCallDay,
                     preferred_call_time: cleanedPreferredCallTime,
                     created_at: parsedLeadInDate.value,
+                    raw_crm2_values: rowObject,
                 });
             }
 
@@ -687,10 +717,12 @@ async function handleLegacyCrm2Import(req, res) {
                 install_time: installationTime,
             };
             const activityPreviews = buildLegacyActivityPreviews(rowObject, leadId, audioUrls, debugCounters);
+            const legacyFollowUpActivityCandidates = crm2FollowUpCandidatesByRow.get(i + 1) || [];
+            const dryRunActivityPreviews = legacyFollowUpActivityCandidates.concat(activityPreviews);
 
             if (hasDealData) wouldCreateDeal++;
             if (hasInstallationData) wouldCreateInstallation++;
-            wouldCreateActivity += activityPreviews.length;
+            wouldCreateActivity += dryRun ? dryRunActivityPreviews.length : activityPreviews.length;
 
             if (samplePreviewItems.length < 30) {
                 samplePreviewItems.push({
@@ -716,7 +748,9 @@ async function handleLegacyCrm2Import(req, res) {
                     },
                     deal_preview: hasDealData ? dealPreview : null,
                     installation_preview: hasInstallationData ? installationPreview : null,
-                    activity_previews: activityPreviews,
+                    activity_previews: dryRunActivityPreviews,
+                    legacy_followup_activity_candidates: legacyFollowUpActivityCandidates,
+                    standard_activity_previews: activityPreviews,
                     raw_data: rowObject,
                 });
             }
