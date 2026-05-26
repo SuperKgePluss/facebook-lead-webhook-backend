@@ -40,7 +40,7 @@ function saveLeadFollowUp_(leadSheet, row) {
     return false;
   }
 
-  const audioMatch = findLatestLeadAudioFile_(leadId);
+  const audioMatch = findLatestLeadAudioFileByPhoneOrName_(lead);
 
   if (!audioMatch.file) {
     const message = FOLLOW_UP_AUDIO_LAST_ERROR_REASON === 'folder_access'
@@ -141,12 +141,326 @@ function getNextFollowUpNo_(leadId) {
 }
 
 function findLatestLeadAudioFile_(leadId) {
-  const result = findLatestEvidenceFileByLeadId_(AUDIO_ROOT_FOLDER_ID, leadId, {
-    evidenceType: 'audio',
+  return findLatestEvidenceFileByLeadId_(AUDIO_ROOT_FOLDER_ID, leadId, {
+    evidenceType: 'audio_legacy_lead_id',
     allowedExtensionPattern: AUDIO_FILE_EXTENSION_PATTERN,
   });
+}
+
+function findLatestLeadAudioFileByPhoneOrName_(leadContext) {
+  const lead = leadContext || {};
+  const phoneKey = normalizeAudioPhoneKey_(lead.phone);
+  const nameKeys = getAudioNameKeys_(lead);
+
+  const phoneResult = findLatestLeadAudioFileByKey_(phoneKey, 'phone');
+  if (phoneResult.file) {
+    FOLLOW_UP_AUDIO_LAST_ERROR_REASON = phoneResult.errorReason || '';
+    return phoneResult;
+  }
+  if (phoneResult.errorReason === 'folder_access' || phoneResult.errorReason === 'missing_root_folder') {
+    FOLLOW_UP_AUDIO_LAST_ERROR_REASON = phoneResult.errorReason || '';
+    return phoneResult;
+  }
+
+  for (const nameKey of nameKeys) {
+    if (isAudioNameAmbiguous_(nameKey, lead.lead_id)) {
+      Logger.log('Audio name fallback skipped because customer name is ambiguous: ' + nameKey);
+      continue;
+    }
+    const nameResult = findLatestLeadAudioFileByKey_(nameKey, 'customer_name');
+    if (nameResult.file) {
+      FOLLOW_UP_AUDIO_LAST_ERROR_REASON = nameResult.errorReason || '';
+      return nameResult;
+    }
+    if (nameResult.errorReason === 'folder_access' || nameResult.errorReason === 'missing_root_folder') {
+      FOLLOW_UP_AUDIO_LAST_ERROR_REASON = nameResult.errorReason || '';
+      return nameResult;
+    }
+  }
+
+  const legacyLeadId = String(lead.lead_id || '').trim();
+  if (legacyLeadId) {
+    const legacyResult = findLatestLeadAudioFile_(legacyLeadId);
+    if (legacyResult.file) {
+      legacyResult.matchStrategy = 'legacy_lead_id';
+      FOLLOW_UP_AUDIO_LAST_ERROR_REASON = legacyResult.errorReason || '';
+      return legacyResult;
+    }
+  }
+
+  const result = createEmptyAudioMatchResult_();
+  result.errorReason = phoneKey || nameKeys.length || legacyLeadId ? 'not_found' : 'missing_audio_match_key';
   FOLLOW_UP_AUDIO_LAST_ERROR_REASON = result.errorReason || '';
   return result;
+}
+
+function findLatestLeadAudioFileByKey_(targetKey, matchStrategy) {
+  const result = createEmptyAudioMatchResult_();
+  const normalizedTarget = matchStrategy === 'phone'
+    ? normalizeAudioPhoneKey_(targetKey)
+    : normalizeAudioNameKey_(targetKey);
+
+  result.matchStrategy = matchStrategy;
+  result.targetKey = normalizedTarget;
+
+  if (!normalizedTarget) {
+    result.errorReason = 'missing_audio_match_key';
+    return result;
+  }
+
+  if (!AUDIO_ROOT_FOLDER_ID || String(AUDIO_ROOT_FOLDER_ID).indexOf('PASTE_') === 0 || String(AUDIO_ROOT_FOLDER_ID).indexOf('PUT_') === 0) {
+    result.errorReason = 'missing_root_folder';
+    Logger.log('Audio search skipped: audio root folder is not configured.');
+    return result;
+  }
+
+  let rootFolder;
+  try {
+    rootFolder = DriveApp.getFolderById(AUDIO_ROOT_FOLDER_ID);
+  } catch (err) {
+    result.errorReason = 'folder_access';
+    Logger.log('Audio search skipped: cannot open audio folder. ' + err.message);
+    return result;
+  }
+
+  const scanState = {
+    foldersScanned: 0,
+    filesScanned: 0,
+    folderLimitExceeded: false,
+    fileLimitExceeded: false,
+  };
+  const matches = findAudioMatchesInFolder_(rootFolder, normalizedTarget, matchStrategy, scanState, 50, 500);
+  result.foldersScanned = scanState.foldersScanned;
+  result.filesScanned = scanState.filesScanned;
+  result.folderLimitExceeded = scanState.folderLimitExceeded;
+  result.fileLimitExceeded = scanState.fileLimitExceeded;
+  result.matchCount = matches.length;
+
+  Logger.log('Audio scan complete strategy=' + matchStrategy + ' target=' + normalizedTarget + ' folders=' + result.foldersScanned + ' files=' + result.filesScanned + ' matches=' + result.matchCount);
+
+  if (!matches.length) {
+    result.errorReason = 'not_found';
+    return result;
+  }
+
+  matches.sort((a, b) => {
+    if (a.timestampKey !== b.timestampKey) return a.timestampKey < b.timestampKey ? 1 : -1;
+    if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+    const aStable = a.file.getId() + '|' + a.fileName;
+    const bStable = b.file.getId() + '|' + b.fileName;
+    return aStable.localeCompare(bStable);
+  });
+
+  const best = matches[0];
+  result.file = best.file;
+  result.fileUrl = best.file.getUrl();
+  result.fileName = best.fileName;
+  result.parsedTimestamp = best.parsedTimestamp;
+  result.duplicateTimestampCount = matches.filter(match => match.timestampKey === best.timestampKey).length - 1;
+  result.chosenReason = result.duplicateTimestampCount > 0
+    ? matchStrategy + '_latest_filename_timestamp_then_updated_time_then_file_id'
+    : matchStrategy + '_latest_filename_timestamp';
+
+  Logger.log('Audio selected strategy=' + matchStrategy + ' file=' + result.fileName + ' timestamp=' + result.parsedTimestamp + ' match_count=' + result.matchCount + ' duplicate_timestamp_count=' + result.duplicateTimestampCount);
+  return result;
+}
+
+function findAudioMatchesInFolder_(folder, targetKey, matchStrategy, scanState, maxFolders, maxFiles) {
+  const matches = [];
+
+  if (scanState.foldersScanned >= maxFolders) {
+    scanState.folderLimitExceeded = true;
+    return matches;
+  }
+
+  scanState.foldersScanned++;
+  Logger.log('Audio scanning folder=' + folder.getName() + ' / ' + folder.getId());
+
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    if (scanState.filesScanned >= maxFiles) {
+      scanState.fileLimitExceeded = true;
+      break;
+    }
+
+    const file = files.next();
+    scanState.filesScanned++;
+    const fileName = String(file.getName() || '');
+    const parsed = parseAudioFileName_(fileName);
+    Logger.log('Audio candidate file=' + fileName);
+
+    if (!parsed) continue;
+    if (!AUDIO_FILE_EXTENSION_PATTERN.test(fileName)) continue;
+
+    const normalizedFileKey = matchStrategy === 'phone'
+      ? normalizeAudioPhoneKey_(parsed.key)
+      : normalizeAudioNameKey_(parsed.key);
+    if (!normalizedFileKey || normalizedFileKey !== targetKey) continue;
+
+    matches.push({
+      file: file,
+      fileName: fileName,
+      timestampKey: parsed.timestampKey,
+      parsedTimestamp: parsed.parsedTimestamp,
+      updatedAt: file.getLastUpdated().getTime(),
+    });
+  }
+
+  const subfolders = folder.getFolders();
+  while (subfolders.hasNext()) {
+    if (scanState.foldersScanned >= maxFolders || scanState.filesScanned >= maxFiles) {
+      scanState.folderLimitExceeded = scanState.foldersScanned >= maxFolders;
+      scanState.fileLimitExceeded = scanState.filesScanned >= maxFiles;
+      break;
+    }
+
+    matches.push.apply(matches, findAudioMatchesInFolder_(
+      subfolders.next(),
+      targetKey,
+      matchStrategy,
+      scanState,
+      maxFolders,
+      maxFiles
+    ));
+  }
+
+  return matches;
+}
+
+function parseAudioFileName_(fileName) {
+  const match = String(fileName || '').match(/^(.+)_(\d{6}|\d{8})_(\d{2})_(\d{2})(?:\.[^.]+)?$/);
+  if (!match) return null;
+
+  const parsedDate = parseAudioDatePart_(match[2], match[3], match[4]);
+  if (!parsedDate) return null;
+
+  return {
+    key: match[1],
+    timestampKey: parsedDate.timestampKey,
+    parsedTimestamp: parsedDate.parsedTimestamp,
+  };
+}
+
+function parseAudioDatePart_(datePart, hour, minute) {
+  const rawDate = String(datePart || '');
+  const rawHour = String(hour || '');
+  const rawMinute = String(minute || '');
+  const candidates = [];
+
+  if (/^\d{6}$/.test(rawDate)) {
+    candidates.push({
+      year: '20' + rawDate.slice(4, 6),
+      month: rawDate.slice(2, 4),
+      day: rawDate.slice(0, 2),
+    });
+  } else if (typeof parseEvidenceDatePart_ === 'function') {
+    return parseEvidenceDatePart_(rawDate, rawHour, rawMinute);
+  } else {
+    return null;
+  }
+
+  for (let i = 0; i < candidates.length; i++) {
+    const year = candidates[i].year;
+    const month = candidates[i].month;
+    const day = candidates[i].day;
+    const date = new Date(Number(year), Number(month) - 1, Number(day), Number(rawHour), Number(rawMinute));
+    if (
+      date.getFullYear() !== Number(year)
+      || date.getMonth() !== Number(month) - 1
+      || date.getDate() !== Number(day)
+      || date.getHours() !== Number(rawHour)
+      || date.getMinutes() !== Number(rawMinute)
+    ) {
+      continue;
+    }
+
+    return {
+      timestampKey: year + month + day + rawHour + rawMinute,
+      parsedTimestamp: year + '-' + month + '-' + day + ' ' + rawHour + ':' + rawMinute,
+    };
+  }
+
+  return null;
+}
+
+function normalizeAudioPhoneKey_(value) {
+  const digits = String(value || '').replace(/\D+/g, '');
+  if (!digits) return '';
+  if (digits.length === 9 && /^[689]/.test(digits)) return '0' + digits;
+  if (digits.length === 11 && digits.indexOf('66') === 0) return '0' + digits.slice(2);
+  if (digits.length === 10 && digits.indexOf('0') === 0) return digits;
+  return digits;
+}
+
+function normalizeAudioNameKey_(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function getAudioNameKeys_(lead) {
+  const rawNames = [
+    lead.customer_name,
+    lead.full_name,
+    lead.facebook_name,
+    lead.name,
+    lead.original_customer_name,
+  ];
+  const keys = [];
+
+  rawNames.forEach(name => {
+    const key = normalizeAudioNameKey_(name);
+    if (key && keys.indexOf(key) === -1) keys.push(key);
+  });
+
+  return keys;
+}
+
+function isAudioNameAmbiguous_(nameKey, currentLeadId) {
+  const targetName = normalizeAudioNameKey_(nameKey);
+  const currentId = String(currentLeadId || '').trim();
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  if (!targetName || !sheet || sheet.getLastRow() < DATA_START_ROW) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  const nameColumn = headerMap.customer_name;
+  if (!leadIdColumn || !nameColumn) return false;
+
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+  const matchingLeadIds = {};
+
+  values.forEach(row => {
+    const rowName = normalizeAudioNameKey_(row[nameColumn - 1]);
+    if (rowName !== targetName) return;
+
+    const rowLeadId = String(row[leadIdColumn - 1] || '').trim();
+    if (rowLeadId) matchingLeadIds[rowLeadId] = true;
+  });
+
+  const ids = Object.keys(matchingLeadIds);
+  return ids.length > 1 || (ids.length === 1 && currentId && ids[0] !== currentId);
+}
+
+function createEmptyAudioMatchResult_() {
+  return {
+    file: null,
+    fileUrl: '',
+    fileName: '',
+    parsedTimestamp: '',
+    matchCount: 0,
+    duplicateTimestampCount: 0,
+    chosenReason: '',
+    foldersScanned: 0,
+    filesScanned: 0,
+    folderLimitExceeded: false,
+    fileLimitExceeded: false,
+    errorReason: '',
+    matchStrategy: '',
+    targetKey: '',
+  };
 }
 
 function debugFollowUpForActiveRow() {
@@ -165,11 +479,13 @@ function debugFollowUpForActiveRow() {
   const lead = getRowObject_(sheet, row);
   Logger.log('Debug follow-up row: ' + row);
   Logger.log('Lead ID: ' + lead.lead_id);
+  Logger.log('Phone: ' + lead.phone);
+  Logger.log('Customer name: ' + lead.customer_name);
   Logger.log('Follow-up Note exists: ' + Boolean(String(lead.follow_up_note || '').trim()));
   Logger.log('Audio root folder id: ' + AUDIO_ROOT_FOLDER_ID);
 
-  const match = findLatestLeadAudioFile_(lead.lead_id);
-  Logger.log(match.file ? 'Matched audio file: ' + match.fileName + ' / ' + match.file.getId() + ' parsed=' + match.parsedTimestamp + ' matches=' + match.matchCount : 'No matching audio file found. Expected format: ' + lead.lead_id + '_YYYYMMDD_HH_MM.ext, ' + lead.lead_id + '_DDMMYYYY_HH_MM.ext, or ' + lead.lead_id + '_MMDDYYYY_HH_MM.ext');
+  const match = findLatestLeadAudioFileByPhoneOrName_(lead);
+  Logger.log(match.file ? 'Matched audio file: ' + match.fileName + ' / ' + match.file.getId() + ' strategy=' + match.matchStrategy + ' parsed=' + match.parsedTimestamp + ' matches=' + match.matchCount : 'No matching audio file found. Expected format: PHONE_DDMMYY_HH_MM.ext or CUSTOMER_NAME_DDMMYY_HH_MM.ext');
 }
 
 function syncLeadStatusFromActivityLogDryRun() {

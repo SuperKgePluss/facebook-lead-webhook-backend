@@ -8,7 +8,6 @@ const CRM_UI_BATCH_TASKS = [
   'deals_payment_status',
   'deals_open_installation',
   'installations_status',
-  'installations_save_location',
 ];
 
 function normalizeHeaderName_(headerName) {
@@ -123,8 +122,6 @@ function setupCrmUiBatch() {
     result = refreshDealsOpenInstallationCheckboxes();
   } else if (currentTask === 'installations_status') {
     result = refreshInstallationStatusDropdownsLight();
-  } else if (currentTask === 'installations_save_location') {
-    result = refreshInstallationSaveLocationCheckboxes();
   }
 
   result = result || {};
@@ -221,13 +218,8 @@ function onEdit(e) {
   }
 
   if (sheet.getName() === 'INSTALLATIONS') {
-    const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
     ensureInstallationStatusDropdownForRow(e.range.getRow(), sheet);
-    ensureInstallationSaveLocationCheckboxForRow(e.range.getRow(), sheet);
-    if (editedHeader === 'save_location') {
-      handleSaveLocationEdit_(e, sheet, e.range.getRow());
-      return;
-    }
+    // Location links are now manual. Save Location auto-fetch is disabled by client request.
     handleInstallationStatusEdit_(e);
     return;
   }

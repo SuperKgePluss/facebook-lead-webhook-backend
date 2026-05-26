@@ -1,4 +1,5 @@
 // INSTALLATIONS sheet setup, row-level status dropdowns, and Lead Status propagation.
+// Location links are now pasted manually. Save Location auto-fetch/checkbox repair is intentionally inactive.
 const INSTALLATION_STATUS_VALUES = ['Pending', 'Scheduled', 'Installed', 'Cancelled'];
 const INSTALLATION_STATUS_REFRESH_CURSOR_KEY = 'INSTALLATION_STATUS_REFRESH_NEXT_ROW';
 const INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY = 'INSTALLATION_SAVE_LOCATION_REFRESH_NEXT_ROW';
@@ -117,9 +118,8 @@ function setupInstallationsUi() {
   sheet.getRange(DATA_START_ROW, 7, formatRows, 1).setNumberFormat('@');
 
   resetInstallationStatusDropdownRefreshCursor();
-  resetInstallationSaveLocationCheckboxRefreshCursor();
   setupInstallationsStatusConditionalFormatting_();
-  Logger.log('setupInstallationsUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level dropdowns and checkboxes.');
+  Logger.log('setupInstallationsUi completed lightweight setup. Run setupCrmUiBatch repeatedly to repair row-level dropdowns.');
 }
 
 function getInstallationStatusValidation_() {
@@ -239,7 +239,6 @@ function refreshInstallationStatusDropdownsLight() {
   for (let row = startRow; row <= endRow; row++) {
     checked++;
     if (ensureInstallationStatusDropdownForRow(row, sheet)) fixed++;
-    if (ensureInstallationSaveLocationCheckboxForRow(row, sheet)) fixed++;
   }
 
   const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
@@ -273,7 +272,6 @@ function refreshInstallationStatusDropdownsAll() {
   for (let row = DATA_START_ROW; row <= lastRow; row++) {
     checked++;
     if (ensureInstallationStatusDropdownForRow(row, sheet)) fixed++;
-    if (ensureInstallationSaveLocationCheckboxForRow(row, sheet)) fixed++;
   }
 
   setupInstallationsStatusConditionalFormatting_();
@@ -288,6 +286,11 @@ function resetInstallationStatusDropdownRefreshCursor() {
 }
 
 function refreshInstallationSaveLocationCheckboxes() {
+  // Disabled by client request. Location links are manual; this helper remains unused for compatibility.
+  return { task_completed: true, disabled: true };
+}
+
+function refreshInstallationSaveLocationCheckboxesDisabled_() {
   const properties = PropertiesService.getScriptProperties();
   const sheet = SpreadsheetApp.getActive().getSheetByName('INSTALLATIONS');
   if (!sheet) return { task_completed: true };
@@ -326,6 +329,10 @@ function refreshInstallationSaveLocationCheckboxes() {
 }
 
 function refreshInstallationSaveLocationCheckboxesAll() {
+  // Disabled by client request. Location links are manual; this helper remains unused for compatibility.
+}
+
+function refreshInstallationSaveLocationCheckboxesAllDisabled_() {
   const sheet = SpreadsheetApp.getActive().getSheetByName('INSTALLATIONS');
   if (!sheet) return;
 
@@ -347,6 +354,10 @@ function refreshInstallationSaveLocationCheckboxesAll() {
 }
 
 function resetInstallationSaveLocationCheckboxRefreshCursor() {
+  // Disabled by client request. Location links are manual; this helper remains unused for compatibility.
+}
+
+function resetInstallationSaveLocationCheckboxRefreshCursorDisabled_() {
   PropertiesService
     .getScriptProperties()
     .setProperty(INSTALLATION_SAVE_LOCATION_REFRESH_CURSOR_KEY, String(DATA_START_ROW));
@@ -474,6 +485,11 @@ function appendOpenInstallationActivity_(leadId, created) {
 }
 
 function handleSaveLocationEdit_(e, sheet, row) {
+  // Disabled by client request. Location links are now pasted manually in INSTALLATIONS.Location.
+  return;
+}
+
+function handleSaveLocationEditDisabled_(e, sheet, row) {
   if (!e || !e.range || !sheet || sheet.getName() !== 'INSTALLATIONS' || row < DATA_START_ROW) return;
 
   const editedHeader = getEditedHeader_(sheet, e.range.getColumn());
