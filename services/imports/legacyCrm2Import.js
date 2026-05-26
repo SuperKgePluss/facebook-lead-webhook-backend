@@ -334,7 +334,7 @@ function buildLegacyActivityPreviews(rowObject, leadId, audioUrls, debugCounters
             note: details,
             audio_url: audioUrl,
             created_at: parsedCreatedAt.value,
-            raw_created_at: rawCreatedAt,
+            raw_created_at: parsedCreatedAt.isInvalid ? "" : rawCreatedAt,
         });
     }
 
@@ -856,6 +856,11 @@ async function handleLegacyCrm2Import(req, res) {
             sample_audio_items: sampleAudioItems,
             sample_result_items: sampleResultItems,
             would_create_lead_details: wouldCreateLeadDetails,
+            crm2_legacy_followup_import_enabled: false,
+            crm2_legacy_followup_import_mode: "audit_only",
+            crm2_followup_all_candidate_activity_rows: crm2FollowUpAudit.all_candidate_details,
+            crm2_followup_duplicate_risk_rows: crm2FollowUpAudit.possible_duplicate_details,
+            crm2_followup_unmatched_phone_rows_detail: crm2FollowUpAudit.unmatched_phone_row_details,
             crm2_followup_l_to_o_audit: crm2FollowUpAudit,
             crm2_followup_total_rows_scanned: crm2FollowUpAudit.total_crm2_rows_scanned,
             crm2_followup_rows_with_any_l_to_o_value: crm2FollowUpAudit.rows_with_any_l_to_o_value,
