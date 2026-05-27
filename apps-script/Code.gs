@@ -88,6 +88,14 @@ function appendObjectRow_(sheetName, object) {
   return row;
 }
 
+function onOpen(e) {
+  SpreadsheetApp
+    .getUi()
+    .createMenu('CRM Tools')
+    .addItem('Add Manual Lead', 'createManualLead')
+    .addToUi();
+}
+
 function setupCrmUi() {
   setupCrmUiLight();
 }
