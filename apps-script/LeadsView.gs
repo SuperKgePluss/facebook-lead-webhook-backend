@@ -119,8 +119,10 @@ function repairLeadsViewFromLeadMain() {
   const ss = SpreadsheetApp.getActive();
   const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
   const leadsSheet = getOrCreateLeadsViewSheet_();
+  const existingSalesOwnerValidation = getExistingColumnValidation_(leadsSheet, 'sales_owner');
   if (!leadMainSheet || leadMainSheet.getLastRow() < DATA_START_ROW) {
     writeLeadsViewHeadersOnly_(leadsSheet);
+    setupLeadsViewExistingRowsUi_(leadsSheet);
     return {
       rebuilt: 0,
     };
@@ -155,7 +157,9 @@ function repairLeadsViewFromLeadMain() {
   writeLeadsViewHeadersOnly_(leadsSheet);
   if (rebuiltRows.length) {
     leadsSheet.getRange(DATA_START_ROW, 1, rebuiltRows.length, LEADS_VIEW_HEADERS.length).setValues(rebuiltRows);
-    setupLeadsViewDataRangeUi_(leadsSheet, DATA_START_ROW, rebuiltRows.length);
+    setupLeadsViewDataRangeUi_(leadsSheet, DATA_START_ROW, rebuiltRows.length, {
+      salesOwnerValidation: existingSalesOwnerValidation,
+    });
   }
   setupLeadsViewStatusConditionalFormatting_(leadsSheet);
   resetLeadsViewRefreshCursor();
@@ -679,7 +683,7 @@ function parseLeadsViewDateTime_(value) {
   return null;
 }
 
-function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount) {
+function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount, options) {
   if (!sheet || rowCount <= 0) return;
 
   const headerMap = getHeaderMap_(sheet);
@@ -689,12 +693,15 @@ function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount) {
   }
 
   const salesOwnerColumn = headerMap.sales_owner;
-  const salesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
-  if (salesOwnerColumn && salesOwners.length) {
+  const salesOwnerValidation = getLeadsViewSalesOwnerValidation_(options && options.salesOwnerValidation);
+  if (salesOwnerColumn && salesOwnerValidation) {
     sheet
       .getRange(startRow, salesOwnerColumn, rowCount, 1)
-      .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(salesOwners, true).setAllowInvalid(true).build());
+      .setDataValidation(salesOwnerValidation);
   }
+
+  applyLeadsViewOptionalDropdown_(sheet, headerMap.preferred_call_day, startRow, rowCount, ['Preferred Call Day', 'Preferred Call Days', 'preferred_call_day']);
+  applyLeadsViewOptionalDropdown_(sheet, headerMap.preferred_call_time, startRow, rowCount, ['Preferred Call Time', 'Preferred Call Times', 'preferred_call_time']);
 
   [headerMap.fetch_audio, headerMap.open_detail].filter(Boolean).forEach(column => {
     sheet.getRange(startRow, column, rowCount, 1).insertCheckboxes();
@@ -708,6 +715,49 @@ function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount) {
   [headerMap.phone, headerMap.additional_phone].filter(Boolean).forEach(column => {
     sheet.getRange(startRow, column, rowCount, 1).setNumberFormat('@');
   });
+}
+
+function getLeadsViewSalesOwnerValidation_(fallbackValidation) {
+  const salesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
+  if (salesOwners.length) {
+    return SpreadsheetApp
+      .newDataValidation()
+      .requireValueInList(salesOwners, true)
+      .setAllowInvalid(true)
+      .build();
+  }
+
+  if (fallbackValidation) return fallbackValidation;
+  return getExistingColumnValidation_(SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN'), 'sales_owner');
+}
+
+function getExistingColumnValidation_(sheet, headerName) {
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return null;
+
+  const headerMap = getHeaderMap_(sheet);
+  const column = headerMap[normalizeHeaderName_(headerName)];
+  if (!column) return null;
+
+  const validations = sheet
+    .getRange(DATA_START_ROW, column, sheet.getLastRow() - DATA_START_ROW + 1, 1)
+    .getDataValidations();
+
+  for (let i = 0; i < validations.length; i++) {
+    if (validations[i][0]) return validations[i][0];
+  }
+
+  return null;
+}
+
+function applyLeadsViewOptionalDropdown_(sheet, column, startRow, rowCount, settingHeaders) {
+  if (!column) return;
+
+  const values = getSettingsValuesForHeaders_(settingHeaders);
+  if (!values.length) return;
+
+  sheet
+    .getRange(startRow, column, rowCount, 1)
+    .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(true).build());
 }
 
 function setupLeadsViewExistingRowsUi_(sheet) {
