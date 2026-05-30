@@ -1,14 +1,14 @@
-// Sales-facing LEADS tab. LEADS_MAIN remains the backend/master sheet.
+﻿// Sales-facing LEADS tab. LEADS_MAIN remains the backend/master sheet.
 const LEADS_VIEW_REFRESH_CURSOR_KEY = 'LEADS_VIEW_REFRESH_NEXT_ROW';
 const LEADS_VIEW_REFRESH_BATCH_SIZE = 70;
 const LEADS_VIEW_SCHEDULED_CURSOR_KEY = 'LEADS_VIEW_SCHEDULED_NEXT_ROW';
 const LEADS_VIEW_SCHEDULED_BATCH_SIZE = 20;
 const LEADS_VIEW_HEADERS = [
   'Lead ID',
+  'Facebook Created Time',
   'Customer Name',
   'Phone',
   'Additional Phone',
-  'Facebook Created Time',
   'Lead Status',
   'Preferred Call Day',
   'Preferred Call Time',
@@ -21,10 +21,10 @@ const LEADS_VIEW_HEADERS = [
 ];
 const LEADS_VIEW_THAI_LABELS = [
   'รหัสลูกค้า',
+  'เวลาสร้างลีดจาก Facebook',
   'ชื่อลูกค้า',
   'เบอร์โทร',
   'เบอร์โทรเพิ่มเติม',
-  'เวลาสร้างลีดจาก Facebook',
   'สถานะลูกค้า',
   'วันที่สะดวกให้โทร',
   'เวลาที่สะดวกให้โทร',
@@ -46,6 +46,7 @@ const LEADS_VIEW_MANUAL_FIELDS = {
 function setupLeadsViewUi() {
   const sheet = getOrCreateLeadsViewSheet_();
   setLeadsViewHeaders_(sheet);
+  setupLeadsViewExistingRowsUi_(sheet);
   resetLeadsViewRefreshCursor();
   Logger.log('setupLeadsViewUi completed lightweight setup. Run setupCrmUiBatch repeatedly to sync LEADS rows.');
 }
@@ -111,6 +112,61 @@ function syncLeadsViewNow() {
 
 function syncLeadsViewScheduled() {
   return syncLeadsViewCursorBatch_(LEADS_VIEW_SCHEDULED_BATCH_SIZE);
+}
+
+function repairLeadsViewFromLeadMain() {
+  const ss = SpreadsheetApp.getActive();
+  const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
+  const leadsSheet = getOrCreateLeadsViewSheet_();
+  if (!leadMainSheet || leadMainSheet.getLastRow() < DATA_START_ROW) {
+    writeLeadsViewHeadersOnly_(leadsSheet);
+    return {
+      rebuilt: 0,
+    };
+  }
+
+  const safeManualByLeadId = getSafeLeadsViewManualDataByLeadId_(leadsSheet);
+  const detailFacebookTimeByLeadId = getLeadDetailsFacebookCreatedTimeByLeadId_();
+  const leadRows = leadMainSheet
+    .getRange(DATA_START_ROW, 1, leadMainSheet.getLastRow() - DATA_START_ROW + 1, leadMainSheet.getLastColumn())
+    .getValues();
+  const leadHeaders = leadMainSheet.getRange(HEADER_ROW, 1, 1, leadMainSheet.getLastColumn()).getValues()[0];
+  const rebuiltRows = [];
+
+  leadRows.forEach(row => {
+    const lead = leadHeaders.reduce((object, header, index) => {
+      const name = normalizeHeaderName_(header);
+      if (name) object[name] = row[index];
+      return object;
+    }, {});
+    const leadId = String(lead.lead_id || '').trim();
+    if (!leadId) return;
+
+    const manual = safeManualByLeadId[leadId] || {};
+    const facebookCreatedTime = resolveLeadsViewFacebookCreatedTime_(lead, detailFacebookTimeByLeadId[leadId]);
+    const object = sanitizeLeadsViewSyncObject_(buildLeadsViewObject_(Object.assign({}, lead, {
+      facebook_created_time: facebookCreatedTime,
+    }), manual));
+    rebuiltRows.push(buildLeadsViewRowValues_(object));
+  });
+
+  clearLeadsViewData_(leadsSheet);
+  writeLeadsViewHeadersOnly_(leadsSheet);
+  if (rebuiltRows.length) {
+    leadsSheet.getRange(DATA_START_ROW, 1, rebuiltRows.length, LEADS_VIEW_HEADERS.length).setValues(rebuiltRows);
+    setupLeadsViewDataRangeUi_(leadsSheet, DATA_START_ROW, rebuiltRows.length);
+  }
+  resetLeadsViewRefreshCursor();
+  PropertiesService
+    .getScriptProperties()
+    .setProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY, String(DATA_START_ROW));
+
+  const result = {
+    rebuilt: rebuiltRows.length,
+  };
+  Logger.log('repairLeadsViewFromLeadMain rebuilt=' + rebuiltRows.length);
+  SpreadsheetApp.getActive().toast('Rebuilt LEADS rows: ' + rebuiltRows.length, 'Repair LEADS View', 5);
+  return result;
 }
 
 function installLeadsViewSyncTrigger() {
@@ -312,7 +368,7 @@ function handleLeadsViewOpenDetailEdit_(e, sheet, row) {
   if (openDetailColumn) sheet.getRange(row, openDetailColumn).setValue(false);
 
   if (!leadId || !navigateToLatestMatch_('LEADS_MAIN', 'lead_id', leadId)) {
-    SpreadsheetApp.getActive().toast('ไม่พบรายละเอียดลูกค้า', 'Open Detail', 5);
+    SpreadsheetApp.getActive().toast('à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸²à¸¢à¸¥à¸°à¹€à¸­à¸µà¸¢à¸”à¸¥à¸¹à¸à¸„à¹‰à¸²', 'Open Detail', 5);
   }
 }
 
@@ -326,13 +382,13 @@ function handleLeadsViewFetchAudioEdit_(e, sheet, row) {
   const lead = getRowObject_(sheet, row);
   const leadId = String(lead.lead_id || '').trim();
   if (!leadId) {
-    writeLeadsViewAudioStatus_(sheet, row, 'ไม่พบรหัสลูกค้า');
+    writeLeadsViewAudioStatus_(sheet, row, 'à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸«à¸±à¸ªà¸¥à¸¹à¸à¸„à¹‰à¸²');
     return;
   }
 
   const audioMatch = findLatestLeadAudioFileByPhoneOrName_(lead);
   if (!audioMatch.file) {
-    writeLeadsViewAudioStatus_(sheet, row, 'ไม่พบไฟล์เสียงตามรูปแบบที่กำหนด');
+    writeLeadsViewAudioStatus_(sheet, row, 'à¹„à¸¡à¹ˆà¸žà¸šà¹„à¸Ÿà¸¥à¹Œà¹€à¸ªà¸µà¸¢à¸‡à¸•à¸²à¸¡à¸£à¸¹à¸›à¹à¸šà¸šà¸—à¸µà¹ˆà¸à¸³à¸«à¸™à¸”');
     return;
   }
 
@@ -348,7 +404,7 @@ function handleLeadsViewFetchAudioEdit_(e, sheet, row) {
     created_at: new Date(),
   });
 
-  writeLeadsViewAudioStatus_(sheet, row, 'บันทึกไฟล์เสียงแล้ว: ' + audioMatch.fileName);
+  writeLeadsViewAudioStatus_(sheet, row, 'à¸šà¸±à¸™à¸—à¸¶à¸à¹„à¸Ÿà¸¥à¹Œà¹€à¸ªà¸µà¸¢à¸‡à¹à¸¥à¹‰à¸§: ' + audioMatch.fileName);
 }
 
 function handleLeadsViewLeadStatusEdit_(e, sheet, row) {
@@ -395,8 +451,61 @@ function setLeadsViewHeaders_(sheet) {
   if (sheet.getMaxColumns() < LEADS_VIEW_HEADERS.length) {
     sheet.insertColumnsAfter(sheet.getMaxColumns(), LEADS_VIEW_HEADERS.length - sheet.getMaxColumns());
   }
+  if (!isLeadsViewHeaderOrderCurrent_(sheet)) {
+    preserveLeadsViewRowsByHeader_(sheet);
+  }
+  writeLeadsViewHeadersOnly_(sheet);
+}
+
+function writeLeadsViewHeadersOnly_(sheet) {
+  if (sheet.getMaxColumns() < LEADS_VIEW_HEADERS.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), LEADS_VIEW_HEADERS.length - sheet.getMaxColumns());
+  }
   sheet.getRange(HEADER_ROW, 1, 1, LEADS_VIEW_HEADERS.length).setValues([LEADS_VIEW_HEADERS]);
   sheet.getRange(HEADER_ROW + 1, 1, 1, LEADS_VIEW_THAI_LABELS.length).setValues([LEADS_VIEW_THAI_LABELS]);
+}
+
+function isLeadsViewHeaderOrderCurrent_(sheet) {
+  if (!sheet || sheet.getLastColumn() < LEADS_VIEW_HEADERS.length) return false;
+
+  const headers = sheet.getRange(HEADER_ROW, 1, 1, LEADS_VIEW_HEADERS.length).getValues()[0];
+  return LEADS_VIEW_HEADERS.every((header, index) => normalizeHeaderName_(headers[index]) === normalizeHeaderName_(header));
+}
+
+function preserveLeadsViewRowsByHeader_(sheet) {
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW || sheet.getLastColumn() < 1) return;
+
+  const existingHeaders = sheet.getRange(HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const existingMap = existingHeaders.reduce((map, header, index) => {
+    const normalized = normalizeHeaderName_(header);
+    if (normalized && !map[normalized]) map[normalized] = index;
+    return map;
+  }, {});
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  const existingValues = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
+  const nextValues = existingValues.map(row => LEADS_VIEW_HEADERS.map(header => {
+    const index = existingMap[normalizeHeaderName_(header)];
+    return index === undefined ? '' : row[index];
+  }));
+
+  sheet.getRange(DATA_START_ROW, 1, rowCount, LEADS_VIEW_HEADERS.length).setValues(nextValues);
+}
+
+function clearLeadsViewData_(sheet) {
+  const rowCount = Math.max(sheet.getLastRow() - DATA_START_ROW + 1, 0);
+  if (rowCount <= 0) return;
+
+  sheet
+    .getRange(DATA_START_ROW, 1, rowCount, Math.max(sheet.getLastColumn(), LEADS_VIEW_HEADERS.length))
+    .clearContent()
+    .clearDataValidations();
+}
+
+function buildLeadsViewRowValues_(object) {
+  return LEADS_VIEW_HEADERS.map(header => {
+    const normalizedHeader = normalizeHeaderName_(header);
+    return object[normalizedHeader] === undefined ? '' : object[normalizedHeader];
+  });
 }
 
 function buildLeadsViewObject_(lead, manual) {
@@ -433,6 +542,139 @@ function sanitizeLeadsViewSyncObject_(object) {
   }
 
   return sanitized;
+}
+
+function getSafeLeadsViewManualDataByLeadId_(sheet) {
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  if (!leadIdColumn) return data;
+
+  const allowedSalesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
+  const allowedCallDays = getSettingsValuesForHeaders_(['Preferred Call Day', 'Preferred Call Days', 'preferred_call_day']);
+  const allowedCallTimes = getSettingsValuesForHeaders_(['Preferred Call Time', 'Preferred Call Times', 'preferred_call_time']);
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+
+  values.forEach(row => {
+    const leadId = String(row[leadIdColumn - 1] || '').trim();
+    if (!leadId) return;
+
+    const manual = {};
+    const additionalPhone = getLeadsViewRowValue_(row, headerMap, 'additional_phone');
+    if (isSafeAdditionalPhone_(additionalPhone)) manual.additional_phone = String(additionalPhone).trim();
+
+    const followUpCount = getLeadsViewRowValue_(row, headerMap, 'follow_up_count');
+    if (isSafeFollowUpCount_(followUpCount)) manual.follow_up_count = followUpCount;
+
+    const audioSaveStatus = getLeadsViewRowValue_(row, headerMap, 'audio_save_status');
+    if (String(audioSaveStatus || '').trim()) manual.audio_save_status = audioSaveStatus;
+
+    const salesOwner = String(getLeadsViewRowValue_(row, headerMap, 'sales_owner') || '').trim();
+    if (salesOwner && allowedSalesOwners.indexOf(salesOwner) !== -1) manual.sales_owner = salesOwner;
+
+    const preferredCallDay = String(getLeadsViewRowValue_(row, headerMap, 'preferred_call_day') || '').trim();
+    if (preferredCallDay && (!allowedCallDays.length || allowedCallDays.indexOf(preferredCallDay) !== -1)) {
+      manual.preferred_call_day = preferredCallDay;
+    }
+
+    const preferredCallTime = String(getLeadsViewRowValue_(row, headerMap, 'preferred_call_time') || '').trim();
+    if (preferredCallTime && (!allowedCallTimes.length || allowedCallTimes.indexOf(preferredCallTime) !== -1)) {
+      manual.preferred_call_time = preferredCallTime;
+    }
+
+    data[leadId] = manual;
+  });
+
+  return data;
+}
+
+function getLeadsViewRowValue_(row, headerMap, header) {
+  const column = headerMap[normalizeHeaderName_(header)];
+  return column ? row[column - 1] : '';
+}
+
+function isSafeAdditionalPhone_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  return Boolean(normalizePhone(raw));
+}
+
+function isSafeFollowUpCount_(value) {
+  if (value === '' || value === null || value === undefined) return false;
+  if (typeof value === 'number') return isFinite(value);
+  return /^\d+$/.test(String(value).trim());
+}
+
+function getLeadDetailsFacebookCreatedTimeByLeadId_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEAD_DETAILS');
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.facebook_created_time) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+  values.forEach(row => {
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const value = row[headerMap.facebook_created_time - 1];
+    if (leadId && value && !data[leadId]) data[leadId] = value;
+  });
+
+  return data;
+}
+
+function resolveLeadsViewFacebookCreatedTime_(lead, detailFacebookCreatedTime) {
+  return parseLeadsViewDateTime_(lead.facebook_created_time)
+    || parseLeadsViewDateTime_(detailFacebookCreatedTime)
+    || parseLeadsViewDateTime_(lead.created_at)
+    || '';
+}
+
+function parseLeadsViewDateTime_(value) {
+  if (!value) return null;
+  if (typeof parseCrmDateTimeValue_ === 'function') {
+    const parsed = parseCrmDateTimeValue_(value);
+    if (parsed && parsed instanceof Date && !isNaN(parsed.getTime()) && parsed.getFullYear() > 2000) return parsed;
+  }
+  if (value instanceof Date && !isNaN(value.getTime()) && value.getFullYear() > 2000) return value;
+  return null;
+}
+
+function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount) {
+  if (!sheet || rowCount <= 0) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  const statusColumn = headerMap.lead_status;
+  if (statusColumn) {
+    sheet.getRange(startRow, statusColumn, rowCount, 1).setDataValidation(getLeadMainStatusValidation_());
+  }
+
+  const salesOwnerColumn = headerMap.sales_owner;
+  const salesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
+  if (salesOwnerColumn && salesOwners.length) {
+    sheet
+      .getRange(startRow, salesOwnerColumn, rowCount, 1)
+      .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(salesOwners, true).setAllowInvalid(true).build());
+  }
+
+  [headerMap.fetch_audio, headerMap.open_detail].filter(Boolean).forEach(column => {
+    sheet.getRange(startRow, column, rowCount, 1).insertCheckboxes();
+  });
+
+  const dateColumn = headerMap.facebook_created_time;
+  if (dateColumn) {
+    sheet.getRange(startRow, dateColumn, rowCount, 1).setNumberFormat('[$-en-US]MM/dd/yyyy HH:mm');
+  }
+}
+
+function setupLeadsViewExistingRowsUi_(sheet) {
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return;
+
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  setupLeadsViewDataRangeUi_(sheet, DATA_START_ROW, rowCount);
+  Logger.log('setupLeadsViewExistingRowsUi rows=' + rowCount);
 }
 
 function prepareLeadsViewRowForSync_(sheet, row) {

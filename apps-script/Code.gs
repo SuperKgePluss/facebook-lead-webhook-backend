@@ -94,6 +94,7 @@ function onOpen(e) {
     .createMenu('CRM Tools')
     .addItem('Add Manual Lead', 'createManualLead')
     .addItem('Sync LEADS View', 'syncLeadsViewNow')
+    .addItem('Repair LEADS View', 'repairLeadsViewFromLeadMain')
     .addToUi();
 }
 
