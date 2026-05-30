@@ -93,6 +93,7 @@ function onOpen(e) {
     .getUi()
     .createMenu('CRM Tools')
     .addItem('Add Manual Lead', 'createManualLead')
+    .addItem('Sync LEADS View', 'syncLeadsViewNow')
     .addToUi();
 }
 
@@ -205,8 +206,8 @@ function setupRecentlyAppendedRows_() {
     }
   }
 
-  if (typeof refreshLeadsViewLight === 'function') {
-    refreshLeadsViewLight();
+  if (typeof syncRecentLeadsViewRows_ === 'function') {
+    syncRecentLeadsViewRows_(200);
   }
 }
 

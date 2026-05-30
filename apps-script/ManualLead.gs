@@ -63,7 +63,7 @@ function createManualLead() {
 
   appendManualLeadDetail_(leadId, phone, customerName);
   setupLeadMainRowUi(leadRow, leadSheet);
-  refreshLeadsViewLight();
+  syncLeadsViewForLeadMainRow_(leadRow);
   navigateToLeadMainRow_(leadRow);
   ui.alert('Manual lead created: ' + leadId);
 }

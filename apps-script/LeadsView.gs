@@ -1,6 +1,8 @@
 // Sales-facing LEADS tab. LEADS_MAIN remains the backend/master sheet.
 const LEADS_VIEW_REFRESH_CURSOR_KEY = 'LEADS_VIEW_REFRESH_NEXT_ROW';
 const LEADS_VIEW_REFRESH_BATCH_SIZE = 70;
+const LEADS_VIEW_SCHEDULED_CURSOR_KEY = 'LEADS_VIEW_SCHEDULED_NEXT_ROW';
+const LEADS_VIEW_SCHEDULED_BATCH_SIZE = 20;
 const LEADS_VIEW_HEADERS = [
   'Lead ID',
   'Customer Name',
@@ -98,6 +100,160 @@ function resetLeadsViewRefreshCursor() {
     .getScriptProperties()
     .setProperty(LEADS_VIEW_REFRESH_CURSOR_KEY, String(DATA_START_ROW));
   Logger.log('LEADS view refresh cursor reset to ' + DATA_START_ROW);
+}
+
+function syncLeadsViewNow() {
+  setupLeadsViewUi();
+  const result = syncRecentLeadsViewRows_(200);
+  SpreadsheetApp.getActive().toast('Synced recent LEADS rows: ' + result.synced, 'Sync LEADS View', 5);
+  return result;
+}
+
+function syncLeadsViewScheduled() {
+  return syncLeadsViewCursorBatch_(LEADS_VIEW_SCHEDULED_BATCH_SIZE);
+}
+
+function installLeadsViewSyncTrigger() {
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'syncLeadsViewScheduled') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp
+    .newTrigger('syncLeadsViewScheduled')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+}
+
+function syncRecentLeadsViewRows_(limit) {
+  const rowLimit = Math.max(1, Number(limit) || 200);
+  const ss = SpreadsheetApp.getActive();
+  const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
+  const leadsSheet = getOrCreateLeadsViewSheet_();
+  if (!leadMainSheet || leadMainSheet.getLastRow() < DATA_START_ROW) {
+    return {
+      checked: 0,
+      synced: 0,
+    };
+  }
+
+  setLeadsViewHeaders_(leadsSheet);
+
+  const lastRow = leadMainSheet.getLastRow();
+  const startRow = Math.max(DATA_START_ROW, lastRow - rowLimit + 1);
+  const manualByLeadId = getLeadsViewManualDataByLeadId_(leadsSheet);
+  const rowByLeadId = getLeadsViewRowMapByLeadId_(leadsSheet);
+  let checked = 0;
+  let synced = 0;
+  let failed = 0;
+
+  for (let row = startRow; row <= lastRow; row++) {
+    checked++;
+    try {
+      if (syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLeadId, rowByLeadId)) {
+        synced++;
+      }
+    } catch (err) {
+      failed++;
+      Logger.log('syncRecentLeadsViewRows skipped LEADS_MAIN row ' + row + ': ' + err.message);
+    }
+  }
+
+  const result = {
+    startRow: startRow,
+    endRow: lastRow,
+    checked: checked,
+    synced: synced,
+    failed: failed,
+  };
+  Logger.log('syncRecentLeadsViewRows limit=' + rowLimit + ' startRow=' + startRow + ' endRow=' + lastRow + ' checked=' + checked + ' synced=' + synced + ' failed=' + failed);
+  return result;
+}
+
+function syncLeadsViewCursorBatch_(limit) {
+  const batchSize = Math.max(1, Number(limit) || LEADS_VIEW_SCHEDULED_BATCH_SIZE);
+  const properties = PropertiesService.getScriptProperties();
+  const ss = SpreadsheetApp.getActive();
+  const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
+  const leadsSheet = getOrCreateLeadsViewSheet_();
+  if (!leadMainSheet || leadMainSheet.getLastRow() < DATA_START_ROW) {
+    return {
+      checked: 0,
+      synced: 0,
+      failed: 0,
+      task_completed: true,
+    };
+  }
+
+  setLeadsViewHeaders_(leadsSheet);
+
+  const lastRow = leadMainSheet.getLastRow();
+  const savedCursor = Number(properties.getProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY));
+  const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
+    ? savedCursor
+    : Math.max(DATA_START_ROW, lastRow - batchSize + 1);
+  const endRow = Math.min(startRow + batchSize - 1, lastRow);
+  const manualByLeadId = getLeadsViewManualDataByLeadId_(leadsSheet);
+  const rowByLeadId = getLeadsViewRowMapByLeadId_(leadsSheet);
+  let checked = 0;
+  let synced = 0;
+  let failed = 0;
+
+  for (let row = startRow; row <= endRow; row++) {
+    checked++;
+    try {
+      if (syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLeadId, rowByLeadId)) {
+        synced++;
+      }
+    } catch (err) {
+      failed++;
+      Logger.log('syncLeadsViewCursorBatch skipped LEADS_MAIN row ' + row + ': ' + err.message);
+    }
+  }
+
+  const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
+  properties.setProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY, String(nextCursor));
+
+  const result = {
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    synced: synced,
+    failed: failed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
+  Logger.log('syncLeadsViewCursorBatch batch_size=' + batchSize + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' synced=' + synced + ' failed=' + failed + ' nextCursor=' + nextCursor);
+  return result;
+}
+
+function syncLeadsViewForLeadMainRow_(row) {
+  const ss = SpreadsheetApp.getActive();
+  const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
+  const leadsSheet = getOrCreateLeadsViewSheet_();
+  if (!leadMainSheet || row < DATA_START_ROW || row > leadMainSheet.getLastRow()) return false;
+
+  setLeadsViewHeaders_(leadsSheet);
+  const manualByLeadId = getLeadsViewManualDataByLeadId_(leadsSheet);
+  const rowByLeadId = getLeadsViewRowMapByLeadId_(leadsSheet);
+  return syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLeadId, rowByLeadId);
+}
+
+function syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLeadId, optionalRowByLeadId) {
+  const lead = getRowObject_(leadMainSheet, row);
+  const leadId = String(lead.lead_id || '').trim();
+  if (!leadId) return false;
+
+  const rowByLeadId = optionalRowByLeadId || getLeadsViewRowMapByLeadId_(leadsSheet);
+  const targetRow = getOrCreateLeadsViewRowByLeadId_(leadsSheet, leadId, rowByLeadId);
+  const manual = manualByLeadId[leadId] || {};
+  const object = sanitizeLeadsViewSyncObject_(buildLeadsViewObject_(lead, manual));
+  prepareLeadsViewRowForSync_(leadsSheet, targetRow);
+  setRowObjectValues_(leadsSheet, targetRow, object);
+  setupLeadsViewRowUi(targetRow, leadsSheet);
+  return true;
 }
 
 function setupLeadsViewRowUi(row, optionalSheet) {
@@ -264,6 +420,28 @@ function buildLeadsViewObject_(lead, manual) {
   };
 }
 
+function sanitizeLeadsViewSyncObject_(object) {
+  const sanitized = Object.assign({}, object);
+  const status = String(sanitized.lead_status || '').trim();
+  sanitized.lead_status = LEAD_MAIN_STATUS_VALUES.indexOf(status) !== -1 ? status : 'New';
+
+  const salesOwner = String(sanitized.sales_owner || '').trim();
+  const allowedSalesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
+  if (salesOwner && allowedSalesOwners.length && allowedSalesOwners.indexOf(salesOwner) === -1) {
+    Logger.log('LEADS sync skipped invalid Sales Owner: ' + salesOwner);
+    sanitized.sales_owner = '';
+  }
+
+  return sanitized;
+}
+
+function prepareLeadsViewRowForSync_(sheet, row) {
+  const headerMap = getHeaderMap_(sheet);
+  [headerMap.lead_status, headerMap.sales_owner].filter(Boolean).forEach(column => {
+    sheet.getRange(row, column).clearDataValidations();
+  });
+}
+
 function getLeadsViewManualDataByLeadId_(sheet) {
   const data = {};
   if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
@@ -292,20 +470,38 @@ function getLeadsViewManualDataByLeadId_(sheet) {
   return data;
 }
 
-function getOrCreateLeadsViewRowByLeadId_(sheet, leadId) {
+function getLeadsViewRowMapByLeadId_(sheet) {
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  if (!leadIdColumn) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, leadIdColumn, sheet.getLastRow() - DATA_START_ROW + 1, 1).getValues();
+  values.forEach((row, index) => {
+    const leadId = String(row[0] || '').trim();
+    if (leadId && !data[leadId]) data[leadId] = DATA_START_ROW + index;
+  });
+
+  return data;
+}
+
+function getOrCreateLeadsViewRowByLeadId_(sheet, leadId, optionalRowByLeadId) {
   const target = String(leadId || '').trim();
   const headerMap = getHeaderMap_(sheet);
   const leadIdColumn = headerMap.lead_id;
   if (!target || !leadIdColumn) return Math.max(sheet.getLastRow() + 1, DATA_START_ROW);
 
-  if (sheet.getLastRow() >= DATA_START_ROW) {
-    const values = sheet.getRange(DATA_START_ROW, leadIdColumn, sheet.getLastRow() - DATA_START_ROW + 1, 1).getValues();
-    for (let i = 0; i < values.length; i++) {
-      if (String(values[i][0] || '').trim() === target) return DATA_START_ROW + i;
-    }
+  const rowByLeadId = optionalRowByLeadId || getLeadsViewRowMapByLeadId_(sheet);
+  if (rowByLeadId[target]) return rowByLeadId[target];
+
+  const row = Math.max(sheet.getLastRow() + 1, DATA_START_ROW);
+  if (optionalRowByLeadId) {
+    optionalRowByLeadId[target] = row;
   }
 
-  return Math.max(sheet.getLastRow() + 1, DATA_START_ROW);
+  return row;
 }
 
 function ensureLeadsViewStatusDropdownForRow(row, optionalSheet) {
