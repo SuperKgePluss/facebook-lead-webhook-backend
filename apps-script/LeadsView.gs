@@ -47,6 +47,7 @@ function setupLeadsViewUi() {
   const sheet = getOrCreateLeadsViewSheet_();
   setLeadsViewHeaders_(sheet);
   setupLeadsViewExistingRowsUi_(sheet);
+  setupLeadsViewStatusConditionalFormatting_(sheet);
   resetLeadsViewRefreshCursor();
   Logger.log('setupLeadsViewUi completed lightweight setup. Run setupCrmUiBatch repeatedly to sync LEADS rows.');
 }
@@ -156,6 +157,7 @@ function repairLeadsViewFromLeadMain() {
     leadsSheet.getRange(DATA_START_ROW, 1, rebuiltRows.length, LEADS_VIEW_HEADERS.length).setValues(rebuiltRows);
     setupLeadsViewDataRangeUi_(leadsSheet, DATA_START_ROW, rebuiltRows.length);
   }
+  setupLeadsViewStatusConditionalFormatting_(leadsSheet);
   resetLeadsViewRefreshCursor();
   PropertiesService
     .getScriptProperties()
@@ -328,6 +330,9 @@ function setupLeadsViewRowUi(row, optionalSheet) {
   if (leadId) {
     const dateColumn = headerMap.facebook_created_time;
     if (dateColumn) sheet.getRange(row, dateColumn).setNumberFormat('[$-en-US]MM/dd/yyyy HH:mm');
+    [headerMap.phone, headerMap.additional_phone].filter(Boolean).forEach(column => {
+      sheet.getRange(row, column).setNumberFormat('@');
+    });
   }
 
   return changed;
@@ -354,7 +359,14 @@ function handleLeadsViewEdit_(e, sheet, row) {
     return;
   }
 
-  if (editedHeader === 'preferred_call_day' || editedHeader === 'preferred_call_time' || editedHeader === 'sales_owner') {
+  if (
+    editedHeader === 'customer_name'
+    || editedHeader === 'phone'
+    || editedHeader === 'additional_phone'
+    || editedHeader === 'preferred_call_day'
+    || editedHeader === 'preferred_call_time'
+    || editedHeader === 'sales_owner'
+  ) {
     syncLeadsViewEditableFieldToLeadMain_(sheet, row, editedHeader);
   }
 }
@@ -421,6 +433,7 @@ function handleLeadsViewLeadStatusEdit_(e, sheet, row) {
     lead_status: nextStatus,
   });
   createLeadStatusActivity_(SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN'), leadMain.row, oldStatus, nextStatus);
+  setupLeadsViewStatusConditionalFormatting_(sheet);
 }
 
 function syncLeadsViewEditableFieldToLeadMain_(sheet, row, fieldName) {
@@ -431,9 +444,33 @@ function syncLeadsViewEditableFieldToLeadMain_(sheet, row, fieldName) {
   const leadMain = getLeadMainObjectByLeadId_(leadId);
   if (!leadMain || !leadMain.row) return;
 
+  const leadMainSheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  const leadMainHeaderMap = getHeaderMap_(leadMainSheet);
+  const targetField = fieldName === 'additional_phone' && !leadMainHeaderMap.additional_phone
+    ? ''
+    : fieldName;
+  if (!targetField || !leadMainHeaderMap[targetField]) {
+    Logger.log('LEADS edit kept in LEADS only; LEADS_MAIN has no header for ' + fieldName);
+    return;
+  }
+
+  let value = lead[fieldName] || '';
+  if (fieldName === 'phone') {
+    const normalizedPhone = normalizePhone(value);
+    if (!normalizedPhone) {
+      Logger.log('LEADS phone edit skipped because phone is invalid for lead_id=' + leadId);
+      return;
+    }
+    value = normalizedPhone;
+    const phoneColumn = getHeaderMap_(sheet).phone;
+    if (phoneColumn) {
+      sheet.getRange(row, phoneColumn).setNumberFormat('@').setValue(String(normalizedPhone));
+    }
+  }
+
   const update = {};
-  update[fieldName] = lead[fieldName] || '';
-  setRowObjectValues_(SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN'), leadMain.row, update);
+  update[targetField] = value;
+  setRowObjectValues_(leadMainSheet, leadMain.row, update);
 }
 
 function writeLeadsViewAudioStatus_(sheet, row, message) {
@@ -667,6 +704,10 @@ function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount) {
   if (dateColumn) {
     sheet.getRange(startRow, dateColumn, rowCount, 1).setNumberFormat('[$-en-US]MM/dd/yyyy HH:mm');
   }
+
+  [headerMap.phone, headerMap.additional_phone].filter(Boolean).forEach(column => {
+    sheet.getRange(startRow, column, rowCount, 1).setNumberFormat('@');
+  });
 }
 
 function setupLeadsViewExistingRowsUi_(sheet) {
@@ -675,6 +716,40 @@ function setupLeadsViewExistingRowsUi_(sheet) {
   const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
   setupLeadsViewDataRangeUi_(sheet, DATA_START_ROW, rowCount);
   Logger.log('setupLeadsViewExistingRowsUi rows=' + rowCount);
+}
+
+function setupLeadsViewStatusConditionalFormatting_(optionalSheet) {
+  const sheet = optionalSheet || SpreadsheetApp.getActive().getSheetByName('LEADS');
+  if (!sheet) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  const statusColumn = headerMap.lead_status;
+  if (!statusColumn) return;
+
+  const lastRow = Math.max(sheet.getLastRow(), DATA_START_ROW);
+  const range = sheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, Math.min(sheet.getLastColumn(), LEADS_VIEW_HEADERS.length));
+  const statusColumnLetter = columnToLetter_(statusColumn);
+  const managedStatuses = ['Done', 'Cancelled'];
+  const managedFormulas = managedStatuses.map(status => '=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"');
+  const statusColors = {
+    Done: '#d9ead3',
+    Cancelled: '#f4cccc',
+  };
+
+  const existingRules = sheet.getConditionalFormatRules().filter(rule => {
+    const condition = rule.getBooleanCondition();
+    const values = condition ? condition.getCriteriaValues() : [];
+    return !values.some(value => managedFormulas.indexOf(String(value)) !== -1);
+  });
+
+  const statusRules = managedStatuses.map(status => SpreadsheetApp
+    .newConditionalFormatRule()
+    .whenFormulaSatisfied('=$' + statusColumnLetter + DATA_START_ROW + '="' + status + '"')
+    .setBackground(statusColors[status])
+    .setRanges([range])
+    .build());
+
+  sheet.setConditionalFormatRules(existingRules.concat(statusRules));
 }
 
 function prepareLeadsViewRowForSync_(sheet, row) {
