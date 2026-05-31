@@ -1,6 +1,9 @@
 // Activity log creation helpers for user-driven lead changes.
 const AUDIO_ROOT_FOLDER_ID = '1wXq0bgxy9mMmLALw2B7IOhty1X1EAew';
 const AUDIO_FILE_EXTENSION_PATTERN = /\.(mp3|m4a|wav|ogg|mp4)$/i;
+const LEAD_AUDIO_SYNC_CURSOR_KEY = 'LEAD_AUDIO_SYNC_NEXT_ROW';
+const LEAD_AUDIO_SYNC_SCHEDULED_BATCH_SIZE = 5;
+const LEAD_AUDIO_SYNC_MANUAL_BATCH_SIZE = 20;
 let FOLLOW_UP_AUDIO_LAST_ERROR_REASON = '';
 
 function createLeadStatusActivity_(leadSheet, row, oldValue, newValue) {
@@ -461,6 +464,522 @@ function createEmptyAudioMatchResult_() {
     matchStrategy: '',
     targetKey: '',
   };
+}
+
+function syncLeadAudioFilesNow() {
+  const result = syncLeadAudioFilesCursorBatch_(LEAD_AUDIO_SYNC_MANUAL_BATCH_SIZE);
+  SpreadsheetApp.getActive().toast('Audio sync checked=' + result.checked + ' appended=' + result.appended, 'Sync Audio Files', 5);
+  return result;
+}
+
+function syncLeadAudioFilesScheduled() {
+  return syncLeadAudioFilesCursorBatch_(LEAD_AUDIO_SYNC_SCHEDULED_BATCH_SIZE);
+}
+
+function installLeadAudioSyncTrigger() {
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'syncLeadAudioFilesScheduled') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp
+    .newTrigger('syncLeadAudioFilesScheduled')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+}
+
+function resetLeadAudioSyncCursor() {
+  PropertiesService
+    .getScriptProperties()
+    .setProperty(LEAD_AUDIO_SYNC_CURSOR_KEY, String(DATA_START_ROW));
+  Logger.log('Lead audio sync cursor reset to ' + DATA_START_ROW);
+}
+
+function debugAudioSyncForPhone(phone) {
+  const targetPhone = normalizeAudioPhoneKey_(phone);
+  const ss = SpreadsheetApp.getActive();
+  const leadSheet = ss.getSheetByName('LEADS_MAIN');
+  const activitySheet = ss.getSheetByName('ACTIVITY_LOG');
+  const properties = PropertiesService.getScriptProperties();
+  const cursorValue = properties.getProperty(LEAD_AUDIO_SYNC_CURSOR_KEY) || '';
+  const result = {
+    input_phone: String(phone || ''),
+    normalized_phone: targetPhone,
+    cursor_key: LEAD_AUDIO_SYNC_CURSOR_KEY,
+    cursor_value: cursorValue,
+    lead_rows: [],
+    duplicate_phone: false,
+    current_batch: null,
+    current_batch_includes_phone: false,
+    parser_example: parseAudioFileName_(targetPhone ? targetPhone + '_20260509_21_55.mp3' : ''),
+    drive_match: null,
+    existing_activity_matches: [],
+  };
+
+  if (!targetPhone || !leadSheet || leadSheet.getLastRow() < DATA_START_ROW) {
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+
+  const headerMap = getHeaderMap_(leadSheet);
+  if (!headerMap.lead_id || !headerMap.phone) {
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+
+  const lastRow = leadSheet.getLastRow();
+  const savedCursor = Number(cursorValue);
+  const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
+    ? savedCursor
+    : Math.max(DATA_START_ROW, lastRow - LEAD_AUDIO_SYNC_MANUAL_BATCH_SIZE + 1);
+  const endRow = Math.min(startRow + LEAD_AUDIO_SYNC_MANUAL_BATCH_SIZE - 1, lastRow);
+  result.current_batch = {
+    startRow: startRow,
+    endRow: endRow,
+    batch_size: LEAD_AUDIO_SYNC_MANUAL_BATCH_SIZE,
+  };
+
+  const values = leadSheet.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, leadSheet.getLastColumn()).getValues();
+  values.forEach((row, index) => {
+    const normalizedRowPhone = normalizeAudioPhoneKey_(row[headerMap.phone - 1]);
+    if (normalizedRowPhone !== targetPhone) return;
+
+    const rowNumber = DATA_START_ROW + index;
+    result.lead_rows.push({
+      row: rowNumber,
+      lead_id: String(row[headerMap.lead_id - 1] || '').trim(),
+      phone: String(row[headerMap.phone - 1] || '').trim(),
+      normalized_phone: normalizedRowPhone,
+    });
+    if (rowNumber >= startRow && rowNumber <= endRow) {
+      result.current_batch_includes_phone = true;
+    }
+  });
+  result.duplicate_phone = result.lead_rows.length > 1;
+
+  const driveMatch = findLeadAudioFilesByKey_(targetPhone, 'phone');
+  result.drive_match = {
+    errorReason: driveMatch.errorReason || '',
+    match_count: driveMatch.matches.length,
+    folders_scanned: driveMatch.foldersScanned || 0,
+    files_scanned: driveMatch.filesScanned || 0,
+    files: driveMatch.matches.slice(0, 10).map(match => ({
+      file_name: match.fileName,
+      file_url: match.file.getUrl(),
+      parsed_timestamp: match.parsedTimestamp,
+    })),
+  };
+
+  if (activitySheet && activitySheet.getLastRow() >= DATA_START_ROW) {
+    const activityMap = getHeaderMap_(activitySheet);
+    if (activityMap.audio_file_name || activityMap.audio_url) {
+      const activityValues = activitySheet.getRange(DATA_START_ROW, 1, activitySheet.getLastRow() - DATA_START_ROW + 1, activitySheet.getLastColumn()).getValues();
+      activityValues.forEach((row, index) => {
+        const fileName = activityMap.audio_file_name ? String(row[activityMap.audio_file_name - 1] || '') : '';
+        const audioUrl = activityMap.audio_url ? String(row[activityMap.audio_url - 1] || '') : '';
+        if (fileName.indexOf(targetPhone + '_') !== 0 && !audioUrl) return;
+        if (fileName.indexOf(targetPhone + '_') !== 0) return;
+
+        result.existing_activity_matches.push({
+          row: DATA_START_ROW + index,
+          lead_id: activityMap.lead_id ? String(row[activityMap.lead_id - 1] || '').trim() : '',
+          audio_file_name: fileName,
+          audio_url: audioUrl,
+        });
+      });
+    }
+  }
+
+  Logger.log(JSON.stringify(result));
+  return result;
+}
+
+function syncLeadAudioFilesForPhone_(phone) {
+  const targetPhone = normalizeAudioPhoneKey_(phone);
+  const result = {
+    phone: String(phone || ''),
+    normalized_phone: targetPhone,
+    matched_lead_id: '',
+    status: '',
+    matched_files: 0,
+    appended: 0,
+    duplicates: 0,
+    latest_audio_url: '',
+  };
+
+  if (!targetPhone) {
+    result.status = 'invalid_phone';
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+
+  const phoneMap = getLeadMainPhoneMatchMap_();
+  const phoneRecord = phoneMap[targetPhone];
+  if (!phoneRecord) {
+    result.status = 'no_match';
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+  if (phoneRecord.ambiguous) {
+    result.status = 'ambiguous_phone';
+    result.matched_lead_ids = phoneRecord.leadIds || [];
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+
+  const matchResult = findLeadAudioFilesByKey_(targetPhone, 'phone');
+  if (!matchResult.matches.length) {
+    result.status = matchResult.errorReason || 'no_file_found';
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+
+  const safeMatches = matchResult.matches.filter(match => {
+    const parsed = parseAudioFileName_(match.fileName);
+    const filenamePhone = parsed ? normalizeAudioPhoneKey_(parsed.key) : '';
+    return filenamePhone === targetPhone;
+  });
+  if (!safeMatches.length) {
+    result.status = 'no_exact_phone_file_match';
+    Logger.log(JSON.stringify(result));
+    return result;
+  }
+
+  const existingByLeadId = getExistingAudioActivityUrlsByLeadId_([phoneRecord.leadId]);
+  const existingUrls = existingByLeadId[phoneRecord.leadId] || {};
+  safeMatches.slice().reverse().forEach((match, index) => {
+    const fileUrl = match.file.getUrl();
+    if (existingUrls[fileUrl]) {
+      result.duplicates++;
+      return;
+    }
+
+    appendObjectRow_('ACTIVITY_LOG', {
+      activity_id: 'ACT-' + Date.now() + '-target-audio-' + index,
+      lead_id: phoneRecord.leadId,
+      sheet_name: 'LEADS',
+      action_type: 'Audio Sync',
+      note: 'Audio synced from Google Drive. Filename timestamp: ' + (match.parsedTimestamp || ''),
+      audio_url: fileUrl,
+      audio_file_name: match.fileName,
+      created_by: 'Audio Sync',
+      created_at: new Date(),
+    });
+    existingUrls[fileUrl] = true;
+    result.appended++;
+  });
+
+  result.status = 'ok';
+  result.matched_lead_id = phoneRecord.leadId;
+  result.matched_files = safeMatches.length;
+  result.latest_audio_url = safeMatches[0].file.getUrl();
+  updateLeadsLatestAudioLinkOnly_(phoneRecord.leadId, result.latest_audio_url);
+  Logger.log(JSON.stringify(result));
+  return result;
+}
+
+function syncLeadAudioFilesCursorBatch_(limit) {
+  const batchSize = Math.max(1, Number(limit) || LEAD_AUDIO_SYNC_SCHEDULED_BATCH_SIZE);
+  const ss = SpreadsheetApp.getActive();
+  const leadSheet = ss.getSheetByName('LEADS_MAIN');
+  if (!leadSheet || leadSheet.getLastRow() < DATA_START_ROW) {
+    return {
+      checked: 0,
+      matched: 0,
+      appended: 0,
+      duplicates: 0,
+      failed: 0,
+      task_completed: true,
+    };
+  }
+
+  const properties = PropertiesService.getScriptProperties();
+  const lastRow = leadSheet.getLastRow();
+  const savedCursor = Number(properties.getProperty(LEAD_AUDIO_SYNC_CURSOR_KEY));
+  const startRow = Number.isFinite(savedCursor) && savedCursor >= DATA_START_ROW && savedCursor <= lastRow
+    ? savedCursor
+    : Math.max(DATA_START_ROW, lastRow - batchSize + 1);
+  const endRow = Math.min(startRow + batchSize - 1, lastRow);
+  const leadRows = [];
+
+  for (let row = startRow; row <= endRow; row++) {
+    const lead = getRowObject_(leadSheet, row);
+    const leadId = String(lead.lead_id || '').trim();
+    if (leadId) {
+      leadRows.push({
+        row: row,
+        lead: lead,
+        leadId: leadId,
+      });
+    }
+  }
+
+  const phoneMatchMap = getLeadMainPhoneMatchMap_();
+  const existingAudioByLeadId = getExistingAudioActivityUrlsByLeadId_(leadRows.map(item => item.leadId));
+  let checked = 0;
+  let matched = 0;
+  let appended = 0;
+  let duplicates = 0;
+  let skippedNoMatch = 0;
+  let skippedAmbiguous = 0;
+  let failed = 0;
+
+  leadRows.forEach(item => {
+    checked++;
+    try {
+      const leadPhone = normalizeAudioPhoneKey_(item.lead.phone);
+      const matchResult = findLeadAudioFilesByKey_(leadPhone, 'phone');
+      if (!matchResult.matches.length) {
+        skippedNoMatch++;
+        return;
+      }
+
+      const safeMatches = [];
+      matchResult.matches.forEach(match => {
+        const parsed = parseAudioFileName_(match.fileName);
+        const filenamePhone = parsed ? normalizeAudioPhoneKey_(parsed.key) : '';
+        const phoneRecord = filenamePhone ? phoneMatchMap[filenamePhone] : null;
+
+        if (!phoneRecord) {
+          skippedNoMatch++;
+          Logger.log('Audio sync skipped no_match filename=' + match.fileName + ' parsed_phone=' + filenamePhone);
+          return;
+        }
+
+        if (phoneRecord.ambiguous) {
+          skippedAmbiguous++;
+          Logger.log('Audio sync skipped ambiguous_phone filename=' + match.fileName + ' parsed_phone=' + filenamePhone);
+          return;
+        }
+
+        if (phoneRecord.leadId !== item.leadId || filenamePhone !== leadPhone) {
+          skippedNoMatch++;
+          Logger.log('Audio sync skipped cursor_mismatch filename=' + match.fileName + ' parsed_phone=' + filenamePhone + ' matched_lead_id=' + phoneRecord.leadId + ' cursor_lead_id=' + item.leadId);
+          return;
+        }
+
+        Logger.log('Audio sync matched filename=' + match.fileName + ' parsed_phone=' + filenamePhone + ' matched_lead_id=' + phoneRecord.leadId + ' matched_lead_phone=' + phoneRecord.phone + ' strategy=phone');
+        safeMatches.push(match);
+      });
+
+      if (!safeMatches.length) return;
+
+      matched++;
+      const existingUrls = existingAudioByLeadId[item.leadId] || {};
+      const matchesOldestFirst = safeMatches.slice().reverse();
+      matchesOldestFirst.forEach((match, index) => {
+        const fileUrl = match.file.getUrl();
+        if (existingUrls[fileUrl]) {
+          duplicates++;
+          return;
+        }
+
+        appendObjectRow_('ACTIVITY_LOG', {
+          activity_id: 'ACT-' + Date.now() + '-' + item.row + '-' + index,
+          lead_id: item.leadId,
+          sheet_name: 'LEADS',
+          action_type: 'Audio Sync',
+          note: 'Audio synced from Google Drive. Filename timestamp: ' + (match.parsedTimestamp || ''),
+          audio_url: fileUrl,
+          audio_file_name: match.fileName,
+          created_by: 'Audio Sync',
+          created_at: new Date(),
+        });
+        existingUrls[fileUrl] = true;
+        appended++;
+      });
+
+      existingAudioByLeadId[item.leadId] = existingUrls;
+      updateLeadsLatestAudioLinkOnly_(item.leadId, matchResult.matches[0].file.getUrl());
+    } catch (err) {
+      failed++;
+      Logger.log('syncLeadAudioFiles skipped LEADS_MAIN row ' + item.row + ': ' + err.message);
+    }
+  });
+
+  const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
+  properties.setProperty(LEAD_AUDIO_SYNC_CURSOR_KEY, String(nextCursor));
+
+  const result = {
+    batch_size: batchSize,
+    startRow: startRow,
+    endRow: endRow,
+    nextCursor: nextCursor,
+    checked: checked,
+    matched: matched,
+    appended: appended,
+    duplicates: duplicates,
+    skipped_no_match: skippedNoMatch,
+    skipped_ambiguous_phone: skippedAmbiguous,
+    failed: failed,
+    task_completed: nextCursor === DATA_START_ROW,
+  };
+  Logger.log('syncLeadAudioFilesCursorBatch ' + JSON.stringify(result));
+  return result;
+}
+
+function findLeadAudioFilesByPhoneOrName_(leadContext) {
+  const lead = leadContext || {};
+  const phoneKey = normalizeAudioPhoneKey_(lead.phone);
+  const phoneResult = findLeadAudioFilesByKey_(phoneKey, 'phone');
+  if (phoneResult.matches.length || phoneResult.errorReason === 'folder_access' || phoneResult.errorReason === 'missing_root_folder') {
+    return phoneResult;
+  }
+
+  const nameKeys = getAudioNameKeys_(lead);
+  for (const nameKey of nameKeys) {
+    if (isAudioNameAmbiguous_(nameKey, lead.lead_id)) {
+      Logger.log('Audio sync name fallback skipped because customer name is ambiguous: ' + nameKey);
+      continue;
+    }
+
+    const nameResult = findLeadAudioFilesByKey_(nameKey, 'customer_name');
+    if (nameResult.matches.length || nameResult.errorReason === 'folder_access' || nameResult.errorReason === 'missing_root_folder') {
+      return nameResult;
+    }
+  }
+
+  return {
+    matches: [],
+    errorReason: phoneKey || nameKeys.length ? 'not_found' : 'missing_audio_match_key',
+    matchStrategy: '',
+  };
+}
+
+function findLeadAudioFilesByKey_(targetKey, matchStrategy) {
+  const normalizedTarget = matchStrategy === 'phone'
+    ? normalizeAudioPhoneKey_(targetKey)
+    : normalizeAudioNameKey_(targetKey);
+  const result = {
+    matches: [],
+    errorReason: '',
+    matchStrategy: matchStrategy,
+    targetKey: normalizedTarget,
+    foldersScanned: 0,
+    filesScanned: 0,
+  };
+
+  if (!normalizedTarget) {
+    result.errorReason = 'missing_audio_match_key';
+    return result;
+  }
+
+  if (!AUDIO_ROOT_FOLDER_ID || String(AUDIO_ROOT_FOLDER_ID).indexOf('PASTE_') === 0 || String(AUDIO_ROOT_FOLDER_ID).indexOf('PUT_') === 0) {
+    result.errorReason = 'missing_root_folder';
+    return result;
+  }
+
+  let rootFolder;
+  try {
+    rootFolder = DriveApp.getFolderById(AUDIO_ROOT_FOLDER_ID);
+  } catch (err) {
+    result.errorReason = 'folder_access';
+    Logger.log('Audio sync skipped: cannot open audio folder. ' + err.message);
+    return result;
+  }
+
+  const scanState = {
+    foldersScanned: 0,
+    filesScanned: 0,
+    folderLimitExceeded: false,
+    fileLimitExceeded: false,
+  };
+  result.matches = findAudioMatchesInFolder_(rootFolder, normalizedTarget, matchStrategy, scanState, 50, 500);
+  result.foldersScanned = scanState.foldersScanned;
+  result.filesScanned = scanState.filesScanned;
+  result.folderLimitExceeded = scanState.folderLimitExceeded;
+  result.fileLimitExceeded = scanState.fileLimitExceeded;
+
+  result.matches.sort((a, b) => {
+    if (a.timestampKey !== b.timestampKey) return a.timestampKey < b.timestampKey ? 1 : -1;
+    if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+    const aStable = a.file.getId() + '|' + a.fileName;
+    const bStable = b.file.getId() + '|' + b.fileName;
+    return aStable.localeCompare(bStable);
+  });
+
+  result.errorReason = result.matches.length ? '' : 'not_found';
+  return result;
+}
+
+function getExistingAudioActivityUrlsByLeadId_(leadIds) {
+  const idSet = leadIds.reduce((map, leadId) => {
+    const key = String(leadId || '').trim();
+    if (key) map[key] = true;
+    return map;
+  }, {});
+  const data = {};
+  const sheet = SpreadsheetApp.getActive().getSheetByName('ACTIVITY_LOG');
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW || !Object.keys(idSet).length) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.audio_url) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+  values.forEach(row => {
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const audioUrl = String(row[headerMap.audio_url - 1] || '').trim();
+    if (!idSet[leadId] || !audioUrl) return;
+
+    data[leadId] = data[leadId] || {};
+    data[leadId][audioUrl] = true;
+  });
+
+  return data;
+}
+
+function getLeadMainPhoneMatchMap_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN');
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.phone) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+  values.forEach((row, index) => {
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const normalizedPhone = normalizeAudioPhoneKey_(row[headerMap.phone - 1]);
+    if (!leadId || !normalizedPhone) return;
+
+    if (!data[normalizedPhone]) {
+      data[normalizedPhone] = {
+        leadId: leadId,
+        phone: String(row[headerMap.phone - 1] || '').trim(),
+        row: DATA_START_ROW + index,
+        ambiguous: false,
+        leadIds: [leadId],
+      };
+      return;
+    }
+
+    if (data[normalizedPhone].leadIds.indexOf(leadId) === -1) {
+      data[normalizedPhone].ambiguous = true;
+      data[normalizedPhone].leadIds.push(leadId);
+    }
+  });
+
+  return data;
+}
+
+function updateLeadsLatestAudioLinkOnly_(leadId, audioUrl) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS');
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return false;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.latest_audio_link) return false;
+
+  const rows = sheet.getRange(DATA_START_ROW, headerMap.lead_id, sheet.getLastRow() - DATA_START_ROW + 1, 1).getValues();
+  for (let index = 0; index < rows.length; index++) {
+    if (String(rows[index][0] || '').trim() !== String(leadId || '').trim()) continue;
+
+    sheet.getRange(DATA_START_ROW + index, headerMap.latest_audio_link).setValue(audioUrl || '');
+    return true;
+  }
+
+  return false;
 }
 
 function debugFollowUpForActiveRow() {

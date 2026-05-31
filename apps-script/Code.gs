@@ -95,6 +95,7 @@ function onOpen(e) {
     .addItem('Add Manual Lead', 'createManualLead')
     .addItem('Sync LEADS View', 'syncLeadsViewNow')
     .addItem('Repair LEADS View', 'repairLeadsViewFromLeadMain')
+    .addItem('Sync Audio Files', 'syncLeadAudioFilesNow')
     .addToUi();
 }
 

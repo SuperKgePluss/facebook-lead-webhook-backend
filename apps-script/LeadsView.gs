@@ -14,8 +14,7 @@ const LEADS_VIEW_HEADERS = [
   'Preferred Call Time',
   'Sales Owner',
   'Follow-up Count',
-  'Fetch Audio',
-  'Audio Save Status',
+  'Latest Audio Link',
   'Facebook Search Name',
   'Open Detail',
 ];
@@ -30,16 +29,14 @@ const LEADS_VIEW_THAI_LABELS = [
   'เวลาที่สะดวกให้โทร',
   'ผู้รับผิดชอบ',
   'จำนวนติดตาม',
-  'ดึงไฟล์เสียง',
-  'สถานะไฟล์เสียง',
+  'ลิงก์ไฟล์เสียงล่าสุด',
   'ชื่อไว้ค้นหา Facebook',
   'เปิดรายละเอียด',
 ];
 const LEADS_VIEW_MANUAL_FIELDS = {
   additional_phone: true,
   follow_up_count: true,
-  fetch_audio: true,
-  audio_save_status: true,
+  latest_audio_link: true,
   open_detail: true,
 };
 
@@ -130,6 +127,7 @@ function repairLeadsViewFromLeadMain() {
 
   const safeManualByLeadId = getSafeLeadsViewManualDataByLeadId_(leadsSheet);
   const detailFacebookTimeByLeadId = getLeadDetailsFacebookCreatedTimeByLeadId_();
+  const latestAudioUrlByLeadId = getLatestActivityAudioUrlByLeadId_();
   const leadRows = leadMainSheet
     .getRange(DATA_START_ROW, 1, leadMainSheet.getLastRow() - DATA_START_ROW + 1, leadMainSheet.getLastColumn())
     .getValues();
@@ -146,6 +144,9 @@ function repairLeadsViewFromLeadMain() {
     if (!leadId) return;
 
     const manual = safeManualByLeadId[leadId] || {};
+    if (!manual.latest_audio_link && latestAudioUrlByLeadId[leadId]) {
+      manual.latest_audio_link = latestAudioUrlByLeadId[leadId];
+    }
     const facebookCreatedTime = resolveLeadsViewFacebookCreatedTime_(lead, detailFacebookTimeByLeadId[leadId]);
     const object = sanitizeLeadsViewSyncObject_(buildLeadsViewObject_(Object.assign({}, lead, {
       facebook_created_time: facebookCreatedTime,
@@ -353,11 +354,6 @@ function handleLeadsViewEdit_(e, sheet, row) {
     return;
   }
 
-  if (editedHeader === 'fetch_audio') {
-    handleLeadsViewFetchAudioEdit_(e, sheet, row);
-    return;
-  }
-
   if (editedHeader === 'lead_status') {
     handleLeadsViewLeadStatusEdit_(e, sheet, row);
     return;
@@ -386,41 +382,6 @@ function handleLeadsViewOpenDetailEdit_(e, sheet, row) {
   if (!leadId || !navigateToLatestMatch_('LEADS_MAIN', 'lead_id', leadId)) {
     SpreadsheetApp.getActive().toast('à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸²à¸¢à¸¥à¸°à¹€à¸­à¸µà¸¢à¸”à¸¥à¸¹à¸à¸„à¹‰à¸²', 'Open Detail', 5);
   }
-}
-
-function handleLeadsViewFetchAudioEdit_(e, sheet, row) {
-  if (String(e.value || '').toUpperCase() !== 'TRUE') return;
-
-  const headerMap = getHeaderMap_(sheet);
-  const fetchAudioColumn = headerMap.fetch_audio;
-  if (fetchAudioColumn) sheet.getRange(row, fetchAudioColumn).setValue(false);
-
-  const lead = getRowObject_(sheet, row);
-  const leadId = String(lead.lead_id || '').trim();
-  if (!leadId) {
-    writeLeadsViewAudioStatus_(sheet, row, 'à¹„à¸¡à¹ˆà¸žà¸šà¸£à¸«à¸±à¸ªà¸¥à¸¹à¸à¸„à¹‰à¸²');
-    return;
-  }
-
-  const audioMatch = findLatestLeadAudioFileByPhoneOrName_(lead);
-  if (!audioMatch.file) {
-    writeLeadsViewAudioStatus_(sheet, row, 'à¹„à¸¡à¹ˆà¸žà¸šà¹„à¸Ÿà¸¥à¹Œà¹€à¸ªà¸µà¸¢à¸‡à¸•à¸²à¸¡à¸£à¸¹à¸›à¹à¸šà¸šà¸—à¸µà¹ˆà¸à¸³à¸«à¸™à¸”');
-    return;
-  }
-
-  appendObjectRow_('ACTIVITY_LOG', {
-    activity_id: 'ACT-' + Date.now(),
-    lead_id: leadId,
-    sheet_name: 'LEADS',
-    action_type: 'Fetch Audio',
-    note: 'Audio fetched from LEADS tab',
-    audio_url: audioMatch.fileUrl,
-    audio_file_name: audioMatch.fileName,
-    created_by: Session.getActiveUser().getEmail() || 'Sheet user',
-    created_at: new Date(),
-  });
-
-  writeLeadsViewAudioStatus_(sheet, row, 'à¸šà¸±à¸™à¸—à¸¶à¸à¹„à¸Ÿà¸¥à¹Œà¹€à¸ªà¸µà¸¢à¸‡à¹à¸¥à¹‰à¸§: ' + audioMatch.fileName);
 }
 
 function handleLeadsViewLeadStatusEdit_(e, sheet, row) {
@@ -477,12 +438,6 @@ function syncLeadsViewEditableFieldToLeadMain_(sheet, row, fieldName) {
   setRowObjectValues_(leadMainSheet, leadMain.row, update);
 }
 
-function writeLeadsViewAudioStatus_(sheet, row, message) {
-  setRowObjectValues_(sheet, row, {
-    audio_save_status: message,
-  });
-}
-
 function getOrCreateLeadsViewSheet_() {
   const ss = SpreadsheetApp.getActive();
   return ss.getSheetByName('LEADS') || ss.insertSheet('LEADS');
@@ -504,6 +459,29 @@ function writeLeadsViewHeadersOnly_(sheet) {
   }
   sheet.getRange(HEADER_ROW, 1, 1, LEADS_VIEW_HEADERS.length).setValues([LEADS_VIEW_HEADERS]);
   sheet.getRange(HEADER_ROW + 1, 1, 1, LEADS_VIEW_THAI_LABELS.length).setValues([LEADS_VIEW_THAI_LABELS]);
+  clearStaleLeadsViewExtraColumns_(sheet);
+}
+
+function clearStaleLeadsViewExtraColumns_(sheet) {
+  if (!sheet || sheet.getLastColumn() <= LEADS_VIEW_HEADERS.length) return;
+
+  const staleHeaders = {
+    fetch_audio: true,
+    audio_save_status: true,
+    open_detail: true,
+    facebook_search_name: true,
+  };
+  const extraColumnCount = sheet.getLastColumn() - LEADS_VIEW_HEADERS.length;
+  const headers = sheet.getRange(HEADER_ROW, LEADS_VIEW_HEADERS.length + 1, 1, extraColumnCount).getValues()[0];
+
+  headers.forEach((header, index) => {
+    const normalized = normalizeHeaderName_(header);
+    if (!staleHeaders[normalized]) return;
+
+    const column = LEADS_VIEW_HEADERS.length + index + 1;
+    const rowCount = Math.max(sheet.getLastRow(), DATA_START_ROW) - HEADER_ROW + 1;
+    sheet.getRange(HEADER_ROW, column, rowCount, 1).clearContent().clearDataValidations();
+  });
 }
 
 function isLeadsViewHeaderOrderCurrent_(sheet) {
@@ -563,8 +541,7 @@ function buildLeadsViewObject_(lead, manual) {
     preferred_call_time: manual.preferred_call_time || lead.preferred_call_time || '',
     sales_owner: manual.sales_owner || lead.sales_owner || '',
     follow_up_count: manual.follow_up_count || '',
-    fetch_audio: false,
-    audio_save_status: manual.audio_save_status || '',
+    latest_audio_link: manual.latest_audio_link || lead.latest_audio_link || '',
     facebook_search_name: customerName,
     open_detail: false,
   };
@@ -609,8 +586,8 @@ function getSafeLeadsViewManualDataByLeadId_(sheet) {
     const followUpCount = getLeadsViewRowValue_(row, headerMap, 'follow_up_count');
     if (isSafeFollowUpCount_(followUpCount)) manual.follow_up_count = followUpCount;
 
-    const audioSaveStatus = getLeadsViewRowValue_(row, headerMap, 'audio_save_status');
-    if (String(audioSaveStatus || '').trim()) manual.audio_save_status = audioSaveStatus;
+    const latestAudioLink = getLeadsViewRowValue_(row, headerMap, 'latest_audio_link');
+    if (String(latestAudioLink || '').trim()) manual.latest_audio_link = latestAudioLink;
 
     const salesOwner = String(getLeadsViewRowValue_(row, headerMap, 'sales_owner') || '').trim();
     if (salesOwner && allowedSalesOwners.indexOf(salesOwner) !== -1) manual.sales_owner = salesOwner;
@@ -629,6 +606,36 @@ function getSafeLeadsViewManualDataByLeadId_(sheet) {
   });
 
   return data;
+}
+
+function getLatestActivityAudioUrlByLeadId_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('ACTIVITY_LOG');
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.audio_url) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+  values.forEach((row, index) => {
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const audioUrl = String(row[headerMap.audio_url - 1] || '').trim();
+    if (!leadId || !audioUrl) return;
+
+    const createdAt = headerMap.created_at ? parseLeadsViewDateTime_(row[headerMap.created_at - 1]) : null;
+    const sortKey = createdAt ? createdAt.getTime() : DATA_START_ROW + index;
+    if (!data[leadId] || data[leadId].sortKey <= sortKey) {
+      data[leadId] = {
+        url: audioUrl,
+        sortKey: sortKey,
+      };
+    }
+  });
+
+  return Object.keys(data).reduce((result, leadId) => {
+    result[leadId] = data[leadId].url;
+    return result;
+  }, {});
 }
 
 function getLeadsViewRowValue_(row, headerMap, header) {
@@ -703,7 +710,7 @@ function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount, options) {
   applyLeadsViewOptionalDropdown_(sheet, headerMap.preferred_call_day, startRow, rowCount, ['Preferred Call Day', 'Preferred Call Days', 'preferred_call_day']);
   applyLeadsViewOptionalDropdown_(sheet, headerMap.preferred_call_time, startRow, rowCount, ['Preferred Call Time', 'Preferred Call Times', 'preferred_call_time']);
 
-  [headerMap.fetch_audio, headerMap.open_detail].filter(Boolean).forEach(column => {
+  [headerMap.open_detail].filter(Boolean).forEach(column => {
     sheet.getRange(startRow, column, rowCount, 1).insertCheckboxes();
   });
 
@@ -934,7 +941,7 @@ function ensureLeadsViewCheckboxesForRow(row, optionalSheet) {
   const headerMap = getHeaderMap_(sheet);
   const leadIdColumn = headerMap.lead_id;
   const leadId = leadIdColumn ? String(sheet.getRange(row, leadIdColumn).getValue() || '').trim() : '';
-  const columns = [headerMap.fetch_audio, headerMap.open_detail].filter(Boolean);
+  const columns = [headerMap.open_detail].filter(Boolean);
   let changed = false;
 
   columns.forEach(column => {
