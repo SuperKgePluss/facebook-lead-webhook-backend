@@ -668,6 +668,10 @@ function syncLeadAudioFilesForPhone_(phone) {
       created_at: new Date(),
     });
     existingUrls[fileUrl] = true;
+    appendLeadMemoToLeadsView_(phoneRecord.leadId, match.fileName + ' - ' + fileUrl, {
+      type: 'Audio',
+      timestamp: parseActivityLogDate_(match.parsedTimestamp) || new Date(),
+    });
     result.appended++;
   });
 
@@ -788,6 +792,10 @@ function syncLeadAudioFilesCursorBatch_(limit) {
           created_at: new Date(),
         });
         existingUrls[fileUrl] = true;
+        appendLeadMemoToLeadsView_(item.leadId, match.fileName + ' - ' + fileUrl, {
+          type: 'Audio',
+          timestamp: parseActivityLogDate_(match.parsedTimestamp) || new Date(),
+        });
         appended++;
       });
 
@@ -980,6 +988,175 @@ function updateLeadsLatestAudioLinkOnly_(leadId, audioUrl) {
   }
 
   return false;
+}
+
+function repairLeadsLatestAudioLinksFromActivityLog() {
+  const ss = SpreadsheetApp.getActive();
+  const leadsSheet = ss.getSheetByName('LEADS');
+  if (!leadsSheet || leadsSheet.getLastRow() < DATA_START_ROW) {
+    return {
+      checked: 0,
+      updated: 0,
+      cleared: 0,
+    };
+  }
+
+  const headerMap = getHeaderMap_(leadsSheet);
+  if (!headerMap.lead_id || !headerMap.latest_audio_link) {
+    return {
+      checked: 0,
+      updated: 0,
+      cleared: 0,
+      error: 'missing_leads_headers',
+    };
+  }
+
+  const rowCount = leadsSheet.getLastRow() - DATA_START_ROW + 1;
+  const linkRange = leadsSheet.getRange(DATA_START_ROW, headerMap.latest_audio_link, rowCount, 1);
+  linkRange.clearContent();
+
+  const latestAudioByLeadId = getLatestAudioActivityByLeadId_();
+  const leadIds = leadsSheet.getRange(DATA_START_ROW, headerMap.lead_id, rowCount, 1).getValues();
+  let updated = 0;
+
+  leadIds.forEach((row, index) => {
+    const leadId = String(row[0] || '').trim();
+    const latest = latestAudioByLeadId[leadId];
+    if (!leadId || !latest || !latest.audioUrl) return;
+
+    leadsSheet.getRange(DATA_START_ROW + index, headerMap.latest_audio_link).setValue(latest.audioUrl);
+    updated++;
+  });
+
+  const result = {
+    checked: rowCount,
+    updated: updated,
+    cleared: rowCount,
+  };
+  Logger.log('repairLeadsLatestAudioLinksFromActivityLog ' + JSON.stringify(result));
+  return result;
+}
+
+function cleanupAudioSyncTestFile() {
+  return cleanupAudioSyncByFileName('0987899159_20260509_21_55.mp3');
+}
+
+function cleanupAudioSyncByFileName(fileName) {
+  const targetFileName = String(fileName || '').trim();
+  const sheet = SpreadsheetApp.getActive().getSheetByName('ACTIVITY_LOG');
+  const result = {
+    file_name: targetFileName,
+    deleted_rows: 0,
+    matched_rows: [],
+  };
+  if (!targetFileName || !sheet || sheet.getLastRow() < DATA_START_ROW) {
+    Logger.log('cleanupAudioSyncByFileName ' + JSON.stringify(result));
+    return result;
+  }
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.audio_file_name) {
+    result.error = 'missing_audio_file_name_header';
+    Logger.log('cleanupAudioSyncByFileName ' + JSON.stringify(result));
+    return result;
+  }
+
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
+  const rowsToDelete = [];
+  const urlsFromMatchedFile = {};
+
+  values.forEach((row, index) => {
+    const currentFileName = String(row[headerMap.audio_file_name - 1] || '').trim();
+    if (currentFileName !== targetFileName) return;
+
+    const rowNumber = DATA_START_ROW + index;
+    rowsToDelete.push(rowNumber);
+    if (headerMap.audio_url) {
+      const audioUrl = String(row[headerMap.audio_url - 1] || '').trim();
+      if (audioUrl) urlsFromMatchedFile[audioUrl] = true;
+    }
+    result.matched_rows.push({
+      row: rowNumber,
+      lead_id: headerMap.lead_id ? String(row[headerMap.lead_id - 1] || '').trim() : '',
+      audio_url: headerMap.audio_url ? String(row[headerMap.audio_url - 1] || '').trim() : '',
+    });
+  });
+
+  if (headerMap.audio_url && Object.keys(urlsFromMatchedFile).length) {
+    values.forEach((row, index) => {
+      const rowNumber = DATA_START_ROW + index;
+      if (rowsToDelete.indexOf(rowNumber) !== -1) return;
+
+      const audioUrl = String(row[headerMap.audio_url - 1] || '').trim();
+      if (!urlsFromMatchedFile[audioUrl]) return;
+
+      rowsToDelete.push(rowNumber);
+      result.matched_rows.push({
+        row: rowNumber,
+        lead_id: headerMap.lead_id ? String(row[headerMap.lead_id - 1] || '').trim() : '',
+        audio_url: audioUrl,
+      });
+    });
+  }
+
+  rowsToDelete
+    .sort((a, b) => b - a)
+    .forEach(row => {
+      sheet.deleteRow(row);
+      result.deleted_rows++;
+    });
+
+  repairLeadsLatestAudioLinksFromActivityLog();
+  Logger.log('cleanupAudioSyncByFileName ' + JSON.stringify(result));
+  return result;
+}
+
+function getLatestAudioActivityByLeadId_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('ACTIVITY_LOG');
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.audio_url) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
+  values.forEach((row, index) => {
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const audioUrl = String(row[headerMap.audio_url - 1] || '').trim();
+    if (!leadId || !audioUrl) return;
+
+    const audioFileName = headerMap.audio_file_name ? String(row[headerMap.audio_file_name - 1] || '').trim() : '';
+    const parsedFileName = audioFileName ? parseAudioFileName_(audioFileName) : null;
+    const createdAt = headerMap.created_at ? parseActivityLogDate_(row[headerMap.created_at - 1]) : null;
+    const sortKey = parsedFileName
+      ? '3|' + parsedFileName.timestampKey
+      : createdAt
+        ? '2|' + String(createdAt.getTime()).padStart(15, '0')
+        : '1|' + String(DATA_START_ROW + index).padStart(15, '0');
+
+    if (!data[leadId] || data[leadId].sortKey <= sortKey) {
+      data[leadId] = {
+        audioUrl: audioUrl,
+        audioFileName: audioFileName,
+        sortKey: sortKey,
+      };
+    }
+  });
+
+  return data;
+}
+
+function parseActivityLogDate_(value) {
+  if (!value) return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
+  if (typeof parseCrmDateTimeValue_ === 'function') {
+    const parsed = parseCrmDateTimeValue_(value);
+    if (parsed && parsed instanceof Date && !isNaN(parsed.getTime())) return parsed;
+  }
+
+  const fallback = new Date(value);
+  return fallback instanceof Date && !isNaN(fallback.getTime()) ? fallback : null;
 }
 
 function debugFollowUpForActiveRow() {

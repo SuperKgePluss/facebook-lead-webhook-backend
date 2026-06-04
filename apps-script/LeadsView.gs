@@ -3,6 +3,7 @@ const LEADS_VIEW_REFRESH_CURSOR_KEY = 'LEADS_VIEW_REFRESH_NEXT_ROW';
 const LEADS_VIEW_REFRESH_BATCH_SIZE = 70;
 const LEADS_VIEW_SCHEDULED_CURSOR_KEY = 'LEADS_VIEW_SCHEDULED_NEXT_ROW';
 const LEADS_VIEW_SCHEDULED_BATCH_SIZE = 20;
+const LEADS_VIEW_MEMO_START_COLUMN = 15;
 const LEADS_VIEW_HEADERS = [
   'Lead ID',
   'Facebook Created Time',
@@ -13,6 +14,7 @@ const LEADS_VIEW_HEADERS = [
   'Preferred Call Day',
   'Preferred Call Time',
   'Sales Owner',
+  'Sales Note',
   'Follow-up Count',
   'Latest Audio Link',
   'Facebook Search Name',
@@ -28,6 +30,7 @@ const LEADS_VIEW_THAI_LABELS = [
   'วันที่สะดวกให้โทร',
   'เวลาที่สะดวกให้โทร',
   'ผู้รับผิดชอบ',
+  'โน้ตฝ่ายขาย',
   'จำนวนติดตาม',
   'ลิงก์ไฟล์เสียงล่าสุด',
   'ชื่อไว้ค้นหา Facebook',
@@ -35,8 +38,8 @@ const LEADS_VIEW_THAI_LABELS = [
 ];
 const LEADS_VIEW_MANUAL_FIELDS = {
   additional_phone: true,
+  sales_note: true,
   follow_up_count: true,
-  latest_audio_link: true,
   open_detail: true,
 };
 
@@ -116,7 +119,6 @@ function repairLeadsViewFromLeadMain() {
   const ss = SpreadsheetApp.getActive();
   const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
   const leadsSheet = getOrCreateLeadsViewSheet_();
-  const existingSalesOwnerValidation = getExistingColumnValidation_(leadsSheet, 'sales_owner');
   if (!leadMainSheet || leadMainSheet.getLastRow() < DATA_START_ROW) {
     writeLeadsViewHeadersOnly_(leadsSheet);
     setupLeadsViewExistingRowsUi_(leadsSheet);
@@ -126,6 +128,7 @@ function repairLeadsViewFromLeadMain() {
   }
 
   const safeManualByLeadId = getSafeLeadsViewManualDataByLeadId_(leadsSheet);
+  const memoByLeadId = getLeadsViewMemoDataByLeadId_(leadsSheet);
   const detailFacebookTimeByLeadId = getLeadDetailsFacebookCreatedTimeByLeadId_();
   const latestAudioUrlByLeadId = getLatestActivityAudioUrlByLeadId_();
   const leadRows = leadMainSheet
@@ -144,13 +147,11 @@ function repairLeadsViewFromLeadMain() {
     if (!leadId) return;
 
     const manual = safeManualByLeadId[leadId] || {};
-    if (!manual.latest_audio_link && latestAudioUrlByLeadId[leadId]) {
-      manual.latest_audio_link = latestAudioUrlByLeadId[leadId];
-    }
     const facebookCreatedTime = resolveLeadsViewFacebookCreatedTime_(lead, detailFacebookTimeByLeadId[leadId]);
     const object = sanitizeLeadsViewSyncObject_(buildLeadsViewObject_(Object.assign({}, lead, {
       facebook_created_time: facebookCreatedTime,
     }), manual));
+    object.latest_audio_link = latestAudioUrlByLeadId[leadId] || '';
     rebuiltRows.push(buildLeadsViewRowValues_(object));
   });
 
@@ -158,9 +159,8 @@ function repairLeadsViewFromLeadMain() {
   writeLeadsViewHeadersOnly_(leadsSheet);
   if (rebuiltRows.length) {
     leadsSheet.getRange(DATA_START_ROW, 1, rebuiltRows.length, LEADS_VIEW_HEADERS.length).setValues(rebuiltRows);
-    setupLeadsViewDataRangeUi_(leadsSheet, DATA_START_ROW, rebuiltRows.length, {
-      salesOwnerValidation: existingSalesOwnerValidation,
-    });
+    setupLeadsViewDataRangeUi_(leadsSheet, DATA_START_ROW, rebuiltRows.length);
+    restoreLeadsViewMemoData_(leadsSheet, memoByLeadId);
   }
   setupLeadsViewStatusConditionalFormatting_(leadsSheet);
   resetLeadsViewRefreshCursor();
@@ -329,7 +329,6 @@ function setupLeadsViewRowUi(row, optionalSheet) {
   let changed = false;
 
   if (ensureLeadsViewStatusDropdownForRow(row, sheet)) changed = true;
-  if (ensureLeadsViewSalesOwnerDropdownForRow(row, sheet)) changed = true;
   if (ensureLeadsViewCheckboxesForRow(row, sheet)) changed = true;
 
   if (leadId) {
@@ -359,6 +358,11 @@ function handleLeadsViewEdit_(e, sheet, row) {
     return;
   }
 
+  if (editedHeader === 'sales_note') {
+    handleLeadsViewSalesNoteEdit_(e, sheet, row);
+    return;
+  }
+
   if (
     editedHeader === 'customer_name'
     || editedHeader === 'phone'
@@ -368,6 +372,91 @@ function handleLeadsViewEdit_(e, sheet, row) {
     || editedHeader === 'sales_owner'
   ) {
     syncLeadsViewEditableFieldToLeadMain_(sheet, row, editedHeader);
+  }
+}
+
+function handleLeadsViewSalesNoteEdit_(e, sheet, row) {
+  const note = String(e.value || '').trim();
+  if (!note) return;
+
+  const lead = getRowObject_(sheet, row);
+  const leadId = String(lead.lead_id || '').trim();
+  const headerMap = getHeaderMap_(sheet);
+  if (!leadId || !headerMap.sales_note) return;
+
+  const dedupe = claimLeadsViewSalesNoteEdit_(leadId, note);
+  if (!dedupe.claimed) {
+    sheet.getRange(row, headerMap.sales_note).clearContent();
+    Logger.log('LEADS Sales Note skipped duplicate lead_id=' + leadId + ' reason=' + dedupe.reason);
+    return;
+  }
+
+  appendObjectRow_('ACTIVITY_LOG', {
+    activity_id: 'ACT-' + Date.now(),
+    lead_id: leadId,
+    sheet_name: 'LEADS',
+    action_type: 'Sales Note',
+    note: note,
+    created_by: Session.getActiveUser().getEmail() || 'Sheet user',
+    created_at: new Date(),
+  });
+
+  appendLeadMemoToLeadsView_(leadId, note, {
+    type: 'Note',
+    timestamp: new Date(),
+  });
+  sheet.getRange(row, headerMap.sales_note).clearContent();
+}
+
+function claimLeadsViewSalesNoteEdit_(leadId, note) {
+  const normalizedLeadId = String(leadId || '').trim();
+  const normalizedNote = String(note || '').trim().replace(/\s+/g, ' ');
+  const hash = Utilities.base64EncodeWebSafe(
+    Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, normalizedLeadId + '|' + normalizedNote)
+  ).slice(0, 40);
+  const cacheKey = 'sales_note_' + hash;
+  const propertyKey = 'LEADS_SALES_NOTE_LAST_' + normalizedLeadId;
+  const now = Date.now();
+  const lock = LockService.getScriptLock();
+
+  try {
+    lock.waitLock(5000);
+  } catch (err) {
+    return {
+      claimed: false,
+      reason: 'lock_timeout',
+    };
+  }
+
+  try {
+    const cache = CacheService.getScriptCache();
+    if (cache.get(cacheKey)) {
+      return {
+        claimed: false,
+        reason: 'cache_duplicate',
+      };
+    }
+
+    const properties = PropertiesService.getScriptProperties();
+    const previous = String(properties.getProperty(propertyKey) || '').split('|');
+    const previousHash = previous[0] || '';
+    const previousTimestamp = Number(previous[1] || 0);
+    if (previousHash === hash && now - previousTimestamp < 60000) {
+      cache.put(cacheKey, '1', 60);
+      return {
+        claimed: false,
+        reason: 'property_duplicate',
+      };
+    }
+
+    cache.put(cacheKey, '1', 60);
+    properties.setProperty(propertyKey, hash + '|' + now);
+    return {
+      claimed: true,
+      reason: 'claimed',
+    };
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -514,10 +603,22 @@ function clearLeadsViewData_(sheet) {
   const rowCount = Math.max(sheet.getLastRow() - DATA_START_ROW + 1, 0);
   if (rowCount <= 0) return;
 
+  const columnCount = LEADS_VIEW_HEADERS.length;
   sheet
-    .getRange(DATA_START_ROW, 1, rowCount, Math.max(sheet.getLastColumn(), LEADS_VIEW_HEADERS.length))
-    .clearContent()
-    .clearDataValidations();
+    .getRange(DATA_START_ROW, 1, rowCount, columnCount)
+    .clearContent();
+
+  const headerMap = getHeaderMap_(sheet);
+  const preserveValidationColumns = [
+    headerMap.preferred_call_day,
+    headerMap.preferred_call_time,
+    headerMap.sales_owner,
+  ].filter(Boolean);
+
+  for (let column = 1; column <= columnCount; column++) {
+    if (preserveValidationColumns.indexOf(column) !== -1) continue;
+    sheet.getRange(DATA_START_ROW, column, rowCount, 1).clearDataValidations();
+  }
 }
 
 function buildLeadsViewRowValues_(object) {
@@ -540,8 +641,8 @@ function buildLeadsViewObject_(lead, manual) {
     preferred_call_day: manual.preferred_call_day || lead.preferred_call_day || '',
     preferred_call_time: manual.preferred_call_time || lead.preferred_call_time || '',
     sales_owner: manual.sales_owner || lead.sales_owner || '',
+    sales_note: manual.sales_note || '',
     follow_up_count: manual.follow_up_count || '',
-    latest_audio_link: manual.latest_audio_link || lead.latest_audio_link || '',
     facebook_search_name: customerName,
     open_detail: false,
   };
@@ -551,13 +652,6 @@ function sanitizeLeadsViewSyncObject_(object) {
   const sanitized = Object.assign({}, object);
   const status = String(sanitized.lead_status || '').trim();
   sanitized.lead_status = LEAD_MAIN_STATUS_VALUES.indexOf(status) !== -1 ? status : 'New';
-
-  const salesOwner = String(sanitized.sales_owner || '').trim();
-  const allowedSalesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
-  if (salesOwner && allowedSalesOwners.length && allowedSalesOwners.indexOf(salesOwner) === -1) {
-    Logger.log('LEADS sync skipped invalid Sales Owner: ' + salesOwner);
-    sanitized.sales_owner = '';
-  }
 
   return sanitized;
 }
@@ -570,9 +664,6 @@ function getSafeLeadsViewManualDataByLeadId_(sheet) {
   const leadIdColumn = headerMap.lead_id;
   if (!leadIdColumn) return data;
 
-  const allowedSalesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
-  const allowedCallDays = getSettingsValuesForHeaders_(['Preferred Call Day', 'Preferred Call Days', 'preferred_call_day']);
-  const allowedCallTimes = getSettingsValuesForHeaders_(['Preferred Call Time', 'Preferred Call Times', 'preferred_call_time']);
   const values = sheet.getRange(DATA_START_ROW, 1, sheet.getLastRow() - DATA_START_ROW + 1, sheet.getLastColumn()).getValues();
 
   values.forEach(row => {
@@ -586,21 +677,17 @@ function getSafeLeadsViewManualDataByLeadId_(sheet) {
     const followUpCount = getLeadsViewRowValue_(row, headerMap, 'follow_up_count');
     if (isSafeFollowUpCount_(followUpCount)) manual.follow_up_count = followUpCount;
 
-    const latestAudioLink = getLeadsViewRowValue_(row, headerMap, 'latest_audio_link');
-    if (String(latestAudioLink || '').trim()) manual.latest_audio_link = latestAudioLink;
+    const salesNote = String(getLeadsViewRowValue_(row, headerMap, 'sales_note') || '').trim();
+    if (salesNote) manual.sales_note = salesNote;
 
     const salesOwner = String(getLeadsViewRowValue_(row, headerMap, 'sales_owner') || '').trim();
-    if (salesOwner && allowedSalesOwners.indexOf(salesOwner) !== -1) manual.sales_owner = salesOwner;
+    if (salesOwner) manual.sales_owner = salesOwner;
 
     const preferredCallDay = String(getLeadsViewRowValue_(row, headerMap, 'preferred_call_day') || '').trim();
-    if (preferredCallDay && (!allowedCallDays.length || allowedCallDays.indexOf(preferredCallDay) !== -1)) {
-      manual.preferred_call_day = preferredCallDay;
-    }
+    if (preferredCallDay) manual.preferred_call_day = preferredCallDay;
 
     const preferredCallTime = String(getLeadsViewRowValue_(row, headerMap, 'preferred_call_time') || '').trim();
-    if (preferredCallTime && (!allowedCallTimes.length || allowedCallTimes.indexOf(preferredCallTime) !== -1)) {
-      manual.preferred_call_time = preferredCallTime;
-    }
+    if (preferredCallTime) manual.preferred_call_time = preferredCallTime;
 
     data[leadId] = manual;
   });
@@ -609,6 +696,14 @@ function getSafeLeadsViewManualDataByLeadId_(sheet) {
 }
 
 function getLatestActivityAudioUrlByLeadId_() {
+  if (typeof getLatestAudioActivityByLeadId_ === 'function') {
+    const latestAudioByLeadId = getLatestAudioActivityByLeadId_();
+    return Object.keys(latestAudioByLeadId).reduce((result, leadId) => {
+      result[leadId] = latestAudioByLeadId[leadId].audioUrl || '';
+      return result;
+    }, {});
+  }
+
   const sheet = SpreadsheetApp.getActive().getSheetByName('ACTIVITY_LOG');
   const data = {};
   if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
@@ -690,7 +785,7 @@ function parseLeadsViewDateTime_(value) {
   return null;
 }
 
-function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount, options) {
+function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount) {
   if (!sheet || rowCount <= 0) return;
 
   const headerMap = getHeaderMap_(sheet);
@@ -698,17 +793,6 @@ function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount, options) {
   if (statusColumn) {
     sheet.getRange(startRow, statusColumn, rowCount, 1).setDataValidation(getLeadMainStatusValidation_());
   }
-
-  const salesOwnerColumn = headerMap.sales_owner;
-  const salesOwnerValidation = getLeadsViewSalesOwnerValidation_(options && options.salesOwnerValidation);
-  if (salesOwnerColumn && salesOwnerValidation) {
-    sheet
-      .getRange(startRow, salesOwnerColumn, rowCount, 1)
-      .setDataValidation(salesOwnerValidation);
-  }
-
-  applyLeadsViewOptionalDropdown_(sheet, headerMap.preferred_call_day, startRow, rowCount, ['Preferred Call Day', 'Preferred Call Days', 'preferred_call_day']);
-  applyLeadsViewOptionalDropdown_(sheet, headerMap.preferred_call_time, startRow, rowCount, ['Preferred Call Time', 'Preferred Call Times', 'preferred_call_time']);
 
   [headerMap.open_detail].filter(Boolean).forEach(column => {
     sheet.getRange(startRow, column, rowCount, 1).insertCheckboxes();
@@ -722,20 +806,6 @@ function setupLeadsViewDataRangeUi_(sheet, startRow, rowCount, options) {
   [headerMap.phone, headerMap.additional_phone].filter(Boolean).forEach(column => {
     sheet.getRange(startRow, column, rowCount, 1).setNumberFormat('@');
   });
-}
-
-function getLeadsViewSalesOwnerValidation_(fallbackValidation) {
-  const salesOwners = getSettingsValuesForHeaders_(LEAD_MAIN_SALES_OWNER_SETTING_HEADERS);
-  if (salesOwners.length) {
-    return SpreadsheetApp
-      .newDataValidation()
-      .requireValueInList(salesOwners, true)
-      .setAllowInvalid(true)
-      .build();
-  }
-
-  if (fallbackValidation) return fallbackValidation;
-  return getExistingColumnValidation_(SpreadsheetApp.getActive().getSheetByName('LEADS_MAIN'), 'sales_owner');
 }
 
 function getExistingColumnValidation_(sheet, headerName) {
@@ -754,17 +824,6 @@ function getExistingColumnValidation_(sheet, headerName) {
   }
 
   return null;
-}
-
-function applyLeadsViewOptionalDropdown_(sheet, column, startRow, rowCount, settingHeaders) {
-  if (!column) return;
-
-  const values = getSettingsValuesForHeaders_(settingHeaders);
-  if (!values.length) return;
-
-  sheet
-    .getRange(startRow, column, rowCount, 1)
-    .setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(values, true).setAllowInvalid(true).build());
 }
 
 function setupLeadsViewExistingRowsUi_(sheet) {
@@ -810,10 +869,7 @@ function setupLeadsViewStatusConditionalFormatting_(optionalSheet) {
 }
 
 function prepareLeadsViewRowForSync_(sheet, row) {
-  const headerMap = getHeaderMap_(sheet);
-  [headerMap.lead_status, headerMap.sales_owner].filter(Boolean).forEach(column => {
-    sheet.getRange(row, column).clearDataValidations();
-  });
+  // Normal LEADS sync must not clear user-managed validations.
 }
 
 function getLeadsViewManualDataByLeadId_(sheet) {
@@ -842,6 +898,128 @@ function getLeadsViewManualDataByLeadId_(sheet) {
   });
 
   return data;
+}
+
+function getLeadsViewMemoDataByLeadId_(sheet) {
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW || sheet.getLastColumn() < LEADS_VIEW_MEMO_START_COLUMN) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  if (!leadIdColumn) return data;
+
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  const memoColumnCount = sheet.getLastColumn() - LEADS_VIEW_MEMO_START_COLUMN + 1;
+  const leadIds = sheet.getRange(DATA_START_ROW, leadIdColumn, rowCount, 1).getValues();
+  const memoValues = sheet.getRange(DATA_START_ROW, LEADS_VIEW_MEMO_START_COLUMN, rowCount, memoColumnCount).getValues();
+
+  leadIds.forEach((row, index) => {
+    const leadId = String(row[0] || '').trim();
+    if (!leadId) return;
+
+    const values = memoValues[index];
+    let lastNonEmpty = -1;
+    values.forEach((value, valueIndex) => {
+      if (String(value || '').trim()) lastNonEmpty = valueIndex;
+    });
+    if (lastNonEmpty >= 0) {
+      data[leadId] = values.slice(0, lastNonEmpty + 1);
+    }
+  });
+
+  return data;
+}
+
+function restoreLeadsViewMemoData_(sheet, memoByLeadId) {
+  const leadIds = Object.keys(memoByLeadId || {});
+  if (!sheet || !leadIds.length) return;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || sheet.getLastRow() < DATA_START_ROW) return;
+
+  const rowByLeadId = getLeadsViewRowMapByLeadId_(sheet);
+  let maxMemoLength = 0;
+  leadIds.forEach(leadId => {
+    maxMemoLength = Math.max(maxMemoLength, (memoByLeadId[leadId] || []).length);
+  });
+  if (!maxMemoLength) return;
+
+  const endColumn = LEADS_VIEW_MEMO_START_COLUMN + maxMemoLength - 1;
+  ensureLeadMemoColumnCapacity_(sheet, endColumn);
+  ensureLeadMemoHeaders_(sheet, LEADS_VIEW_MEMO_START_COLUMN, endColumn);
+
+  leadIds.forEach(leadId => {
+    const row = rowByLeadId[leadId];
+    if (!row) return;
+
+    const values = memoByLeadId[leadId] || [];
+    if (!values.length) return;
+    sheet.getRange(row, LEADS_VIEW_MEMO_START_COLUMN, 1, values.length).setValues([values]);
+  });
+}
+
+function appendLeadMemoToLeadsView_(leadId, value, options) {
+  const targetLeadId = String(leadId || '').trim();
+  const rawValue = String(value || '').trim();
+  if (!targetLeadId || !rawValue) return false;
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEADS');
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return false;
+
+  const rowByLeadId = getLeadsViewRowMapByLeadId_(sheet);
+  const row = rowByLeadId[targetLeadId];
+  if (!row) {
+    Logger.log('appendLeadMemoToLeadsView skipped missing LEADS row for lead_id=' + targetLeadId);
+    return false;
+  }
+
+  const config = options || {};
+  const type = String(config.type || 'Memo').trim();
+  const timestamp = config.timestamp instanceof Date && !isNaN(config.timestamp.getTime())
+    ? config.timestamp
+    : new Date();
+  const formattedTimestamp = Utilities.formatDate(timestamp, Session.getScriptTimeZone() || 'Asia/Bangkok', 'yyyy-MM-dd HH:mm');
+  const displayValue = '[' + type + '] ' + formattedTimestamp + ' - ' + rawValue;
+  const targetColumn = findFirstEmptyLeadMemoColumn_(sheet, row, LEADS_VIEW_MEMO_START_COLUMN);
+
+  ensureLeadMemoColumnCapacity_(sheet, targetColumn);
+  ensureLeadMemoHeaders_(sheet, LEADS_VIEW_MEMO_START_COLUMN, targetColumn);
+  sheet.getRange(row, targetColumn).setValue(displayValue);
+  return true;
+}
+
+function findFirstEmptyLeadMemoColumn_(sheet, rowIndex, startCol) {
+  const startColumn = Math.max(Number(startCol) || LEADS_VIEW_MEMO_START_COLUMN, LEADS_VIEW_MEMO_START_COLUMN);
+  const maxColumns = sheet.getMaxColumns();
+  if (startColumn > maxColumns) return startColumn;
+
+  const values = sheet.getRange(rowIndex, startColumn, 1, maxColumns - startColumn + 1).getValues()[0];
+  for (let index = 0; index < values.length; index++) {
+    if (!String(values[index] || '').trim()) return startColumn + index;
+  }
+  return maxColumns + 1;
+}
+
+function ensureLeadMemoColumnCapacity_(sheet, targetCol) {
+  const targetColumn = Number(targetCol) || LEADS_VIEW_MEMO_START_COLUMN;
+  const maxColumns = sheet.getMaxColumns();
+  if (targetColumn <= maxColumns) return;
+
+  sheet.insertColumnsAfter(maxColumns, targetColumn - maxColumns);
+}
+
+function ensureLeadMemoHeaders_(sheet, fromCol, toCol) {
+  const startColumn = Math.max(Number(fromCol) || LEADS_VIEW_MEMO_START_COLUMN, LEADS_VIEW_MEMO_START_COLUMN);
+  const endColumn = Math.max(Number(toCol) || startColumn, startColumn);
+  ensureLeadMemoColumnCapacity_(sheet, endColumn);
+
+  const columnCount = endColumn - startColumn + 1;
+  const headers = sheet.getRange(HEADER_ROW, startColumn, 1, columnCount).getValues()[0];
+  const nextHeaders = headers.map((header, index) => {
+    const current = String(header || '').trim();
+    return current || 'Memo ' + (startColumn + index - LEADS_VIEW_MEMO_START_COLUMN + 1);
+  });
+  sheet.getRange(HEADER_ROW, startColumn, 1, columnCount).setValues([nextHeaders]);
 }
 
 function getLeadsViewRowMapByLeadId_(sheet) {
