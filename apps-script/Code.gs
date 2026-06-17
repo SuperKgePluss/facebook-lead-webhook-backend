@@ -2,6 +2,25 @@
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 const CRM_UI_BATCH_TASK_CURSOR_KEY = 'CRM_UI_BATCH_CURRENT_TASK';
+const CRM_FORMAT_AUDIT_LOG_SHEET_NAME = 'CRM_FORMAT_AUDIT_LOG';
+const CRM_FORMAT_AUDIT_LOG_HEADERS = [
+  'timestamp',
+  'change_type',
+  'trigger_uid',
+  'active_user',
+  'effective_user',
+  'active_sheet',
+  'active_range',
+  'source',
+  'note',
+];
+const CRM_FORMAT_AUDIT_CHANGE_TYPES = {
+  FORMAT: true,
+  INSERT_COLUMN: true,
+  REMOVE_COLUMN: true,
+  INSERT_ROW: true,
+  REMOVE_ROW: true,
+};
 const CRM_UI_BATCH_TASKS = [
   'leads_view_sync',
   'lead_main_checkboxes',
@@ -93,9 +112,22 @@ function onOpen(e) {
     .getUi()
     .createMenu('CRM Tools')
     .addItem('Add Manual Lead', 'createManualLead')
+    .addItem('Diagnose CRM Setup', 'diagnoseCrmSetup')
     .addItem('Sync LEADS View', 'syncLeadsViewNow')
-    .addItem('Repair LEADS View', 'repairLeadsViewFromLeadMain')
+    .addItem('Admin Repair LEADS View', 'adminRepairLeadsViewFromLeadMain')
+    .addItem('Run Date Audit (Report Only)', 'runLeadsDateAuditReport')
+    .addItem('Apply Safe Date Format & Sort', 'applyLeadsDateNormalizationAndSort')
+    .addItem('Initialize LEADS Note Snapshot', 'initializeLeadsNoteSnapshot')
+    .addItem('Sync LEADS Note History to Activity Log', 'syncLeadsNoteHistoryToActivityLogNow')
+    .addItem('Sync LEADS Note History Continue', 'syncLeadsNoteHistoryToActivityLogContinue')
     .addItem('Sync Audio Files', 'syncLeadAudioFilesNow')
+    .addItem('Audit Audio Metadata', 'auditAudioMetadata')
+    .addItem('Highlight CRM3-only Leads', 'highlightCrm3OnlyLeads')
+    .addItem('Build CRM2 Match Audit', 'buildCrm2MatchAudit')
+    .addItem('Start Legacy Note Match Audit', 'startLegacyNoteMatchAudit')
+    .addItem('Continue Legacy Note Match Audit', 'continueLegacyNoteMatchAudit')
+    .addItem('Backfill LEADS Memo History Dry Run', 'backfillLeadsMemoHistoryFromActivityLogDryRun')
+    .addItem('Backfill LEADS Memo History Apply', 'backfillLeadsMemoHistoryFromActivityLog')
     .addToUi();
 }
 
@@ -185,6 +217,7 @@ function installCrmTriggers() {
 }
 
 function onChange(e) {
+  recordCrmFormatAuditChange_(e);
   setupRecentlyAppendedRows_();
 }
 
@@ -216,6 +249,100 @@ function setupRecentlyAppendedRows_() {
 function getEditedHeader_(sheet, column) {
   const headerMap = getHeaderMap_(sheet);
   return Object.keys(headerMap).find(header => headerMap[header] === column) || '';
+}
+
+function recordCrmFormatAuditChange_(e) {
+  const changeType = String(e && e.changeType || '').trim();
+  if (!CRM_FORMAT_AUDIT_CHANGE_TYPES[changeType]) return false;
+
+  logCrmFormatAuditEvent_({
+    changeType: changeType,
+    triggerUid: e && e.triggerUid ? e.triggerUid : '',
+    source: 'onChange',
+    note: 'User-visible spreadsheet format/structure change event captured by installable onChange.',
+  });
+  return true;
+}
+
+function logCrmScriptFormatAudit_(changeType, sheet, rangeA1, note) {
+  logCrmFormatAuditEvent_({
+    changeType: changeType || 'SCRIPT_OPERATION',
+    triggerUid: '',
+    activeSheet: sheet && typeof sheet.getName === 'function' ? sheet.getName() : '',
+    activeRange: rangeA1 || '',
+    source: 'script',
+    note: note || '',
+  });
+}
+
+function logCrmFormatAuditEvent_(entry) {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    const sheet = ensureCrmFormatAuditLogSheet_();
+    const activeSheet = entry.activeSheet || getSafeActiveSheetName_();
+    const activeRange = entry.activeRange || getSafeActiveRangeA1_();
+    sheet.appendRow([
+      new Date(),
+      entry.changeType || '',
+      entry.triggerUid || '',
+      getSafeSessionEmail_(true),
+      getSafeSessionEmail_(false),
+      activeSheet,
+      activeRange,
+      entry.source || '',
+      entry.note || '',
+    ]);
+    if (!sheet.isSheetHidden()) sheet.hideSheet();
+    return true;
+  } catch (err) {
+    Logger.log('CRM format audit logging failed: ' + err.message);
+    return false;
+  }
+}
+
+function ensureCrmFormatAuditLogSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  let sheet = ss.getSheetByName(CRM_FORMAT_AUDIT_LOG_SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(CRM_FORMAT_AUDIT_LOG_SHEET_NAME);
+  }
+  if (sheet.getMaxColumns() < CRM_FORMAT_AUDIT_LOG_HEADERS.length) {
+    sheet.insertColumnsAfter(sheet.getMaxColumns(), CRM_FORMAT_AUDIT_LOG_HEADERS.length - sheet.getMaxColumns());
+  }
+  const headers = sheet.getRange(HEADER_ROW, 1, 1, CRM_FORMAT_AUDIT_LOG_HEADERS.length).getValues()[0];
+  const needsHeaders = CRM_FORMAT_AUDIT_LOG_HEADERS.some((header, index) => String(headers[index] || '') !== header);
+  if (needsHeaders) {
+    sheet.getRange(HEADER_ROW, 1, 1, CRM_FORMAT_AUDIT_LOG_HEADERS.length).setValues([CRM_FORMAT_AUDIT_LOG_HEADERS]);
+  }
+  if (!sheet.isSheetHidden()) sheet.hideSheet();
+  return sheet;
+}
+
+function getSafeSessionEmail_(activeUser) {
+  try {
+    const user = activeUser ? Session.getActiveUser() : Session.getEffectiveUser();
+    return user && typeof user.getEmail === 'function' ? String(user.getEmail() || '').trim() : '';
+  } catch (err) {
+    return 'unknown';
+  }
+}
+
+function getSafeActiveSheetName_() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSheet();
+    return sheet ? sheet.getName() : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+function getSafeActiveRangeA1_() {
+  try {
+    const range = SpreadsheetApp.getActiveRange();
+    return range ? range.getA1Notation() : '';
+  } catch (err) {
+    return '';
+  }
 }
 
 function onEdit(e) {

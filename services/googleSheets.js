@@ -126,7 +126,7 @@ function generateId(prefix) {
     return `${prefix}-${Date.now()}${Math.floor(Math.random() * 1000)}`;
 }
 
-function formatDateTimeForSheet(date = new Date()) {
+function dateToBangkokSheetsDateSerial(date) {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
         return "";
     }
@@ -138,13 +138,38 @@ function formatDateTimeForSheet(date = new Date()) {
         day: "2-digit",
         hour: "2-digit",
         minute: "2-digit",
+        second: "2-digit",
         hourCycle: "h23",
     }).formatToParts(date).reduce((acc, part) => {
         acc[part.type] = part.value;
         return acc;
     }, {});
 
-    return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
+    const epoch = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
+    const bangkokWallTimeAsUtc = Date.UTC(
+        Number(parts.year),
+        Number(parts.month) - 1,
+        Number(parts.day),
+        Number(parts.hour),
+        Number(parts.minute),
+        Number(parts.second || 0),
+        0
+    );
+
+    return (bangkokWallTimeAsUtc - epoch) / 86400000;
+}
+
+function valueToBangkokSheetsDateSerial(value) {
+    if (value === null || value === undefined || value === "") {
+        return "";
+    }
+
+    if (value instanceof Date) {
+        return dateToBangkokSheetsDateSerial(value);
+    }
+
+    const parsed = new Date(String(value).trim());
+    return Number.isNaN(parsed.getTime()) ? "" : dateToBangkokSheetsDateSerial(parsed);
 }
 
 function columnToLetter(columnNumber) {
@@ -787,8 +812,8 @@ function isCompletedLead(leadObject) {
 }
 
 function buildLeadMainObject(leadId, lead, existingLead = null) {
-    const now = formatDateTimeForSheet(new Date());
-    const facebookCreatedTime = String(lead.facebook_created_time || "").trim();
+    const now = dateToBangkokSheetsDateSerial(new Date());
+    const facebookCreatedTime = valueToBangkokSheetsDateSerial(lead.facebook_created_time);
 
     return {
         lead_id: leadId,
@@ -820,7 +845,7 @@ function buildLeadMainUpdateObject(existingLead, lead) {
         province: lead.province || existingLead.province || "",
         preferred_call_day: existingLead.preferred_call_day || lead.preferred_call_day || "",
         preferred_call_time: existingLead.preferred_call_time || lead.preferred_call_time || "",
-        updated_at: formatDateTimeForSheet(new Date()),
+        updated_at: dateToBangkokSheetsDateSerial(new Date()),
     };
 }
 
@@ -1177,4 +1202,6 @@ module.exports = {
     deleteSheetRows,
     normalizePhone,
     normalizeHeaderName,
+    dateToBangkokSheetsDateSerial,
+    valueToBangkokSheetsDateSerial,
 };

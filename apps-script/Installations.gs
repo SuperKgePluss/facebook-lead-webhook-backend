@@ -114,7 +114,7 @@ function setupInstallationsUi() {
   }
 
   const formatRows = Math.max(sheet.getMaxRows() - DATA_START_ROW + 1, 1);
-  sheet.getRange(DATA_START_ROW, 6, formatRows, 1).setNumberFormat('[$-en-US]MM/dd/yyyy HH:mm');
+  sheet.getRange(DATA_START_ROW, 6, formatRows, 1).setNumberFormat('dd/MM/yyyy HH:mm');
   sheet.getRange(DATA_START_ROW, 7, formatRows, 1).setNumberFormat('@');
 
   resetInstallationStatusDropdownRefreshCursor();

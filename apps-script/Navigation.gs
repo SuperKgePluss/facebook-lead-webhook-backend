@@ -479,7 +479,7 @@ function setupLeadMainStatusConditionalFormatting_() {
 
 function applyCrmDateTimeFormats_() {
   const ss = SpreadsheetApp.getActive();
-  const gregorianDateTimeFormat = '[$-en-US]MM/dd/yyyy HH:mm';
+  const gregorianDateTimeFormat = 'dd/MM/yyyy HH:mm';
   try {
     ss.setSpreadsheetTimeZone('Asia/Bangkok');
   } catch (err) {
