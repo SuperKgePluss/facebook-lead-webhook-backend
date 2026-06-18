@@ -1265,7 +1265,7 @@ function confirmLeadsDateNormalizationAndSort_() {
     const ui = SpreadsheetApp.getUi();
     const response = ui.alert(
       'Apply Safe Date Format & Sort',
-      'This administrator-only operation will validate the latest LEADS_DATE_AUDIT fingerprint against the current LEADS sheet, create a hidden backup copy of LEADS, format existing Date values as dd/MM/yyyy HH:mm, replace audited safe US-style text dates using the approved canonical source date, leave blank/no-canonical rows unchanged, and sort complete LEADS rows newest-first. Continue?',
+      'This administrator-only operation will validate the latest LEADS_DATE_AUDIT fingerprint against the current LEADS sheet, create a hidden backup copy of LEADS, format existing Date values as dd/MM/yyyy HH:mm, replace audited safe US-style text dates using the approved canonical source date, leave blank/no-canonical rows unchanged, and sort complete LEADS rows oldest to newest with blank-date rows after dated rows. Continue?',
       ui.ButtonSet.OK_CANCEL
     );
     return response === ui.Button.OK;
@@ -1314,7 +1314,7 @@ function applyLeadsDateNormalizationAndSortUnlocked_() {
     if (leadCountBefore !== plan.rowsChecked) {
       throw new Error('Date Audit is stale. Audit row count does not match current LEADS Lead ID count. Rerun Run Date Audit (Report Only). audit=' + plan.rowsChecked + ' current=' + leadCountBefore);
     }
-    validateLeadsDateApplyFingerprint_(leadsSheet, headerMap, lastLeadRow, plan.metadata);
+    validateLeadsDateApplyFingerprint_(leadsSheet, headerMap, lastLeadRow, plan);
 
     validateLeadsDateApplyRowsBeforeWrite_(leadsSheet, headerMap, plan.actions);
     const beforeSnapshot = getLeadsDateApplySnapshot_(leadsSheet, headerMap, lastLeadRow);
@@ -1326,15 +1326,12 @@ function applyLeadsDateNormalizationAndSortUnlocked_() {
 
     const finalColumn = Math.max(leadsSheet.getLastColumn(), LEADS_VIEW_HEADERS.length);
     const sortRowCount = lastLeadRow - DATA_START_ROW + 1;
-    leadsSheet.getRange(DATA_START_ROW, 1, sortRowCount, finalColumn).sort({
-      column: headerMap.facebook_created_time,
-      ascending: false,
-    });
+    sortLeadsByFacebookCreatedTimeOldestFirst_(leadsSheet, headerMap, sortRowCount, finalColumn);
     result.rowsSorted = sortRowCount;
 
     validateLeadsDateApplyAfterSort_(leadsSheet, headerMap, beforeSnapshot, leadCountBefore);
     result.validationStatus = 'OK';
-    SpreadsheetApp.getActive().toast('LEADS dates normalized and sorted. Backup: ' + result.backupSheetName, 'Apply Safe Date Format & Sort', 8);
+    SpreadsheetApp.getActive().toast('LEADS dates normalized and sorted oldest-first. Backup: ' + result.backupSheetName, 'Apply Safe Date Format & Sort', 8);
     Logger.log('applyLeadsDateNormalizationAndSort completed ' + JSON.stringify(result));
     return result;
   } catch (err) {
@@ -1437,6 +1434,8 @@ function readLeadsDateApplyPlan_(auditSheet) {
       classification: classification,
       action: action,
       proposedDate: proposedDate,
+      rawDateSignature: headerMap.raw_date_signature !== undefined ? String(row[headerMap.raw_date_signature] || '') : '',
+      displayedValue: headerMap.displayed_value !== undefined ? String(row[headerMap.displayed_value] || '') : '',
     });
   }
 
@@ -1455,24 +1454,30 @@ function readLeadsDateApplyPlan_(auditSheet) {
 
 function readLeadsDateAuditMetadata_(values) {
   const metadata = {};
-  values.forEach(row => {
+  for (let index = 0; index < values.length; index++) {
+    const row = values[index];
+    if (normalizeHeaderName_(row[0]) === 'audit_timestamp' && normalizeHeaderName_(row[1]) === 'leads_row') break;
     const key = normalizeHeaderName_(row[0]);
     if (key) metadata[key] = row[1];
-  });
+  }
   return metadata;
 }
 
 function validateLeadsDateAuditMetadataForApply_(metadata) {
   const missing = [];
-  ['audit_run_id', 'audit_timestamp', 'spreadsheet_id', 'leads_last_audited_row', 'audit_source_fingerprint'].forEach(key => {
+  ['audit_run_id', 'audit_timestamp', 'spreadsheet_id', 'fingerprint_version', 'leads_last_audited_row', 'raw_fingerprint'].forEach(key => {
     if (metadata[key] === '' || metadata[key] === null || metadata[key] === undefined) missing.push(key);
   });
   if (missing.length) {
     throw new Error('LEADS_DATE_AUDIT is missing apply-safety metadata (' + missing.join(', ') + '). Rerun Run Date Audit (Report Only).');
   }
+  if (String(metadata.fingerprint_version || '').trim() !== '2') {
+    throw new Error('LEADS_DATE_AUDIT uses an old fingerprint version. Rerun Run Date Audit (Report Only).');
+  }
 }
 
-function validateLeadsDateApplyFingerprint_(sheet, headerMap, lastLeadRow, metadata) {
+function validateLeadsDateApplyFingerprint_(sheet, headerMap, lastLeadRow, plan) {
+  const metadata = plan.metadata || {};
   const ss = SpreadsheetApp.getActive();
   const auditedSpreadsheetId = String(metadata.spreadsheet_id || '').trim();
   if (auditedSpreadsheetId && auditedSpreadsheetId !== ss.getId()) {
@@ -1485,9 +1490,9 @@ function validateLeadsDateApplyFingerprint_(sheet, headerMap, lastLeadRow, metad
   }
 
   const liveFingerprint = buildLeadsDateAuditFingerprint_(sheet, headerMap, lastLeadRow);
-  const auditFingerprint = String(metadata.audit_source_fingerprint || '').trim();
-  if (!auditFingerprint || liveFingerprint.fingerprint !== auditFingerprint) {
-    throw new Error('Date Audit is stale. Lead ID/date fingerprint changed. Rerun Run Date Audit (Report Only).');
+  const auditFingerprint = String(metadata.raw_fingerprint || metadata.audit_source_fingerprint || '').trim();
+  if (!auditFingerprint || liveFingerprint.rawFingerprint !== auditFingerprint) {
+    throw new Error('Date Audit is stale. Lead ID/raw-date fingerprint changed. Rerun Run Date Audit (Report Only). ' + buildLeadsDateStaleDiagnosticMessage_(sheet, headerMap, lastLeadRow, plan.actions || []));
   }
 }
 
@@ -1507,9 +1512,93 @@ function validateLeadsDateApplyRowsBeforeWrite_(sheet, headerMap, actions) {
     const rowLeadId = String(sheet.getRange(action.leadsRow, headerMap.lead_id).getValue() || '').trim();
     if (rowLeadId !== action.leadId) {
       errors.push('LEADS row ' + action.leadsRow + ' expected lead_id=' + action.leadId + ' actual=' + rowLeadId);
+      return;
+    }
+    const liveRawSignature = stableSerializeLeadsDateRawValue_(sheet.getRange(action.leadsRow, headerMap.facebook_created_time).getValue());
+    if (action.rawDateSignature && liveRawSignature !== action.rawDateSignature) {
+      errors.push('LEADS row ' + action.leadsRow + ' raw date changed for lead_id=' + action.leadId + ' audit=' + action.rawDateSignature + ' live=' + liveRawSignature);
     }
   });
   if (errors.length) throw new Error('Date apply row validation failed before write: ' + errors.slice(0, 10).join('; '));
+}
+
+function buildLeadsDateStaleDiagnosticMessage_(sheet, headerMap, lastLeadRow, auditActions) {
+  const liveByRow = getLeadsDateLiveEntriesByRow_(sheet, headerMap, lastLeadRow);
+  const auditByRow = {};
+  (auditActions || []).forEach(action => {
+    auditByRow[action.leadsRow] = action;
+  });
+
+  const rows = {};
+  Object.keys(liveByRow).forEach(row => { rows[row] = true; });
+  Object.keys(auditByRow).forEach(row => { rows[row] = true; });
+
+  const diagnostics = [];
+  Object.keys(rows).map(Number).sort((a, b) => a - b).forEach(rowNumber => {
+    if (diagnostics.length >= 20) return;
+
+    const audit = auditByRow[rowNumber];
+    const live = liveByRow[rowNumber];
+    if (!audit && live) {
+      diagnostics.push(formatLeadsDateStaleDiagnostic_(rowNumber, '', live.leadId, '', live.rawDateSignature, '', live.displayedValue, 'row_added'));
+      return;
+    }
+    if (audit && !live) {
+      diagnostics.push(formatLeadsDateStaleDiagnostic_(rowNumber, audit.leadId, '', audit.rawDateSignature, '', audit.displayedValue, '', 'row_removed'));
+      return;
+    }
+    if (!audit || !live) return;
+
+    let mismatchType = '';
+    if (audit.leadId !== live.leadId) {
+      mismatchType = Object.keys(liveByRow).some(key => liveByRow[key].leadId === audit.leadId) ? 'row_reordered' : 'lead_id_changed';
+    } else if (audit.rawDateSignature !== live.rawDateSignature) {
+      mismatchType = 'raw_date_changed';
+    } else if (String(audit.displayedValue || '') !== String(live.displayedValue || '')) {
+      mismatchType = 'display_only_changed';
+    }
+
+    if (mismatchType && mismatchType !== 'display_only_changed') {
+      diagnostics.push(formatLeadsDateStaleDiagnostic_(rowNumber, audit.leadId, live.leadId, audit.rawDateSignature, live.rawDateSignature, audit.displayedValue, live.displayedValue, mismatchType));
+    }
+  });
+
+  return diagnostics.length
+    ? 'First mismatches: ' + diagnostics.join(' | ')
+    : 'No row-level blocking mismatch found; rerun Run Date Audit (Report Only).';
+}
+
+function getLeadsDateLiveEntriesByRow_(sheet, headerMap, lastLeadRow) {
+  const entries = {};
+  if (!sheet || lastLeadRow < DATA_START_ROW) return entries;
+
+  const rowCount = lastLeadRow - DATA_START_ROW + 1;
+  const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
+  const displayValues = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getDisplayValues();
+  values.forEach((row, index) => {
+    const rowNumber = DATA_START_ROW + index;
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    if (!leadId) return;
+    entries[rowNumber] = {
+      leadId: leadId,
+      rawDateSignature: stableSerializeLeadsDateRawValue_(row[headerMap.facebook_created_time - 1]),
+      displayedValue: String(displayValues[index][headerMap.facebook_created_time - 1] || ''),
+    };
+  });
+  return entries;
+}
+
+function formatLeadsDateStaleDiagnostic_(rowNumber, auditLeadId, liveLeadId, auditRaw, liveRaw, auditDisplay, liveDisplay, mismatchType) {
+  return [
+    'row=' + rowNumber,
+    'type=' + mismatchType,
+    'audit_lead_id=' + auditLeadId,
+    'live_lead_id=' + liveLeadId,
+    'audit_raw=' + auditRaw,
+    'live_raw=' + liveRaw,
+    'audit_display=' + auditDisplay,
+    'live_display=' + liveDisplay,
+  ].join(', ');
 }
 
 function createLeadsDateBackupSheet_(ss, sourceSheet, timestamp) {
@@ -1523,6 +1612,41 @@ function createLeadsDateBackupSheet_(ss, sourceSheet, timestamp) {
   const backupSheet = sourceSheet.copyTo(ss).setName(backupName);
   backupSheet.hideSheet();
   return backupSheet;
+}
+
+function sortLeadsByFacebookCreatedTimeOldestFirst_(sheet, headerMap, sortRowCount, finalColumn) {
+  const helperColumn = finalColumn + 1;
+  let helperInserted = false;
+  try {
+    sheet.insertColumnAfter(finalColumn);
+    helperInserted = true;
+
+    const dateValues = sheet.getRange(DATA_START_ROW, headerMap.facebook_created_time, sortRowCount, 1).getValues();
+    const helperValues = dateValues.map(row => {
+      const value = row[0];
+      return [value instanceof Date && !isNaN(value.getTime()) ? 0 : 1];
+    });
+    sheet.getRange(DATA_START_ROW, helperColumn, sortRowCount, 1).setValues(helperValues);
+    sheet.getRange(DATA_START_ROW, 1, sortRowCount, helperColumn).sort([
+      {
+        column: helperColumn,
+        ascending: true,
+      },
+      {
+        column: headerMap.facebook_created_time,
+        ascending: true,
+      },
+    ]);
+  } finally {
+    if (helperInserted) {
+      try {
+        sheet.deleteColumn(helperColumn);
+      } catch (err) {
+        Logger.log('Failed to remove temporary LEADS date sort helper column ' + helperColumn + ': ' + (err && err.message ? err.message : err));
+        throw err;
+      }
+    }
+  }
 }
 
 function applyLeadsDateAuditPlan_(sheet, headerMap, actions) {
@@ -1651,8 +1775,8 @@ function validateLeadsDateApplyAfterSort_(sheet, headerMap, beforeSnapshot, expe
     }
     if (blankStarted) errors.push('Dated row appears after blank-date row at LEADS row ' + sheetRow);
     const time = value.getTime();
-    if (previousTime !== null && time > previousTime) {
-      errors.push('Dates are not sorted newest-first near LEADS row ' + sheetRow);
+    if (previousTime !== null && time < previousTime) {
+      errors.push('Dates are not sorted oldest-first near LEADS row ' + sheetRow);
     }
     previousTime = time;
   });
@@ -1770,8 +1894,11 @@ function runLeadsDateAuditReportUnlocked_() {
     const fingerprint = buildLeadsDateAuditFingerprint_(leadsSheet, leadsHeaderMap, lastAuditedRow);
     metadata.audit_run_id = Utilities.getUuid();
     metadata.audit_timestamp = auditAt;
+    metadata.fingerprint_version = fingerprint.version;
     metadata.leads_last_audited_row = fingerprint.lastAuditedRow;
-    metadata.audit_source_fingerprint = fingerprint.fingerprint;
+    metadata.raw_fingerprint = fingerprint.rawFingerprint;
+    metadata.display_fingerprint = fingerprint.displayFingerprint;
+    metadata.audit_source_fingerprint = fingerprint.rawFingerprint;
     metadata.audit_fingerprint_rows = fingerprint.rowsChecked;
     const rows = [];
     const counts = getEmptyLeadsDateAuditCounts_();
@@ -1806,6 +1933,8 @@ function runLeadsDateAuditReportUnlocked_() {
       customerName,
         serializeLeadsDateAuditValue_(currentValue),
         currentDisplay,
+        stableSerializeLeadsDateRawValue_(currentValue),
+        buildLeadsDateDisplaySignature_(currentDisplay, currentFormat),
         getLeadsDateAuditValueType_(currentValue),
         currentFormat,
         canonical.source,
@@ -1837,7 +1966,7 @@ function getLeadsDateAuditMetadata_(ss) {
     target_date_format: LEADS_DATE_AUDIT_TARGET_DATE_FORMAT,
     audited_sheet: 'LEADS',
     audited_date_columns: 'Facebook Created Time',
-    sort_plan: 'Future apply step only: sort complete LEADS data rows by Facebook Created Time newest to oldest, excluding rows 1-2 and keeping Lead ID, customer fields, K notes, M audio link, P+ audio memos, formatting, and validations attached to the same row.',
+    sort_plan: 'Future apply step only: sort complete LEADS data rows by Facebook Created Time oldest to newest, excluding rows 1-2, keeping old leads above and new leads toward the bottom, placing blank/no-canonical date rows after dated rows, and keeping Lead ID, customer fields, K notes, M audio link, P+ audio memos, formatting, and validations attached to the same row.',
   };
 }
 
@@ -1869,29 +1998,52 @@ function getEmptyLeadsDateAuditCounts_() {
 function buildLeadsDateAuditFingerprint_(sheet, headerMap, lastAuditedRow) {
   if (!sheet || !headerMap || !headerMap.lead_id || !headerMap.facebook_created_time || lastAuditedRow < DATA_START_ROW) {
     return {
+      version: 2,
       lastAuditedRow: DATA_START_ROW - 1,
       rowsChecked: 0,
-      fingerprint: sha256Hex_(''),
+      rawFingerprint: sha256Hex_(''),
+      displayFingerprint: sha256Hex_(''),
     };
   }
 
   const rowCount = lastAuditedRow - DATA_START_ROW + 1;
   const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
   const displayValues = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getDisplayValues();
-  const entries = [];
+  const numberFormats = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getNumberFormats();
+  const rawEntries = [];
+  const displayEntries = [];
   values.forEach((row, index) => {
     const leadId = String(row[headerMap.lead_id - 1] || '').trim();
     if (!leadId) return;
-    const rawValue = serializeLeadsDateAuditValue_(row[headerMap.facebook_created_time - 1]);
+    const rawValue = stableSerializeLeadsDateRawValue_(row[headerMap.facebook_created_time - 1]);
     const displayValue = String(displayValues[index][headerMap.facebook_created_time - 1] || '');
-    entries.push([DATA_START_ROW + index, leadId, rawValue, displayValue].join('\u001f'));
+    const numberFormat = String(numberFormats[index][headerMap.facebook_created_time - 1] || '');
+    rawEntries.push([DATA_START_ROW + index, leadId, rawValue].join('\u001f'));
+    displayEntries.push([DATA_START_ROW + index, leadId, buildLeadsDateDisplaySignature_(displayValue, numberFormat)].join('\u001f'));
   });
 
   return {
+    version: 2,
     lastAuditedRow: lastAuditedRow,
-    rowsChecked: entries.length,
-    fingerprint: sha256Hex_(entries.join('\u001e')),
+    rowsChecked: rawEntries.length,
+    rawFingerprint: sha256Hex_(rawEntries.join('\u001e')),
+    displayFingerprint: sha256Hex_(displayEntries.join('\u001e')),
   };
+}
+
+function stableSerializeLeadsDateRawValue_(value) {
+  if (value === null || value === undefined || value === '') return 'BLANK';
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? 'DATE_INVALID' : 'DATE:' + Math.round(value.getTime() / 1000);
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? 'NUMBER:' + String(value) : 'NUMBER_INVALID';
+  }
+  return 'STRING:' + String(value).trim();
+}
+
+function buildLeadsDateDisplaySignature_(displayValue, numberFormat) {
+  return 'DISPLAY:' + String(displayValue || '').trim() + '\u001fFORMAT:' + String(numberFormat || '').trim();
 }
 
 function sha256Hex_(value) {
@@ -2390,9 +2542,11 @@ function writeLeadsDateAuditReport_(sheet, auditAt, metadata, counts, rows, prob
     ['spreadsheet locale', metadata.spreadsheet_locale || ''],
     ['spreadsheet timezone', metadata.spreadsheet_timezone || ''],
     ['Apps Script timezone', metadata.apps_script_timezone || ''],
+    ['fingerprint version', metadata.fingerprint_version || ''],
     ['LEADS last audited row', metadata.leads_last_audited_row || ''],
     ['audit fingerprint rows', metadata.audit_fingerprint_rows || ''],
-    ['audit source fingerprint', metadata.audit_source_fingerprint || ''],
+    ['raw fingerprint', metadata.raw_fingerprint || metadata.audit_source_fingerprint || ''],
+    ['display fingerprint', metadata.display_fingerprint || ''],
     ['classification counts', metadata.classification_counts_json || ''],
     ['target datetime display', metadata.target_datetime_format || LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT],
     ['target date display', metadata.target_date_format || LEADS_DATE_AUDIT_TARGET_DATE_FORMAT],
@@ -2426,6 +2580,8 @@ function writeLeadsDateAuditReport_(sheet, auditAt, metadata, counts, rows, prob
     'customer name',
     'raw cell value',
     'displayed value',
+    'raw date signature',
+    'display signature',
     'underlying value type',
     'current number format',
     'canonical source sheet',
