@@ -20,6 +20,10 @@ const {
     getFacebookBackfillState,
     saveFacebookBackfillState,
 } = require("./services/googleSheets");
+const {
+    getFacebookCreatedTimeForSheetValue,
+    selectFacebookLeadCustomerName,
+} = require("./services/facebookLeadParser");
 const { handleLegacyCrm2Import } = require("./services/imports/legacyCrm2Import");
 const { handleLegacyCrm1Import } = require("./services/imports/legacyCrm1Import");
 const { handleLegacyLeadStatusCleanup } = require("./services/imports/legacyCleanup");
@@ -199,7 +203,11 @@ function parseFacebookLead(leadData) {
         return Array.isArray(found?.values) ? found.values : [];
     };
 
-    const name = getValue("full_name", "name", "first_name");
+    const name = selectFacebookLeadCustomerName(fieldData, {
+        leadgenId: leadData?.id || "",
+        formId: leadData?.form_id || "",
+        logger: console,
+    });
     const phone = getValue("phone_number", "phone", "mobile_phone");
 
     const rawProvince = getValue("province");
@@ -392,43 +400,8 @@ function formatDateTimeForSheet(date = new Date()) {
     return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
 }
 
-function formatFacebookDateTimeForSheet(date = new Date()) {
-    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
-        return "";
-    }
-
-    const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: "Asia/Bangkok",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        hourCycle: "h23",
-    }).formatToParts(date).reduce((acc, part) => {
-        acc[part.type] = part.value;
-        return acc;
-    }, {});
-
-    return `${parts.month}/${parts.day}/${parts.year} ${parts.hour}:${parts.minute}`;
-}
-
 function getFacebookCreatedTimeForSheet(leadData) {
-    const rawCreatedTime = String(leadData?.created_time || "").trim();
-
-    if (!rawCreatedTime) {
-        return {
-            value: formatFacebookDateTimeForSheet(new Date()),
-            used: false,
-        };
-    }
-
-    const formattedCreatedTime = formatFacebookDateTimeForSheet(new Date(rawCreatedTime));
-
-    return {
-        value: formattedCreatedTime || formatFacebookDateTimeForSheet(new Date()),
-        used: Boolean(formattedCreatedTime),
-    };
+    return getFacebookCreatedTimeForSheetValue(leadData);
 }
 
 function requireSyncSecret(req, res) {

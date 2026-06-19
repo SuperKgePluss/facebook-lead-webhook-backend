@@ -859,7 +859,7 @@ function buildLeadDetailObject(leadId, lead) {
         ad_id: lead.ad_id || lead.facebook_ad_id || "",
         adset_id: lead.adset_id || lead.facebook_adset_id || "",
         campaign_id: lead.campaign_id || lead.facebook_campaign_id || "",
-        facebook_created_time: lead.facebook_created_time || "",
+        facebook_created_time: valueToBangkokSheetsDateSerial(lead.facebook_created_time),
         is_organic: lead.is_organic ?? lead.facebook_is_organic ?? "",
         platform: lead.platform || lead.facebook_platform || "",
         inbox_url: lead.inbox_url || "",
