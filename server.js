@@ -41,6 +41,14 @@ app.use(express.json({
 
 const PORT = process.env.PORT || 3000;
 const FB_VERIFY_TOKEN = process.env.FB_VERIFY_TOKEN;
+const LATEST_FACEBOOK_SYNC_DEFAULT_LIMIT = 25;
+const LATEST_FACEBOOK_SYNC_MAX_LIMIT = 100;
+const FULL_FACEBOOK_SYNC_MAX_PAGE_SIZE = 50;
+const FULL_FACEBOOK_SYNC_MAX_TOTAL = 100;
+const BACKFILL_STEP_DEFAULT_PAGE_SIZE = 25;
+const BACKFILL_STEP_MAX_PAGE_SIZE = 50;
+const BACKFILL_STEP_DEFAULT_MAX_PAGES = 1;
+const BACKFILL_STEP_MAX_PAGES = 3;
 
 function normalizeProvince(rawProvince) {
     const raw = String(rawProvince || "").trim();
@@ -441,6 +449,37 @@ function parseBooleanQuery(value) {
     return String(value || "").trim().toLowerCase() === "true";
 }
 
+function requireConfirm(req, res, operation) {
+    if (parseBooleanQuery(req.query.confirm)) return true;
+
+    res.status(400).json({
+        success: false,
+        error: "confirm=true is required for this protected operation.",
+        operation,
+        no_writes_performed: true,
+        required_query: {
+            secret: "...",
+            confirm: "true",
+        },
+    });
+    return false;
+}
+
+function requireConfirmForWriteQuery(operation) {
+    return (req, res, next) => {
+        const dryRun = String(req.query.dry_run ?? "true").trim().toLowerCase() !== "false";
+        if (dryRun) return next();
+        if (!requireConfirm(req, res, operation)) return;
+        next();
+    };
+}
+
+function isExplicitPositiveInteger(value) {
+    const raw = String(value ?? "").trim();
+    if (!/^\d+$/.test(raw)) return false;
+    return Number(raw) > 0;
+}
+
 function parsePositiveInteger(value, fallback, max = null) {
     const parsed = Number(value);
     const safeValue = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
@@ -598,6 +637,7 @@ app.post("/webhook/facebook", async (req, res) => {
 app.all("/sync/facebook-leads/backfill/start", async (req, res) => {
     try {
         if (!requireSyncSecret(req, res)) return;
+        if (!requireConfirm(req, res, "facebook_backfill_start")) return;
 
         const forms = await fetchLeadgenForms();
         const now = formatDateTimeForSheet(new Date());
@@ -670,13 +710,25 @@ app.get("/sync/facebook-leads/backfill/status", async (req, res) => {
 });
 
 app.get("/sync/facebook-leads/backfill/step", async (req, res) => {
+    const startedAtMs = Date.now();
     const stopAtMs = Date.now() + 50000;
 
     try {
         if (!requireSyncSecret(req, res)) return;
+        if (!requireConfirm(req, res, "facebook_backfill_step")) return;
 
-        const pageSize = parsePositiveInteger(req.query.page_size, 50, 100);
-        const maxPages = parsePositiveInteger(req.query.max_pages, 3, 10);
+        const requestedPageSize = req.query.page_size;
+        const requestedMaxPages = req.query.max_pages;
+        const pageSize = parsePositiveInteger(
+            requestedPageSize,
+            BACKFILL_STEP_DEFAULT_PAGE_SIZE,
+            BACKFILL_STEP_MAX_PAGE_SIZE
+        );
+        const maxPages = parsePositiveInteger(
+            requestedMaxPages,
+            BACKFILL_STEP_DEFAULT_MAX_PAGES,
+            BACKFILL_STEP_MAX_PAGES
+        );
         const forms = await fetchLeadgenForms();
         let state = await getFacebookBackfillState();
 
@@ -852,6 +904,7 @@ app.get("/sync/facebook-leads/backfill/step", async (req, res) => {
         console.log("[facebook-backfill] step complete", {
             job_id: state.job_id,
             status,
+            duration_ms: Date.now() - startedAtMs,
             pages_processed: pagesProcessed,
             fetched,
             inserted,
@@ -870,6 +923,18 @@ app.get("/sync/facebook-leads/backfill/step", async (req, res) => {
             skipped_existing: skippedExisting,
             skipped_empty: skippedEmpty,
             failed,
+            duration_ms: Date.now() - startedAtMs,
+            stop_reason: status === "running"
+                ? (Date.now() >= stopAtMs ? "timeout_guard" : "bounded_step_limit")
+                : "completed",
+            safety_limits: {
+                requested_page_size: requestedPageSize || "",
+                effective_page_size: pageSize,
+                max_page_size: BACKFILL_STEP_MAX_PAGE_SIZE,
+                requested_max_pages: requestedMaxPages || "",
+                effective_max_pages: maxPages,
+                max_pages_cap: BACKFILL_STEP_MAX_PAGES,
+            },
             next_url_available: status === "running" && Boolean(state.current_form_id),
             continue_required: status === "running",
             failed_items: failedItems.slice(0, 30),
@@ -904,6 +969,26 @@ app.get("/sync/facebook-leads", async (req, res) => {
 
         const mode = String(req.query.mode || "").trim().toLowerCase();
         if (mode === "full") {
+            if (!requireConfirm(req, res, "facebook_full_sync")) return;
+            if (!isExplicitPositiveInteger(req.query.limit) || !isExplicitPositiveInteger(req.query.max_total)) {
+                return res.status(400).json({
+                    success: false,
+                    mode: "full",
+                    error: "mode=full requires explicit positive integer limit and max_total query parameters.",
+                    no_writes_performed: true,
+                    safety_limits: {
+                        max_limit: FULL_FACEBOOK_SYNC_MAX_PAGE_SIZE,
+                        max_total: FULL_FACEBOOK_SYNC_MAX_TOTAL,
+                    },
+                    required_query: {
+                        secret: "...",
+                        confirm: "true",
+                        limit: "50",
+                        max_total: "100",
+                        dry_run: "true",
+                    },
+                });
+            }
             const startedAtMs = Date.now();
             const stopAtMs = startedAtMs + 120000;
             let fullSyncResponded = false;
@@ -958,13 +1043,13 @@ app.get("/sync/facebook-leads", async (req, res) => {
             };
             const pageSizeQuery = Number(req.query.limit);
             const pageSize = Number.isFinite(pageSizeQuery) && pageSizeQuery > 0
-                ? Math.min(pageSizeQuery, 100)
-                : 100;
+                ? Math.min(pageSizeQuery, FULL_FACEBOOK_SYNC_MAX_PAGE_SIZE)
+                : FULL_FACEBOOK_SYNC_MAX_PAGE_SIZE;
             const maxTotalQuery = Number(req.query.max_total);
             const maxTotal = Number.isFinite(maxTotalQuery) && maxTotalQuery > 0
-                ? maxTotalQuery
-                : null;
-            const dryRun = parseBooleanQuery(req.query.dry_run);
+                ? Math.min(maxTotalQuery, FULL_FACEBOOK_SYNC_MAX_TOTAL)
+                : FULL_FACEBOOK_SYNC_MAX_TOTAL;
+            const dryRun = String(req.query.dry_run ?? "true").trim().toLowerCase() !== "false";
             console.log("[full-sync] fetching lead forms");
             console.log("[full-sync] entering pagination loop");
             const fullFetchResult = await fetchAllLeadIdsFromPage({
@@ -1142,6 +1227,14 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 dry_run: dryRun,
                 page_size: pageSize,
                 max_total: maxTotal,
+                safety_limits: {
+                    requested_limit: req.query.limit || "",
+                    effective_limit: pageSize,
+                    max_limit: FULL_FACEBOOK_SYNC_MAX_PAGE_SIZE,
+                    requested_max_total: req.query.max_total || "",
+                    effective_max_total: maxTotal,
+                    max_total_cap: FULL_FACEBOOK_SYNC_MAX_TOTAL,
+                },
                 fetched_total: leadRefs.length,
                 processed,
                 parsed,
@@ -1165,11 +1258,9 @@ app.get("/sync/facebook-leads", async (req, res) => {
         }
 
         const limitQuery = Number(req.query.limit);
-        const limit = mode === "full"
-            ? null
-            : Number.isFinite(limitQuery) && limitQuery > 0
-                ? limitQuery
-                : null;
+        const limit = Number.isFinite(limitQuery) && limitQuery > 0
+            ? Math.min(limitQuery, LATEST_FACEBOOK_SYNC_MAX_LIMIT)
+            : LATEST_FACEBOOK_SYNC_DEFAULT_LIMIT;
 
         console.log("🔄 Facebook lead batch sync started");
         console.log(`⚙️ Sync mode: ${mode || "default"}`);
@@ -1260,6 +1351,12 @@ app.get("/sync/facebook-leads", async (req, res) => {
             success: true,
             mode: mode || "default",
             limit: limit || null,
+            safety_limits: {
+                requested_limit: req.query.limit || "",
+                effective_limit: limit,
+                default_limit: LATEST_FACEBOOK_SYNC_DEFAULT_LIMIT,
+                max_limit: LATEST_FACEBOOK_SYNC_MAX_LIMIT,
+            },
             fetched: leadRefs.length,
             parsed: parsedLeads.length,
             inserted: batchResult.created,
@@ -1307,7 +1404,7 @@ app.get("/debug/facebook-access", async (req, res) => {
     }
 });
 
-app.get("/debug/facebook-form", async (req, res) => {
+app.get("/debug/facebook-form", requireSyncSecretMiddleware, async (req, res) => {
     try {
         const result = await debugFacebookForm();
 
@@ -1323,7 +1420,7 @@ app.get("/debug/facebook-form", async (req, res) => {
     }
 });
 
-app.get("/debug/leadgen-forms", async (req, res) => {
+app.get("/debug/leadgen-forms", requireSyncSecretMiddleware, async (req, res) => {
     try {
         const result = await debugLeadgenForms();
 
@@ -1339,7 +1436,7 @@ app.get("/debug/leadgen-forms", async (req, res) => {
     }
 });
 
-app.get("/debug/facebook-form-raw", async (req, res) => {
+app.get("/debug/facebook-form-raw", requireSyncSecretMiddleware, async (req, res) => {
     try {
         const formId = process.env.FB_FORM_ID;
         const token = process.env.FB_PAGE_ACCESS_TOKEN;
@@ -1383,7 +1480,9 @@ app.get("/debug/routes", requireSyncSecretMiddleware, (req, res) => {
 app.get("/debug/facebook-leads-dry-run", requireSyncSecretMiddleware, async (req, res) => {
     try {
         const limitQuery = Number(req.query.limit);
-        const limit = Number.isFinite(limitQuery) && limitQuery > 0 ? limitQuery : 20;
+        const limit = Number.isFinite(limitQuery) && limitQuery > 0
+            ? Math.min(limitQuery, LATEST_FACEBOOK_SYNC_MAX_LIMIT)
+            : 20;
         const leadRefs = await fetchLatestLeadIdsFromPage({ limit });
         const preview = [];
         const failedItems = [];
@@ -1464,6 +1563,11 @@ app.get("/debug/facebook-leads-dry-run", requireSyncSecretMiddleware, async (req
             success: true,
             dry_run: true,
             limit,
+            safety_limits: {
+                requested_limit: req.query.limit || "",
+                effective_limit: limit,
+                max_limit: LATEST_FACEBOOK_SYNC_MAX_LIMIT,
+            },
             fetched: leadRefs.length,
             parsed,
             enriched_success: enrichedSuccess,
@@ -1584,7 +1688,7 @@ app.get("/debug/facebook-lead/:leadgenId", requireSyncSecretMiddleware, async (r
     }
 });
 
-app.get("/debug/lead/:leadgenId", async (req, res) => {
+app.get("/debug/lead/:leadgenId", requireSyncSecretMiddleware, async (req, res) => {
     try {
         const leadData = await fetchLeadDetail(req.params.leadgenId);
 
@@ -1600,9 +1704,9 @@ app.get("/debug/lead/:leadgenId", async (req, res) => {
     }
 });
 
-app.post("/import/legacy", handleLegacyCrm2Import);
-app.post("/import/legacy-crm1", handleLegacyCrm1Import);
-app.post("/import/legacy/cleanup-lead-status", handleLegacyLeadStatusCleanup);
+app.post("/import/legacy", requireSyncSecretMiddleware, requireConfirmForWriteQuery("legacy_crm2_import"), handleLegacyCrm2Import);
+app.post("/import/legacy-crm1", requireSyncSecretMiddleware, requireConfirmForWriteQuery("legacy_crm1_import"), handleLegacyCrm1Import);
+app.post("/import/legacy/cleanup-lead-status", requireSyncSecretMiddleware, requireConfirmForWriteQuery("legacy_lead_status_cleanup"), handleLegacyLeadStatusCleanup);
 app.get("/audit/crm3-restore", requireSyncSecretMiddleware, handleCrm3RestoreAudit);
 app.get("/audit/facebook-raw", requireSyncSecretMiddleware, handleFacebookRawAudit);
 app.post("/restore/crm3-safe", requireSyncSecretMiddleware, handleCrm3SafeRestore);
