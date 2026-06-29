@@ -1065,6 +1065,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
             let inserted = 0;
             let updatedExisting = 0;
             let skippedExisting = 0;
+            let skippedUnchanged = 0;
             let skippedEmpty = 0;
             let enrichedSuccess = 0;
             let facebookCreatedTimeUsed = 0;
@@ -1174,6 +1175,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 inserted += batchResult.created;
                 updatedExisting += batchResult.updated_existing;
                 skippedExisting += batchResult.skipped_existing;
+                skippedUnchanged += batchResult.skipped_unchanged || 0;
                 skippedEmpty += batchResult.skipped_empty;
                 batchSkippedEmptyItems = batchSkippedEmptyItems.concat(batchResult.skipped_empty_items || []);
                 latestFullSyncCounters = {
@@ -1181,6 +1183,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
                     inserted,
                     updated_existing: updatedExisting,
                     skipped_existing: skippedExisting,
+                    skipped_unchanged: skippedUnchanged,
                     skipped_empty: skippedEmpty,
                     failed: failedItems.length,
                     enriched_success: enrichedSuccess,
@@ -1211,6 +1214,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 inserted,
                 updated_existing: updatedExisting,
                 skipped_existing: skippedExisting,
+                skipped_unchanged: skippedUnchanged,
                 skipped_empty: skippedEmpty,
                 failed,
                 enriched_success: enrichedSuccess,
@@ -1241,6 +1245,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
                 inserted,
                 updated_existing: updatedExisting,
                 skipped_existing: skippedExisting,
+                skipped_unchanged: skippedUnchanged,
                 skipped_empty: skippedEmpty,
                 failed,
                 enriched_success: enrichedSuccess,
@@ -1362,6 +1367,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
             inserted: batchResult.created,
             updated_existing: batchResult.updated_existing,
             skipped_existing: batchResult.skipped_existing,
+            skipped_unchanged: batchResult.skipped_unchanged || 0,
             skipped_empty: skipped_empty + batchResult.skipped_empty,
             failed,
             enriched_success,

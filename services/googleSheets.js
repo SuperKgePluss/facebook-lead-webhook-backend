@@ -172,6 +172,7 @@ function valueToBangkokSheetsDateSerial(value) {
     return Number.isNaN(parsed.getTime()) ? "" : dateToBangkokSheetsDateSerial(parsed);
 }
 
+
 function columnToLetter(columnNumber) {
     let column = columnNumber;
     let letter = "";
@@ -485,6 +486,31 @@ function mergeObjectPreserveExisting(existingObject = {}, incomingObject = {}) {
     }
 
     return merged;
+}
+
+function normalizeComparableSheetValue(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return String(Math.round(value * 10000000000) / 10000000000);
+    }
+    return String(value).trim();
+}
+
+function hasMeaningfulObjectChanges(headers, existingObject = {}, proposedObject = {}, options = {}) {
+    const excludedFields = new Set((options.exclude || []).map(normalizeHeaderName));
+    const headerSet = new Set((headers || []).map(normalizeHeaderName).filter(Boolean));
+
+    for (const [key, proposedValue] of Object.entries(proposedObject || {})) {
+        const canonicalKey = normalizeHeaderName(key);
+        if (!canonicalKey || excludedFields.has(canonicalKey) || !headerSet.has(canonicalKey)) continue;
+
+        const existingValue = getObjectValueForCanonicalHeader(existingObject, canonicalKey);
+        if (normalizeComparableSheetValue(existingValue) !== normalizeComparableSheetValue(proposedValue)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function getLeadDetailDedupeKeys(object = {}) {
@@ -968,6 +994,7 @@ async function appendLeadsToSheetBatch(leads) {
     const createdItems = [];
     const updatedItems = [];
     const skippedExistingItems = [];
+    const skippedUnchangedItems = [];
     const skippedEmptyItems = [];
     const newLeadObjects = [];
     const newDetailObjects = [];
@@ -997,6 +1024,14 @@ async function appendLeadsToSheetBatch(leads) {
         if (existingDetail?.rowNumber) {
             const mergedDetail = mergeObjectPreserveExisting(existingDetail, detailObject);
 
+            if (!hasMeaningfulObjectChanges(detailHeaders, existingDetail, mergedDetail)) {
+                return {
+                    action: "unchanged",
+                    rowNumber: existingDetail.rowNumber,
+                    matchType: existingDetail.matchType,
+                };
+            }
+
             for (const group of groupObjectRanges(detailHeaders, existingDetail.rowNumber, mergedDetail)) {
                 updateData.push({
                     range: `${SHEETS.LEAD_DETAILS}!${group.rangeSuffix}`,
@@ -1005,12 +1040,21 @@ async function appendLeadsToSheetBatch(leads) {
             }
 
             inMemoryDetailRows[existingDetail.rowNumber - 1] = objectToRow(detailHeaders, mergedDetail);
-            return;
+            return {
+                action: "updated",
+                rowNumber: existingDetail.rowNumber,
+                matchType: existingDetail.matchType,
+            };
         }
 
         newDetailObjects.push(detailObject);
         inMemoryDetailRows[nextDetailRow - 1] = objectToRow(detailHeaders, detailObject);
         nextDetailRow++;
+        return {
+            action: "created",
+            rowNumber: nextDetailRow - 1,
+            matchType: "new",
+        };
     };
 
     for (const lead of leads) {
@@ -1076,22 +1120,44 @@ async function appendLeadsToSheetBatch(leads) {
         }
 
         const leadId = existingLead.lead_id;
-        affectedRows.add(existingLead.rowNumber);
         const latestDeal = findLatestDealByLeadId(dealHeaders, inMemoryDealRows, leadId);
         const shouldCreateDeal = isCompletedLead(existingLead) || !latestDeal;
         const detailObject = buildLeadDetailObject(leadId, lead);
         const updateLeadObject = buildLeadMainUpdateObject(existingLead, lead);
+        const leadHasMeaningfulChanges = hasMeaningfulObjectChanges(
+            leadHeaders,
+            existingLead,
+            updateLeadObject,
+            { exclude: ["updated_at"] }
+        );
+        const detailWriteResult = queueLeadDetailWrite(detailObject);
 
-        for (const group of groupObjectRanges(leadHeaders, existingLead.rowNumber, updateLeadObject)) {
-            updateData.push({
-                range: `${SHEETS.LEADS_MAIN}!${group.rangeSuffix}`,
-                values: group.values,
+        if (!leadHasMeaningfulChanges && detailWriteResult?.action === "unchanged" && !shouldCreateDeal) {
+            seenLeadgenIds.add(leadgenId);
+            skippedUnchangedItems.push({
+                lead_id: leadId,
+                lead_row_number: existingLead.rowNumber,
+                facebook_leadgen_id: leadgenId,
+                reason: "existing_lead_no_meaningful_changes",
             });
+            continue;
         }
 
-        queueLeadDetailWrite(detailObject);
-
         let dealId = latestDeal?.deal_id || "";
+
+        if (leadHasMeaningfulChanges) {
+            const leadObjectWithUpdatedAt = {
+                ...updateLeadObject,
+                updated_at: dateToBangkokSheetsDateSerial(new Date()),
+            };
+            for (const group of groupObjectRanges(leadHeaders, existingLead.rowNumber, leadObjectWithUpdatedAt)) {
+                updateData.push({
+                    range: `${SHEETS.LEADS_MAIN}!${group.rangeSuffix}`,
+                    values: group.values,
+                });
+            }
+            affectedRows.add(existingLead.rowNumber);
+        }
 
         if (shouldCreateDeal) {
             dealId = generateId("DEAL");
@@ -1099,6 +1165,7 @@ async function appendLeadsToSheetBatch(leads) {
             newDealObjects.push(dealObject);
             inMemoryDealRows[nextDealRow - 1] = objectToRow(dealHeaders, dealObject);
             nextDealRow++;
+            affectedRows.add(existingLead.rowNumber);
         }
 
         seenLeadgenIds.add(leadgenId);
@@ -1108,9 +1175,12 @@ async function appendLeadsToSheetBatch(leads) {
             deal_id: dealId,
             lead_row_number: existingLead.rowNumber,
             facebook_leadgen_id: leadgenId,
-            action: shouldCreateDeal
-                ? "created_new_deal_for_completed_or_missing_deal"
-                : "updated_existing",
+            action: [
+                leadHasMeaningfulChanges ? "updated_lead" : "",
+                detailWriteResult?.action === "updated" ? "updated_detail" : "",
+                detailWriteResult?.action === "created" ? "created_detail" : "",
+                shouldCreateDeal ? "created_new_deal_for_completed_or_missing_deal" : "",
+            ].filter(Boolean).join("+") || "updated_existing",
         });
     }
 
@@ -1164,12 +1234,14 @@ async function appendLeadsToSheetBatch(leads) {
     console.log(`Batch sync created: ${createdItems.length}`);
     console.log(`Batch sync updated_existing: ${updatedItems.length}`);
     console.log(`Batch sync skipped_existing: ${skippedExistingItems.length}`);
+    console.log(`Batch sync skipped_unchanged: ${skippedUnchangedItems.length}`);
     console.log(`Batch sync skipped_empty: ${skippedEmptyItems.length}`);
 
     return {
         created: createdItems.length,
         updated_existing: updatedItems.length,
         skipped_existing: skippedExistingItems.length,
+        skipped_unchanged: skippedUnchangedItems.length,
         skipped_empty: skippedEmptyItems.length,
         affected_rows: Array.from(affectedRows).sort((a, b) => a - b),
         incremental_cleanup_attempted: false,
@@ -1178,6 +1250,7 @@ async function appendLeadsToSheetBatch(leads) {
         created_items: createdItems,
         updated_items: updatedItems,
         skipped_existing_items: skippedExistingItems,
+        skipped_unchanged_items: skippedUnchangedItems,
         skipped_empty_items: skippedEmptyItems,
     };
 }
