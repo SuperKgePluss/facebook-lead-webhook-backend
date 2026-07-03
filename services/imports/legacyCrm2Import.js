@@ -418,8 +418,8 @@ function isCrm2HeaderTemplateCandidate(candidate = {}) {
         .toLowerCase();
 
     const phoneLooksLikeHeader = /phone|เบอร์|โทรศัพท์/.test(phoneText);
-    const textLooksLikeHeader = /follow[-\s]?up|date\/time|details|วัน\/เวลา|ติดตามครั้งที่|รายละเอียด/.test(candidateText);
-    const sourceLooksLikeHeader = /follow[-\s]?up|date\/time|details|วัน\/เวลา|ติดตามครั้งที่|รายละเอียด/.test(sourceName);
+    const textLooksLikeHeader = /follow[-\s]?up|date\/time|details|call recording|วัน\/เวลา|ติดตามครั้งที่|รายละเอียด|บันทึกการโทร/.test(candidateText);
+    const sourceLooksLikeHeader = /follow[-\s]?up|date\/time|details|call recording|วัน\/เวลา|ติดตามครั้งที่|รายละเอียด|บันทึกการโทร/.test(sourceName);
 
     return Boolean(phoneLooksLikeHeader && (textLooksLikeHeader || sourceLooksLikeHeader));
 }

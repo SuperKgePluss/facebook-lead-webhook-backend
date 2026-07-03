@@ -44,6 +44,18 @@ function makeResponse(queryOverrides = {}) {
                 matched_existing_lead: false,
                 reason_skipped: "unmatched_phone_no_existing_lead_id",
             }),
+            makeCandidate({
+                source_row_number: 2,
+                source_column_letter: "P",
+                source_column_name: "Call Recording",
+                raw_phone: "เบอร์โทรศัพท์",
+                normalized_phone: "",
+                phone: "",
+                raw_text: "บันทึกการโทร",
+                matched_lead_id: "",
+                matched_existing_lead: false,
+                reason_skipped: "unmatched_phone_no_existing_lead_id",
+            }),
             makeCandidate({ source_row_number: 10, matched_lead_id: "", matched_existing_lead: false, reason_skipped: "unmatched_phone_no_existing_lead_id" }),
             makeCandidate({ source_row_number: 11, matched_lead_id: "", matched_existing_lead: false, reason_skipped: "unmatched_phone_no_existing_lead_id" }),
         ],
@@ -90,7 +102,7 @@ assert.strictEqual(summary.write_guard, "dry_run=true; no writes performed");
 assert.strictEqual(summary.matched_candidate_samples.length, 1);
 assert.strictEqual(summary.unmatched_candidate_samples.length, 1);
 assert.strictEqual(summary.duplicate_risk_candidate_samples.length, 1);
-assert.strictEqual(summary.header_template_unmatched_candidates_skipped_from_samples, 1);
+assert.strictEqual(summary.header_template_unmatched_candidates_skipped_from_samples, 2);
 assert.strictEqual(summary.candidates_matched_to_existing_lead_id, undefined);
 assert.strictEqual(summary.duplicate_candidates_skipped_details, undefined);
 assert.strictEqual(summary.crm2_followup_l_to_o_audit, undefined);
@@ -100,6 +112,7 @@ assert.match(summary.matched_candidate_samples[0].phone, /<redacted_phone>/);
 assert.match(summary.matched_candidate_samples[0].raw_text_preview, /<redacted_phone>/);
 assert.match(summary.matched_candidate_samples[0].raw_text_preview, /<redacted_email>/);
 assert.notStrictEqual(summary.unmatched_candidate_samples[0].source_row_number, 2);
+assert.notStrictEqual(summary.unmatched_candidate_samples[0].source_column_name, "Call Recording");
 
 const shortPhoneResponse = buildCrm2FollowUpLogOnlyResponse({
     req: {
