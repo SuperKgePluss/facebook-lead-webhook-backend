@@ -921,6 +921,24 @@ async function getExistingLeadgenIds() {
     );
 }
 
+async function getExistingLeadgenIdsNarrow() {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    const headerRows = await readSheet(sheets, spreadsheetId, `${SHEETS.LEAD_DETAILS}!A${HEADER_ROW}:ZZ${HEADER_ROW}`);
+    const headers = headerRows[0] || [];
+    const leadgenIndex = headers.findIndex(header => normalizeHeaderName(header) === "facebook_leadgen_id");
+    if (leadgenIndex < 0) {
+        throw new Error(`Missing required header facebook_leadgen_id in ${SHEETS.LEAD_DETAILS}`);
+    }
+    const leadgenColumn = columnToLetter(leadgenIndex + 1);
+    const rows = await readSheet(sheets, spreadsheetId, `${SHEETS.LEAD_DETAILS}!${leadgenColumn}${DATA_START_ROW}:${leadgenColumn}`);
+
+    return new Set(
+        rows
+            .map(row => String(row?.[0] || "").trim())
+            .filter(Boolean)
+    );
+}
+
 async function appendLeadToSheet(lead) {
     const result = await appendLeadsToSheetBatch([lead]);
 
@@ -1259,6 +1277,7 @@ module.exports = {
     appendLeadToSheet,
     appendLeadsToSheetBatch,
     getExistingLeadgenIds,
+    getExistingLeadgenIdsNarrow,
     createSheetsClient,
     readSheet,
     getSheetRows,

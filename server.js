@@ -17,6 +17,7 @@ const {
 const {
     appendLeadToSheet,
     appendLeadsToSheetBatch,
+    getExistingLeadgenIdsNarrow,
     getFacebookBackfillState,
     saveFacebookBackfillState,
 } = require("./services/googleSheets");
@@ -1271,9 +1272,25 @@ app.get("/sync/facebook-leads", async (req, res) => {
         console.log(`⚙️ Sync mode: ${mode || "default"}`);
         console.log(`⚙️ Sync limit: ${limit || "none"}`);
 
+        const syncStartedAtMs = Date.now();
         const leadRefs = await fetchLatestLeadIdsFromPage({ limit });
+        const existingLeadgenIds = await getExistingLeadgenIdsNarrow();
+        const refsNeedingDetail = [];
+        let knownRefsSkippedBeforeDetail = 0;
+        let detailFetchCount = 0;
 
         console.log(`📥 Facebook lead refs fetched: ${leadRefs.length}`);
+
+        for (const leadRef of leadRefs) {
+            const leadgenId = String(leadRef.id || "").trim();
+
+            if (leadgenId && existingLeadgenIds.has(leadgenId)) {
+                knownRefsSkippedBeforeDetail++;
+                continue;
+            }
+
+            refsNeedingDetail.push(leadRef);
+        }
 
         const parsedLeads = [];
         const failedItems = [];
@@ -1282,7 +1299,48 @@ app.get("/sync/facebook-leads", async (req, res) => {
         let facebook_created_time_missing = 0;
         let skipped_empty = 0;
 
-        for (const leadRef of leadRefs) {
+        if (!refsNeedingDetail.length) {
+            const runtimeMs = Date.now() - syncStartedAtMs;
+            console.log("Facebook lead sync counters", {
+                fetched_refs: leadRefs.length,
+                known_refs_skipped_before_detail: knownRefsSkippedBeforeDetail,
+                detail_fetch_count: detailFetchCount,
+                parsed_count: parsedLeads.length,
+                runtime_ms: runtimeMs,
+            });
+
+            return res.status(200).json({
+                success: true,
+                mode: mode || "default",
+                limit: limit || null,
+                safety_limits: {
+                    requested_limit: req.query.limit || "",
+                    effective_limit: limit,
+                    default_limit: LATEST_FACEBOOK_SYNC_DEFAULT_LIMIT,
+                    max_limit: LATEST_FACEBOOK_SYNC_MAX_LIMIT,
+                },
+                fetched: leadRefs.length,
+                parsed: 0,
+                inserted: 0,
+                updated_existing: 0,
+                skipped_existing: 0,
+                skipped_unchanged: 0,
+                skipped_empty: 0,
+                skipped_known_leadgen_ids: knownRefsSkippedBeforeDetail,
+                failed: 0,
+                enriched_success: 0,
+                facebook_created_time_used: 0,
+                facebook_created_time_missing: 0,
+                affected_rows: [],
+                incremental_cleanup_attempted: false,
+                incremental_cleanup_rows: 0,
+                full_cleanup_required: false,
+                failed_items: [],
+                batch_skipped_empty_items: [],
+            });
+        }
+
+        for (const leadRef of refsNeedingDetail) {
             const leadgenId = String(leadRef.id || "").trim();
 
             if (!leadgenId) {
@@ -1295,6 +1353,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
             }
 
             try {
+                detailFetchCount++;
                 const leadData = await fetchLeadDetail(leadgenId);
                 const lead = parseFacebookLead(leadData);
 
@@ -1351,6 +1410,15 @@ app.get("/sync/facebook-leads", async (req, res) => {
         const batchResult = await appendLeadsToSheetBatch(parsedLeads);
 
         const failed = failedItems.length;
+        const runtimeMs = Date.now() - syncStartedAtMs;
+
+        console.log("Facebook lead sync counters", {
+            fetched_refs: leadRefs.length,
+            known_refs_skipped_before_detail: knownRefsSkippedBeforeDetail,
+            detail_fetch_count: detailFetchCount,
+            parsed_count: parsedLeads.length,
+            runtime_ms: runtimeMs,
+        });
 
         return res.status(200).json({
             success: true,
@@ -1369,6 +1437,7 @@ app.get("/sync/facebook-leads", async (req, res) => {
             skipped_existing: batchResult.skipped_existing,
             skipped_unchanged: batchResult.skipped_unchanged || 0,
             skipped_empty: skipped_empty + batchResult.skipped_empty,
+            skipped_known_leadgen_ids: knownRefsSkippedBeforeDetail,
             failed,
             enriched_success,
             facebook_created_time_used,
