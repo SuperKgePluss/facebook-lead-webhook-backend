@@ -336,6 +336,166 @@ function parseCrm2ConfirmWrite(req) {
     return rawConfirm === "true" || rawConfirm === "1" || rawConfirm === "yes";
 }
 
+function parseCrm2BooleanQuery(value, fallback = false) {
+    if (value === undefined || value === null || value === "") return fallback;
+
+    const raw = String(value).trim().toLowerCase();
+    if (["true", "1", "yes", "y"].includes(raw)) return true;
+    if (["false", "0", "no", "n"].includes(raw)) return false;
+    return fallback;
+}
+
+function parseCrm2SampleLimit(value, fallback = 5) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+    return Math.min(Math.floor(parsed), 50);
+}
+
+function buildSafeCrm2ReceivedQuery(query = {}, options = {}) {
+    const redact = options.redact !== false;
+
+    return Object.entries(query || {}).reduce((safeQuery, [key, value]) => {
+        const normalizedKey = String(key || "").trim().toLowerCase();
+        if (normalizedKey === "secret") {
+            safeQuery[key] = "<redacted>";
+            return safeQuery;
+        }
+
+        safeQuery[key] = redact ? redactCrm2SensitiveValue(value, options.secret) : value;
+        return safeQuery;
+    }, {});
+}
+
+function redactCrm2SensitiveValue(value, secret = "") {
+    if (value === null || value === undefined) return value;
+    if (Array.isArray(value)) return value.map(item => redactCrm2SensitiveValue(item, secret));
+    if (typeof value === "object") {
+        return Object.entries(value).reduce((object, [key, item]) => {
+            object[key] = redactCrm2SensitiveValue(item, secret);
+            return object;
+        }, {});
+    }
+
+    let text = String(value);
+    const secretText = String(secret || "").trim();
+    if (secretText) {
+        text = text.split(secretText).join("<redacted>");
+    }
+
+    return text
+        .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "<redacted_email>")
+        .replace(/(?:\+?66|0)[\d\s().-]{8,16}/g, "<redacted_phone>");
+}
+
+function truncateCrm2Text(value, maxLength = 160) {
+    const text = String(value || "").trim();
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength)}...`;
+}
+
+function sanitizeCrm2CandidateSample(candidate = {}, options = {}) {
+    return {
+        source_row_number: candidate.source_row_number || "",
+        source_column_letter: candidate.source_column_letter || "",
+        source_column_name: candidate.source_column_name || "",
+        candidate_type: candidate.candidate_type || "",
+        matched_lead_id: candidate.matched_lead_id || "",
+        matched_existing_lead: Boolean(candidate.matched_existing_lead),
+        duplicate_risk: Boolean(candidate.duplicate_risk),
+        reason_skipped: candidate.reason_skipped || "",
+        raw_phone: redactCrm2SensitiveValue(candidate.raw_phone || "", options.secret),
+        normalized_phone: redactCrm2SensitiveValue(candidate.normalized_phone || candidate.phone || "", options.secret),
+        raw_text_preview: truncateCrm2Text(redactCrm2SensitiveValue(candidate.raw_text || candidate.note || "", options.secret)),
+    };
+}
+
+function sampleCrm2Candidates(candidates, sampleLimit, options = {}) {
+    return (candidates || [])
+        .slice(0, sampleLimit)
+        .map(candidate => sanitizeCrm2CandidateSample(candidate, options));
+}
+
+function buildCrm2FollowUpLogOnlyResponse({
+    req,
+    dryRun,
+    rawSheet,
+    crm2FollowUpAudit,
+    logOnlyPlan,
+    matchedCandidates,
+    wouldCreateLeadRowsSkipped,
+    appendedActivities,
+    failedActivityRows,
+    failedActivitySamples,
+}) {
+    const summaryOnly = parseCrm2BooleanQuery(req.query.summary_only, false);
+    const includeDetails = summaryOnly
+        ? false
+        : parseCrm2BooleanQuery(req.query.include_details, true);
+    const redact = parseCrm2BooleanQuery(req.query.redact, dryRun);
+    const sampleLimit = parseCrm2SampleLimit(req.query.sample_limit, 5);
+    const redactOptions = {
+        redact,
+        secret: req.query.secret,
+    };
+
+    const baseResponse = {
+        success: true,
+        dry_run: dryRun,
+        mode: "crm2_followup_log_only",
+        received_query: buildSafeCrm2ReceivedQuery(req.query, redactOptions),
+        source_sheet_name: rawSheet.sheetName,
+        total_rows_scanned: crm2FollowUpAudit.total_crm2_rows_scanned,
+        total_followup_candidates_found: crm2FollowUpAudit.all_candidate_details.length,
+        matched_existing_lead_candidates: matchedCandidates.length,
+        candidates_to_append: logOnlyPlan.candidates_to_append.length,
+        appended_activities: appendedActivities,
+        duplicate_candidates_skipped: logOnlyPlan.duplicate_candidates_skipped.length,
+        unmatched_phone_candidates_skipped: logOnlyPlan.unmatched_candidates_skipped.length,
+        would_create_lead_rows_skipped: wouldCreateLeadRowsSkipped.length,
+        internal_duplicate_candidates_skipped: logOnlyPlan.internal_duplicate_candidates_skipped.length,
+        failed_activity_rows: failedActivityRows,
+        no_leads_created: true,
+        no_leads_updated: true,
+        no_lead_details_updated: true,
+        no_deals_updated: true,
+        no_installations_updated: true,
+        write_guard: dryRun
+            ? "dry_run=true; no writes performed"
+            : "log-only write completed; only ACTIVITY_LOG append was allowed",
+    };
+
+    const samples = {
+        sample_limit: sampleLimit,
+        matched_candidate_samples: sampleCrm2Candidates(matchedCandidates, sampleLimit, redactOptions),
+        candidates_to_append_samples: sampleCrm2Candidates(logOnlyPlan.candidates_to_append, sampleLimit, redactOptions),
+        unmatched_candidate_samples: sampleCrm2Candidates(logOnlyPlan.unmatched_candidates_skipped, sampleLimit, redactOptions),
+        duplicate_risk_candidate_samples: sampleCrm2Candidates(logOnlyPlan.duplicate_candidates_skipped, sampleLimit, redactOptions),
+        internal_duplicate_candidate_samples: sampleCrm2Candidates(logOnlyPlan.internal_duplicate_candidates_skipped, sampleLimit, redactOptions),
+        failed_candidate_samples: (failedActivitySamples || []).slice(0, sampleLimit).map(sample => redactCrm2SensitiveValue(sample, req.query.secret)),
+    };
+
+    if (summaryOnly || !includeDetails) {
+        return {
+            ...baseResponse,
+            ...samples,
+        };
+    }
+
+    return {
+        ...baseResponse,
+        ...samples,
+        candidates_matched_to_existing_lead_id: matchedCandidates,
+        candidates_to_append_details: logOnlyPlan.candidates_to_append,
+        duplicate_candidates_skipped_details: logOnlyPlan.duplicate_candidates_skipped,
+        unmatched_phone_rows_skipped_details: summarizeCrm2FollowUpCandidatesByRow(logOnlyPlan.unmatched_candidates_skipped),
+        unmatched_phone_candidates_skipped_details: logOnlyPlan.unmatched_candidates_skipped,
+        would_create_lead_rows_skipped_details: wouldCreateLeadRowsSkipped,
+        internal_duplicate_candidates_skipped_details: logOnlyPlan.internal_duplicate_candidates_skipped,
+        failed_activity_samples: failedActivitySamples,
+        crm2_followup_l_to_o_audit: crm2FollowUpAudit,
+    };
+}
+
 function buildCrm2WouldCreateLeadRows(rawRows, rawHeaders, knownLeadsByPhone, candidateSourceRows = null) {
     const rows = [];
 
@@ -761,40 +921,18 @@ async function handleLegacyCrm2Import(req, res) {
                 }
             }
 
-            return res.json({
-                success: true,
-                dry_run: dryRun,
-                mode: "crm2_followup_log_only",
-                received_query: req.query,
-                source_sheet_name: rawSheet.sheetName,
-                total_rows_scanned: crm2FollowUpAudit.total_crm2_rows_scanned,
-                total_followup_candidates_found: crm2FollowUpAudit.all_candidate_details.length,
-                matched_existing_lead_candidates: matchedCandidates.length,
-                candidates_to_append: logOnlyPlan.candidates_to_append.length,
-                appended_activities: appendedActivities,
-                duplicate_candidates_skipped: logOnlyPlan.duplicate_candidates_skipped.length,
-                unmatched_phone_candidates_skipped: logOnlyPlan.unmatched_candidates_skipped.length,
-                would_create_lead_rows_skipped: wouldCreateLeadRowsSkipped.length,
-                internal_duplicate_candidates_skipped: logOnlyPlan.internal_duplicate_candidates_skipped.length,
-                failed_activity_rows: failedActivityRows,
-                no_leads_created: true,
-                no_leads_updated: true,
-                no_lead_details_updated: true,
-                no_deals_updated: true,
-                no_installations_updated: true,
-                write_guard: dryRun
-                    ? "dry_run=true; no writes performed"
-                    : "log-only write completed; only ACTIVITY_LOG append was allowed",
-                candidates_matched_to_existing_lead_id: matchedCandidates,
-                candidates_to_append_details: logOnlyPlan.candidates_to_append,
-                duplicate_candidates_skipped_details: logOnlyPlan.duplicate_candidates_skipped,
-                unmatched_phone_rows_skipped_details: summarizeCrm2FollowUpCandidatesByRow(logOnlyPlan.unmatched_candidates_skipped),
-                unmatched_phone_candidates_skipped_details: logOnlyPlan.unmatched_candidates_skipped,
-                would_create_lead_rows_skipped_details: wouldCreateLeadRowsSkipped,
-                internal_duplicate_candidates_skipped_details: logOnlyPlan.internal_duplicate_candidates_skipped,
-                failed_activity_samples: failedActivitySamples,
-                crm2_followup_l_to_o_audit: crm2FollowUpAudit,
-            });
+            return res.json(buildCrm2FollowUpLogOnlyResponse({
+                req,
+                dryRun,
+                rawSheet,
+                crm2FollowUpAudit,
+                logOnlyPlan,
+                matchedCandidates,
+                wouldCreateLeadRowsSkipped,
+                appendedActivities,
+                failedActivityRows,
+                failedActivitySamples,
+            }));
         }
 
         for (let i = 1; i < rawRows.length; i++) {
@@ -1160,4 +1298,11 @@ async function handleLegacyCrm2Import(req, res) {
     }
 }
 
-module.exports = { handleLegacyCrm2Import };
+module.exports = {
+    handleLegacyCrm2Import,
+    _test: {
+        buildCrm2FollowUpLogOnlyResponse,
+        buildSafeCrm2ReceivedQuery,
+        redactCrm2SensitiveValue,
+    },
+};
