@@ -406,6 +406,22 @@ function truncateCrm2Text(value, maxLength = 160) {
     return `${text.slice(0, maxLength)}...`;
 }
 
+function parseCrm2ReviewRowsQuery(value) {
+    return new Set(
+        String(value || "")
+            .split(",")
+            .map(row => Number(String(row || "").trim()))
+            .filter(row => Number.isInteger(row) && row > 0)
+    );
+}
+
+function maskCrm2NamePreview(value, options = {}) {
+    const redacted = redactCrm2FieldValue("customer_name", value || "", options);
+    const text = String(redacted || "").trim();
+    if (!text) return "";
+    return `${text.slice(0, 1)}***`;
+}
+
 function isCrm2HeaderTemplateCandidate(candidate = {}) {
     const phoneText = String(candidate.raw_phone || candidate.normalized_phone || candidate.phone || "")
         .trim()
@@ -460,6 +476,44 @@ function sampleCrm2WouldCreateLeadRows(rows, sampleLimit, options = {}) {
         }, options));
 }
 
+function buildCrm2ReviewNotePreview(rowObject = {}, options = {}) {
+    const noteParts = [
+        getCrm2Value(rowObject, "reason"),
+        getCrm2Value(rowObject, "follow_up_1_details"),
+        getCrm2Value(rowObject, "follow_up_2_details"),
+        getCrm2Value(rowObject, "follow_up_3_details"),
+        getCrm2Value(rowObject, "call_recording"),
+    ].filter(value => String(value || "").trim());
+
+    return truncateCrm2Text(redactCrm2FieldValue("note_preview", noteParts.join(" | "), options), 120);
+}
+
+function sampleCrm2WouldCreateLeadReviewRows(rows, selectedRows, sampleLimit, options = {}) {
+    if (!selectedRows || selectedRows.size === 0) return [];
+
+    return (rows || [])
+        .filter(row => selectedRows.has(Number(row.source_row_number)))
+        .slice(0, sampleLimit)
+        .map(row => {
+            const rowObject = row.raw_crm2_values || {};
+
+            return {
+                source_row_number: row.source_row_number || "",
+                candidate_type: "would_create_new_lead_review",
+                reason_skipped: row.reason_skipped || "would_create_new_lead_not_allowed_in_log_only_mode",
+                customer_name_preview: maskCrm2NamePreview(row.customer_name || getCrm2Value(rowObject, "name"), options),
+                phone: redactCrm2FieldValue("phone", row.phone || row.normalized_phone || "", options),
+                raw_phone: redactCrm2FieldValue("raw_phone", row.raw_phone || "", options),
+                normalized_phone: redactCrm2FieldValue("normalized_phone", row.normalized_phone || "", options),
+                source_or_campaign_preview: truncateCrm2Text(redactCrm2FieldValue("source", getCrm2Value(rowObject, "source"), options), 80),
+                created_date_preview: truncateCrm2Text(redactCrm2FieldValue("created_date", getCrm2Value(rowObject, "lead_in_date"), options), 80),
+                status_preview: truncateCrm2Text(redactCrm2FieldValue("status", getCrm2Value(rowObject, "classification"), options), 80),
+                note_preview: buildCrm2ReviewNotePreview(rowObject, options),
+                non_phone_match_hint: "none_found",
+            };
+        });
+}
+
 function countCrm2HeaderTemplateCandidates(candidates) {
     return (candidates || []).filter(isCrm2HeaderTemplateCandidate).length;
 }
@@ -482,6 +536,7 @@ function buildCrm2FollowUpLogOnlyResponse({
         : parseCrm2BooleanQuery(req.query.include_details, true);
     const redact = parseCrm2BooleanQuery(req.query.redact, dryRun);
     const sampleLimit = parseCrm2SampleLimit(req.query.sample_limit, 5);
+    const reviewWouldCreateRows = parseCrm2ReviewRowsQuery(req.query.review_would_create_rows);
     const redactOptions = {
         redact,
         secret: req.query.secret,
@@ -521,6 +576,7 @@ function buildCrm2FollowUpLogOnlyResponse({
         duplicate_risk_candidate_samples: sampleCrm2Candidates(logOnlyPlan.duplicate_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
         internal_duplicate_candidate_samples: sampleCrm2Candidates(logOnlyPlan.internal_duplicate_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
         would_create_lead_rows_skipped_samples: sampleCrm2WouldCreateLeadRows(wouldCreateLeadRowsSkipped, sampleLimit, redactOptions),
+        would_create_lead_rows_review_samples: sampleCrm2WouldCreateLeadReviewRows(wouldCreateLeadRowsSkipped, reviewWouldCreateRows, sampleLimit, redactOptions),
         header_template_unmatched_candidates_skipped_from_samples: countCrm2HeaderTemplateCandidates(logOnlyPlan.unmatched_candidates_skipped),
         failed_candidate_samples: (failedActivitySamples || []).slice(0, sampleLimit).map(sample => redactCrm2SensitiveValue(sample, req.query.secret)),
     };

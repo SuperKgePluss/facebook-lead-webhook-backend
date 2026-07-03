@@ -88,18 +88,69 @@ function makeResponse(queryOverrides = {}) {
                 raw_phone: "0891234567",
                 normalized_phone: "0891234567",
                 phone: "0891234567",
+                customer_name: "Unselected Customer",
                 matched_lead_id: "",
                 matched_existing_lead: false,
                 reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+                raw_crm2_values: {
+                    name: "Unselected Customer",
+                    source: "Facebook",
+                    lead_in_date: "2024-01-01",
+                    classification: "New",
+                    reason: "Unselected row",
+                },
             },
             {
-                source_row_number: 21,
+                source_row_number: 32,
                 raw_phone: "0991234567",
                 normalized_phone: "0991234567",
                 phone: "0991234567",
+                customer_name: "Praew Customer",
                 matched_lead_id: "",
                 matched_existing_lead: false,
                 reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+                raw_crm2_values: {
+                    name: "Praew Customer",
+                    source: "Facebook Ads secret super-secret",
+                    lead_in_date: "2024-01-02",
+                    classification: "Interested",
+                    reason: "Customer wrote user@example.com and phone 081-234-5678 in the note",
+                    follow_up_1_details: "This is a long follow-up note that should be preview-only and must not expose the full raw note body beyond the configured compact preview length. It also repeats super-secret.",
+                },
+            },
+            {
+                source_row_number: 36,
+                raw_phone: "0881234567",
+                normalized_phone: "0881234567",
+                phone: "0881234567",
+                customer_name: "Somchai Customer",
+                matched_lead_id: "",
+                matched_existing_lead: false,
+                reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+                raw_crm2_values: {
+                    name: "Somchai Customer",
+                    source: "Referral",
+                    lead_in_date: "2024-01-03",
+                    classification: "Follow up",
+                    reason: "Asked for callback",
+                },
+            },
+            {
+                source_row_number: 104,
+                raw_phone: "0871234567",
+                normalized_phone: "0871234567",
+                phone: "0871234567",
+                customer_name: "Mint Customer",
+                matched_lead_id: "",
+                matched_existing_lead: false,
+                reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+                raw_crm2_values: {
+                    name: "Mint Customer",
+                    source: "Line",
+                    lead_in_date: "2024-01-04",
+                    classification: "New lead",
+                    follow_up_1_details: "Needs quote",
+                },
             },
         ],
         appendedActivities: 0,
@@ -142,6 +193,47 @@ assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].raw_text_pr
 assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].raw_phone, "<redacted_phone>");
 assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].normalized_phone, "<redacted_phone>");
 assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].phone, "<redacted_phone>");
+
+const reviewResponse = makeResponse({
+    summary_only: "true",
+    sample_limit: "3",
+    review_would_create_rows: "32,36,104",
+});
+
+assert.deepStrictEqual(
+    reviewResponse.would_create_lead_rows_review_samples.map(sample => sample.source_row_number),
+    [32, 36, 104]
+);
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples.length, 3);
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].candidate_type, "would_create_new_lead_review");
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].reason_skipped, "would_create_new_lead_not_allowed_in_log_only_mode");
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].phone, "<redacted_phone>");
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].raw_phone, "<redacted_phone>");
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].normalized_phone, "<redacted_phone>");
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].customer_name_preview, "P***");
+assert.notStrictEqual(reviewResponse.would_create_lead_rows_review_samples[0].customer_name_preview, "Praew Customer");
+assert.match(reviewResponse.would_create_lead_rows_review_samples[0].source_or_campaign_preview, /<redacted>/);
+assert.doesNotMatch(reviewResponse.would_create_lead_rows_review_samples[0].note_preview, /user@example\.com/);
+assert.doesNotMatch(reviewResponse.would_create_lead_rows_review_samples[0].note_preview, /081-234-5678/);
+assert.doesNotMatch(reviewResponse.would_create_lead_rows_review_samples[0].note_preview, /super-secret/);
+assert.ok(reviewResponse.would_create_lead_rows_review_samples[0].note_preview.length <= 123);
+assert.doesNotMatch(
+    reviewResponse.would_create_lead_rows_review_samples[0].note_preview,
+    /configured compact preview length\. It also repeats/
+);
+assert.strictEqual(reviewResponse.would_create_lead_rows_review_samples[0].non_phone_match_hint, "none_found");
+assert.strictEqual(reviewResponse.would_create_lead_rows_skipped_details, undefined);
+
+const cappedReviewResponse = makeResponse({
+    summary_only: "true",
+    sample_limit: "2",
+    review_would_create_rows: "20,32,36,104",
+});
+
+assert.deepStrictEqual(
+    cappedReviewResponse.would_create_lead_rows_review_samples.map(sample => sample.source_row_number),
+    [20, 32]
+);
 
 const shortPhoneResponse = buildCrm2FollowUpLogOnlyResponse({
     req: {
