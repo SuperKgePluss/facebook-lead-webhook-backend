@@ -448,6 +448,18 @@ function sampleCrm2Candidates(candidates, sampleLimit, options = {}) {
         .map(candidate => sanitizeCrm2CandidateSample(candidate, options));
 }
 
+function sampleCrm2WouldCreateLeadRows(rows, sampleLimit, options = {}) {
+    return (rows || [])
+        .slice(0, sampleLimit)
+        .map(row => sanitizeCrm2CandidateSample({
+            ...row,
+            candidate_type: "would_create_new_lead_not_allowed",
+            duplicate_risk: false,
+            raw_text: "",
+            phone: row.phone || row.normalized_phone || "",
+        }, options));
+}
+
 function countCrm2HeaderTemplateCandidates(candidates) {
     return (candidates || []).filter(isCrm2HeaderTemplateCandidate).length;
 }
@@ -508,6 +520,7 @@ function buildCrm2FollowUpLogOnlyResponse({
         unmatched_candidate_samples: sampleCrm2Candidates(logOnlyPlan.unmatched_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
         duplicate_risk_candidate_samples: sampleCrm2Candidates(logOnlyPlan.duplicate_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
         internal_duplicate_candidate_samples: sampleCrm2Candidates(logOnlyPlan.internal_duplicate_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
+        would_create_lead_rows_skipped_samples: sampleCrm2WouldCreateLeadRows(wouldCreateLeadRowsSkipped, sampleLimit, redactOptions),
         header_template_unmatched_candidates_skipped_from_samples: countCrm2HeaderTemplateCandidates(logOnlyPlan.unmatched_candidates_skipped),
         failed_candidate_samples: (failedActivitySamples || []).slice(0, sampleLimit).map(sample => redactCrm2SensitiveValue(sample, req.query.secret)),
     };

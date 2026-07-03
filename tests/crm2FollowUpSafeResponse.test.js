@@ -82,7 +82,26 @@ function makeResponse(queryOverrides = {}) {
         },
         logOnlyPlan,
         matchedCandidates,
-        wouldCreateLeadRowsSkipped: [{ source_row_number: 10 }],
+        wouldCreateLeadRowsSkipped: [
+            {
+                source_row_number: 20,
+                raw_phone: "0891234567",
+                normalized_phone: "0891234567",
+                phone: "0891234567",
+                matched_lead_id: "",
+                matched_existing_lead: false,
+                reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+            },
+            {
+                source_row_number: 21,
+                raw_phone: "0991234567",
+                normalized_phone: "0991234567",
+                phone: "0991234567",
+                matched_lead_id: "",
+                matched_existing_lead: false,
+                reason_skipped: "would_create_new_lead_not_allowed_in_log_only_mode",
+            },
+        ],
         appendedActivities: 0,
         failedActivityRows: 0,
         failedActivitySamples: [],
@@ -102,9 +121,11 @@ assert.strictEqual(summary.write_guard, "dry_run=true; no writes performed");
 assert.strictEqual(summary.matched_candidate_samples.length, 1);
 assert.strictEqual(summary.unmatched_candidate_samples.length, 1);
 assert.strictEqual(summary.duplicate_risk_candidate_samples.length, 1);
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples.length, 1);
 assert.strictEqual(summary.header_template_unmatched_candidates_skipped_from_samples, 2);
 assert.strictEqual(summary.candidates_matched_to_existing_lead_id, undefined);
 assert.strictEqual(summary.duplicate_candidates_skipped_details, undefined);
+assert.strictEqual(summary.would_create_lead_rows_skipped_details, undefined);
 assert.strictEqual(summary.crm2_followup_l_to_o_audit, undefined);
 assert.match(summary.matched_candidate_samples[0].raw_phone, /<redacted_phone>/);
 assert.match(summary.matched_candidate_samples[0].normalized_phone, /<redacted_phone>/);
@@ -113,6 +134,14 @@ assert.match(summary.matched_candidate_samples[0].raw_text_preview, /<redacted_p
 assert.match(summary.matched_candidate_samples[0].raw_text_preview, /<redacted_email>/);
 assert.notStrictEqual(summary.unmatched_candidate_samples[0].source_row_number, 2);
 assert.notStrictEqual(summary.unmatched_candidate_samples[0].source_column_name, "Call Recording");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].candidate_type, "would_create_new_lead_not_allowed");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].reason_skipped, "would_create_new_lead_not_allowed_in_log_only_mode");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].duplicate_risk, false);
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].matched_lead_id, "");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].raw_text_preview, "");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].raw_phone, "<redacted_phone>");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].normalized_phone, "<redacted_phone>");
+assert.strictEqual(summary.would_create_lead_rows_skipped_samples[0].phone, "<redacted_phone>");
 
 const shortPhoneResponse = buildCrm2FollowUpLogOnlyResponse({
     req: {
@@ -151,5 +180,6 @@ const defaultShape = makeResponse();
 assert.strictEqual(defaultShape.received_query.secret, "<redacted>");
 assert.ok(Array.isArray(defaultShape.candidates_matched_to_existing_lead_id));
 assert.ok(defaultShape.crm2_followup_l_to_o_audit);
+assert.ok(Array.isArray(defaultShape.would_create_lead_rows_skipped_details));
 
 console.log("crm2FollowUpSafeResponse tests passed");
