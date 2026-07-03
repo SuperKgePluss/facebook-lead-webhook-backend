@@ -387,10 +387,41 @@ function redactCrm2SensitiveValue(value, secret = "") {
         .replace(/(?:\+?66|0)[\d\s().-]{8,16}/g, "<redacted_phone>");
 }
 
+function isCrm2PhoneFieldName(key) {
+    return /(^|_)(raw_phone|normalized_phone|phone|phone_number|mobile_phone|tel|telephone)(_|$)/i
+        .test(String(key || ""));
+}
+
+function redactCrm2FieldValue(key, value, options = {}) {
+    if (options.redact !== false && isCrm2PhoneFieldName(key) && String(value || "").trim()) {
+        return "<redacted_phone>";
+    }
+
+    return options.redact === false ? value : redactCrm2SensitiveValue(value, options.secret);
+}
+
 function truncateCrm2Text(value, maxLength = 160) {
     const text = String(value || "").trim();
     if (text.length <= maxLength) return text;
     return `${text.slice(0, maxLength)}...`;
+}
+
+function isCrm2HeaderTemplateCandidate(candidate = {}) {
+    const phoneText = String(candidate.raw_phone || candidate.normalized_phone || candidate.phone || "")
+        .trim()
+        .toLowerCase();
+    const candidateText = String(candidate.raw_text || candidate.note || "")
+        .trim()
+        .toLowerCase();
+    const sourceName = String(candidate.source_column_name || "")
+        .trim()
+        .toLowerCase();
+
+    const phoneLooksLikeHeader = /phone|เบอร์|โทรศัพท์/.test(phoneText);
+    const textLooksLikeHeader = /follow[-\s]?up|date\/time|details|วัน\/เวลา|ติดตามครั้งที่|รายละเอียด/.test(candidateText);
+    const sourceLooksLikeHeader = /follow[-\s]?up|date\/time|details|วัน\/เวลา|ติดตามครั้งที่|รายละเอียด/.test(sourceName);
+
+    return Boolean(phoneLooksLikeHeader && (textLooksLikeHeader || sourceLooksLikeHeader));
 }
 
 function sanitizeCrm2CandidateSample(candidate = {}, options = {}) {
@@ -403,16 +434,22 @@ function sanitizeCrm2CandidateSample(candidate = {}, options = {}) {
         matched_existing_lead: Boolean(candidate.matched_existing_lead),
         duplicate_risk: Boolean(candidate.duplicate_risk),
         reason_skipped: candidate.reason_skipped || "",
-        raw_phone: redactCrm2SensitiveValue(candidate.raw_phone || "", options.secret),
-        normalized_phone: redactCrm2SensitiveValue(candidate.normalized_phone || candidate.phone || "", options.secret),
-        raw_text_preview: truncateCrm2Text(redactCrm2SensitiveValue(candidate.raw_text || candidate.note || "", options.secret)),
+        raw_phone: redactCrm2FieldValue("raw_phone", candidate.raw_phone || "", options),
+        normalized_phone: redactCrm2FieldValue("normalized_phone", candidate.normalized_phone || "", options),
+        phone: redactCrm2FieldValue("phone", candidate.phone || "", options),
+        raw_text_preview: truncateCrm2Text(redactCrm2FieldValue("raw_text", candidate.raw_text || candidate.note || "", options)),
     };
 }
 
 function sampleCrm2Candidates(candidates, sampleLimit, options = {}) {
     return (candidates || [])
+        .filter(candidate => !options.excludeHeaderTemplateRows || !isCrm2HeaderTemplateCandidate(candidate))
         .slice(0, sampleLimit)
         .map(candidate => sanitizeCrm2CandidateSample(candidate, options));
+}
+
+function countCrm2HeaderTemplateCandidates(candidates) {
+    return (candidates || []).filter(isCrm2HeaderTemplateCandidate).length;
 }
 
 function buildCrm2FollowUpLogOnlyResponse({
@@ -466,11 +503,12 @@ function buildCrm2FollowUpLogOnlyResponse({
 
     const samples = {
         sample_limit: sampleLimit,
-        matched_candidate_samples: sampleCrm2Candidates(matchedCandidates, sampleLimit, redactOptions),
-        candidates_to_append_samples: sampleCrm2Candidates(logOnlyPlan.candidates_to_append, sampleLimit, redactOptions),
-        unmatched_candidate_samples: sampleCrm2Candidates(logOnlyPlan.unmatched_candidates_skipped, sampleLimit, redactOptions),
-        duplicate_risk_candidate_samples: sampleCrm2Candidates(logOnlyPlan.duplicate_candidates_skipped, sampleLimit, redactOptions),
-        internal_duplicate_candidate_samples: sampleCrm2Candidates(logOnlyPlan.internal_duplicate_candidates_skipped, sampleLimit, redactOptions),
+        matched_candidate_samples: sampleCrm2Candidates(matchedCandidates, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
+        candidates_to_append_samples: sampleCrm2Candidates(logOnlyPlan.candidates_to_append, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
+        unmatched_candidate_samples: sampleCrm2Candidates(logOnlyPlan.unmatched_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
+        duplicate_risk_candidate_samples: sampleCrm2Candidates(logOnlyPlan.duplicate_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
+        internal_duplicate_candidate_samples: sampleCrm2Candidates(logOnlyPlan.internal_duplicate_candidates_skipped, sampleLimit, { ...redactOptions, excludeHeaderTemplateRows: true }),
+        header_template_unmatched_candidates_skipped_from_samples: countCrm2HeaderTemplateCandidates(logOnlyPlan.unmatched_candidates_skipped),
         failed_candidate_samples: (failedActivitySamples || []).slice(0, sampleLimit).map(sample => redactCrm2SensitiveValue(sample, req.query.secret)),
     };
 
