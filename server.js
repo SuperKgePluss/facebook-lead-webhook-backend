@@ -20,6 +20,8 @@ const {
     getExistingLeadgenIdsNarrow,
     getFacebookBackfillState,
     saveFacebookBackfillState,
+    getSheetRows,
+    rowToObject,
 } = require("./services/googleSheets");
 const {
     getFacebookCreatedTimeForSheetValue,
@@ -31,6 +33,10 @@ const { handleLegacyLeadStatusCleanup } = require("./services/imports/legacyClea
 const { handleCrm3RestoreAudit, handleFacebookRawAudit, handleCrm3SafeRestore } = require("./services/imports/dataAudit");
 const { handleLeadDetailsRepair, handleDealsPhoneRepair } = require("./services/dataStabilization");
 const { handleLineWebhook } = require("./services/lineWebhook");
+const {
+    buildFacebookSourceDiagnostic,
+    formatBangkokTime,
+} = require("./services/facebookSourceDiagnostic");
 
 const app = express();
 
@@ -50,6 +56,7 @@ const BACKFILL_STEP_DEFAULT_PAGE_SIZE = 25;
 const BACKFILL_STEP_MAX_PAGE_SIZE = 50;
 const BACKFILL_STEP_DEFAULT_MAX_PAGES = 1;
 const BACKFILL_STEP_MAX_PAGES = 3;
+const FACEBOOK_SOURCE_DIAGNOSTIC_DEFAULT_FROM = "2026-07-03T21:27:00+07:00";
 
 function normalizeProvince(rawProvince) {
     const raw = String(rawProvince || "").trim();
@@ -448,6 +455,38 @@ function requireSyncSecretMiddleware(req, res, next) {
 
 function parseBooleanQuery(value) {
     return String(value || "").trim().toLowerCase() === "true";
+}
+
+function parseFacebookSourceDiagnosticDate(value, fallback) {
+    const raw = String(value || fallback || "").trim();
+    const date = new Date(raw);
+    if (!raw || Number.isNaN(date.getTime())) return null;
+    return date;
+}
+
+async function getFacebookLeadgenIdsCapturedInLeadsMain() {
+    const [leadMainRows, detailRows] = await Promise.all([
+        getSheetRows("LEADS_MAIN"),
+        getSheetRows("LEAD_DETAILS"),
+    ]);
+    const leadMainHeaders = leadMainRows[1] || [];
+    const detailHeaders = detailRows[1] || [];
+    const leadIdsInMain = new Set(
+        leadMainRows
+            .slice(2)
+            .map(row => String(rowToObject(leadMainHeaders, row).lead_id || "").trim())
+            .filter(Boolean)
+    );
+    const capturedLeadgenIds = new Set();
+
+    detailRows.slice(2).forEach(row => {
+        const detail = rowToObject(detailHeaders, row);
+        const leadId = String(detail.lead_id || "").trim();
+        const leadgenId = String(detail.facebook_leadgen_id || "").trim();
+        if (leadgenId && leadId && leadIdsInMain.has(leadId)) capturedLeadgenIds.add(leadgenId);
+    });
+
+    return capturedLeadgenIds;
 }
 
 function requireConfirm(req, res, operation) {
@@ -1531,6 +1570,62 @@ app.get("/debug/facebook-form-raw", requireSyncSecretMiddleware, async (req, res
         return res.status(500).json({
             success: false,
             error: err.response?.data || err.message,
+        });
+    }
+});
+
+app.get("/diagnostics/facebook-leads-source", requireSyncSecretMiddleware, async (req, res) => {
+    const requestedLimit = req.query.limit === undefined ? 100 : Number(req.query.limit);
+    const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? Math.min(Math.floor(requestedLimit), LATEST_FACEBOOK_SYNC_MAX_LIMIT)
+        : 100;
+    const fromDate = parseFacebookSourceDiagnosticDate(req.query.from, FACEBOOK_SOURCE_DIAGNOSTIC_DEFAULT_FROM);
+    const toDate = parseFacebookSourceDiagnosticDate(req.query.to, new Date().toISOString());
+    const compareSheet = String(req.query.compare_sheet ?? "true").trim().toLowerCase() !== "false";
+
+    if (!fromDate || !toDate || fromDate.getTime() > toDate.getTime()) {
+        return res.status(400).json({
+            success: false,
+            read_only: true,
+            error: "Invalid diagnostic time window. Use ISO datetimes and ensure from <= to.",
+        });
+    }
+
+    try {
+        const forms = await fetchLeadgenForms();
+        const capturedLeadgenIds = compareSheet
+            ? await getFacebookLeadgenIdsCapturedInLeadsMain()
+            : new Set();
+        const diagnostic = await buildFacebookSourceDiagnostic({
+            forms,
+            perFormLimit: effectiveLimit,
+            fromDate,
+            toDate,
+            compareSheet,
+            capturedLeadgenIds,
+            fetchLeadRefsPageForForm,
+        });
+
+        return res.status(200).json({
+            success: true,
+            read_only: true,
+            requested_limit: req.query.limit === undefined ? 100 : req.query.limit,
+            effective_limit: effectiveLimit,
+            requested_time_window: {
+                from: fromDate.toISOString(),
+                to: toDate.toISOString(),
+                from_bangkok: formatBangkokTime(fromDate),
+                to_bangkok: formatBangkokTime(toDate),
+            },
+            compare_sheet: compareSheet,
+            ...diagnostic,
+        });
+    } catch (err) {
+        console.error("Facebook source diagnostic failed:", err.response?.data?.error?.message || err.message);
+        return res.status(500).json({
+            success: false,
+            read_only: true,
+            error: err.response?.data?.error?.message || err.message,
         });
     }
 });
