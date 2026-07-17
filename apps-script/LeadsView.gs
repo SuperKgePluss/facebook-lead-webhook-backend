@@ -4,6 +4,7 @@ const LEADS_VIEW_REFRESH_BATCH_SIZE = 70;
 const LEADS_VIEW_SCHEDULED_CURSOR_KEY = 'LEADS_VIEW_SCHEDULED_NEXT_ROW';
 const LEADS_VIEW_SCHEDULED_BATCH_SIZE = 20;
 const LEADS_VIEW_MEMO_START_COLUMN = 16;
+const LEADS_VIEW_SALES_NOTE_IN_PROGRESS_TTL_MS = 10 * 60 * 1000;
 const LEADS_DATE_AUDIT_SHEET_NAME = 'LEADS_DATE_AUDIT';
 const LEADS_DATE_APPLY_LOG_SHEET_NAME = 'LEADS_DATE_APPLY_LOG';
 const LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT = 'dd/MM/yyyy HH:mm';
@@ -657,89 +658,69 @@ function handleLeadsViewSalesNoteEdit_(e, sheet, row) {
       return;
     }
 
-    const lead = getRowObject_(sheet, row);
-    leadId = String(lead.lead_id || '').trim();
-    headerMap = getHeaderMap_(sheet);
-    inputColumn = headerMap.sales_note_input || headerMap.sales_note;
-    if (!inputColumn) {
-      logLeadsSalesNoteDiagnostic_(e, sheet, row, 'wrong_header_or_column', leadId, note, 'Sales Note Input header not found.');
-      return;
-    }
-    if (!leadId) {
-      logLeadsSalesNoteDiagnostic_(e, sheet, row, 'missing_lead_id', '', note, 'No Lead ID on edited LEADS row.');
-      return;
-    }
+    const transaction = withLeadsNoteSnapshotLock_('Save LEADS Sales Note', function () {
+      // This lock owns the complete logical edit transaction. All reads that
+      // decide whether to write, the history mutation, snapshot transition,
+      // and final successful dedupe claim occur under the same lock.
+      const lead = getRowObject_(sheet, row);
+      leadId = String(lead.lead_id || '').trim();
+      headerMap = getHeaderMap_(sheet);
+      inputColumn = headerMap.sales_note_input || headerMap.sales_note;
+      if (!inputColumn) return { skipped: true, reason: 'wrong_header_or_column' };
+      if (!leadId) return { skipped: true, reason: 'missing_lead_id' };
 
-    const dedupe = claimLeadsViewSalesNoteEdit_(leadId, note);
-    if (!dedupe.claimed) {
-      sheet.getRange(row, inputColumn).clearContent();
-      const reason = dedupe.reason === 'cache_duplicate'
-        ? 'duplicate_guard_cache'
-        : dedupe.reason === 'property_duplicate'
-          ? 'duplicate_guard_property'
-          : dedupe.reason === 'lock_timeout'
-            ? 'lock_timeout'
-            : dedupe.reason || 'duplicate_guard';
-      logLeadsSalesNoteDiagnostic_(e, sheet, row, reason, leadId, note, 'Duplicate guard skipped Sales Note save.');
-      Logger.log('LEADS Sales Note skipped duplicate lead_id=' + leadId + ' reason=' + dedupe.reason);
-      return;
-    }
-
-    const savedAt = new Date();
-    const activityId = 'ACT-' + Date.now();
-    let activityRow = '';
-    try {
-      activityRow = appendObjectRow_('ACTIVITY_LOG', {
-        activity_id: activityId,
-        lead_id: leadId,
-        sheet_name: 'LEADS',
-        action_type: 'Sales Note',
-        note: note,
-        created_by: typeof getSafeCrmUserEmail_ === 'function' ? getSafeCrmUserEmail_() : 'unknown',
-        created_at: savedAt,
-      });
-    } catch (err) {
-      logLeadsSalesNoteDiagnostic_(e, sheet, row, 'append_activity_failed', leadId, note, err.message);
-      err.crmDiagnosticLogged = true;
-      throw err;
-    }
-
-    const appendedHistoryText = formatSalesNoteHistoryValue_(note, savedAt);
-    try {
-      appendSalesNoteHistoryToLeadsView_(sheet, row, appendedHistoryText, savedAt);
-      if (typeof updateLeadsNoteSnapshotForLead_ === 'function') {
-        try {
-          const historyColumn = headerMap.sales_note_history;
-          const historyValue = historyColumn ? sheet.getRange(row, historyColumn).getValue() : '';
-          updateLeadsNoteSnapshotForLead_(leadId, row, historyValue, activityRow);
-        } catch (snapshotErr) {
-          Logger.log('LEADS Sales Note snapshot update skipped lead_id=' + leadId + ': ' + snapshotErr.message);
+      let dedupe = prepareLeadsViewSalesNoteEdit_(leadId, note);
+      if (dedupe.recoveryRequired) {
+        // A different edit cannot claim this lead while an earlier History
+        // transition is unresolved. Recover the original state first while
+        // this transaction lock is still held; on failure, leave it intact.
+        recoverLeadsViewSalesNoteInProgress_(sheet, row, leadId, dedupe.inProgress);
+        dedupe = prepareLeadsViewSalesNoteEdit_(leadId, note);
+        if (!dedupe.claimed) {
+          throw new Error('LEADS Sales Note recovery completed without releasing the original in-progress state; refusing to process the later note.');
         }
       }
-    } catch (err) {
-      logLeadsSalesNoteDiagnostic_(e, sheet, row, 'append_history_failed', leadId, note, err.message);
-      err.crmDiagnosticLogged = true;
-      throw err;
-    }
+      if (!dedupe.claimed) {
+        sheet.getRange(row, inputColumn).clearContent();
+        return { skipped: true, reason: dedupe.reason };
+      }
 
-    if (typeof recordCrmUndoSalesNoteSave_ === 'function') {
+      const appendedHistoryText = dedupe.historyEntry || formatSalesNoteHistoryValue_(note, new Date());
       try {
-        recordCrmUndoSalesNoteSave_({
-          leadId: leadId,
-          inputRangeA1: sheet.getRange(row, inputColumn).getA1Notation(),
-          historyRangeA1: headerMap.sales_note_history ? sheet.getRange(row, headerMap.sales_note_history).getA1Notation() : '',
-          oldInputValue: e.oldValue || '',
-          newInputValue: note,
-          appendedHistoryText: appendedHistoryText,
-          relatedActivityLogRow: activityRow,
-          relatedActivityId: activityId,
-          userEmail: typeof getSafeCrmUserEmail_ === 'function' ? getSafeCrmUserEmail_() : 'unknown',
-        });
+        const historyColumn = headerMap.sales_note_history;
+        const beforeHistory = historyColumn ? sheet.getRange(row, historyColumn).getValue() : '';
+        if (!salesNoteHistoryContainsEntry_(beforeHistory, appendedHistoryText)) {
+          appendSalesNoteHistoryToLeadsView_(sheet, row, appendedHistoryText, new Date());
+        }
+        if (typeof updateLeadsNoteSnapshotForLeadUnlocked_ !== 'function') {
+          throw new Error('LEADS note snapshot recovery handler is unavailable.');
+        }
+        const historyValue = historyColumn ? sheet.getRange(row, historyColumn).getValue() : '';
+        // The snapshot handler persists pending state before the Activity Log
+        // row. A new post-baseline Lead is onboarded baseline-only.
+        updateLeadsNoteSnapshotForLeadUnlocked_(leadId, row, historyValue, '', note, 'Sales Note');
+        recordLeadsViewSalesNoteSuccess_(dedupe);
       } catch (err) {
-        logLeadsSalesNoteDiagnostic_(e, sheet, row, 'undo_log_failed', leadId, note, err.message);
+        logLeadsSalesNoteDiagnostic_(e, sheet, row, 'append_history_failed', leadId, note, err.message);
         err.crmDiagnosticLogged = true;
         throw err;
       }
+      return { skipped: false };
+    });
+
+    if (transaction.skipped) {
+      const reason = transaction.reason === 'cache_duplicate'
+        ? 'duplicate_guard_cache'
+        : transaction.reason === 'property_duplicate'
+          ? 'duplicate_guard_property'
+          : transaction.reason === 'lock_timeout'
+            ? 'lock_timeout'
+            : transaction.reason || 'duplicate_guard';
+      if (transaction.reason !== 'wrong_header_or_column' && transaction.reason !== 'missing_lead_id') {
+        logLeadsSalesNoteDiagnostic_(e, sheet, row, reason, leadId, note, 'Duplicate guard skipped Sales Note save.');
+      }
+      Logger.log('LEADS Sales Note skipped lead_id=' + leadId + ' reason=' + transaction.reason);
+      return;
     }
 
     try {
@@ -800,7 +781,7 @@ function recordLeadsViewManualEditUndoIfSupported_(e, sheet, row, editedHeader, 
   });
 }
 
-function claimLeadsViewSalesNoteEdit_(leadId, note) {
+function prepareLeadsViewSalesNoteEdit_(leadId, note) {
   const normalizedLeadId = String(leadId || '').trim();
   const normalizedNote = String(note || '').trim().replace(/\s+/g, ' ');
   const hash = Utilities.base64EncodeWebSafe(
@@ -808,48 +789,159 @@ function claimLeadsViewSalesNoteEdit_(leadId, note) {
   ).slice(0, 40);
   const cacheKey = 'sales_note_' + hash;
   const propertyKey = 'LEADS_SALES_NOTE_LAST_' + normalizedLeadId;
+  const inProgressKey = 'LEADS_SALES_NOTE_IN_PROGRESS_' + normalizedLeadId;
   const now = Date.now();
-  const lock = LockService.getScriptLock();
-
-  try {
-    lock.waitLock(5000);
-  } catch (err) {
+  const cache = CacheService.getScriptCache();
+  const properties = PropertiesService.getScriptProperties();
+  const inProgressRaw = String(properties.getProperty(inProgressKey) || '');
+  if (inProgressRaw) {
+    const inProgress = parseLeadsViewSalesNoteInProgress_(inProgressRaw, normalizedLeadId);
+    const expired = now - inProgress.startedAt >= LEADS_VIEW_SALES_NOTE_IN_PROGRESS_TTL_MS;
+    if (inProgress.hash === hash) {
+      // TTL expiry never authorizes a new History entry. Reuse the original
+      // entry and recover it, even when the retry arrives much later.
+      return {
+        claimed: true,
+        recovery: true,
+        recoveryExpired: expired,
+        reason: expired ? 'recovery_expired' : 'recovery',
+        hash: hash,
+        cacheKey: cacheKey,
+        propertyKey: propertyKey,
+        inProgressKey: inProgressKey,
+        historyEntry: inProgress.historyEntry,
+        note: inProgress.note,
+      };
+    }
     return {
       claimed: false,
-      reason: 'lock_timeout',
+      recoveryRequired: true,
+      recoveryExpired: expired,
+      reason: expired ? 'recovery_required_expired' : 'recovery_required',
+      inProgress: inProgress,
     };
   }
+  if (cache.get(cacheKey)) return { claimed: false, reason: 'cache_duplicate' };
 
-  try {
-    const cache = CacheService.getScriptCache();
-    if (cache.get(cacheKey)) {
-      return {
-        claimed: false,
-        reason: 'cache_duplicate',
-      };
-    }
-
-    const properties = PropertiesService.getScriptProperties();
-    const previous = String(properties.getProperty(propertyKey) || '').split('|');
-    const previousHash = previous[0] || '';
-    const previousTimestamp = Number(previous[1] || 0);
-    if (previousHash === hash && now - previousTimestamp < 60000) {
-      cache.put(cacheKey, '1', 60);
-      return {
-        claimed: false,
-        reason: 'property_duplicate',
-      };
-    }
-
+  const previous = String(properties.getProperty(propertyKey) || '').split('|');
+  const previousHash = previous[0] || '';
+  const previousTimestamp = Number(previous[1] || 0);
+  if (previousHash === hash && now - previousTimestamp < 60000) {
     cache.put(cacheKey, '1', 60);
-    properties.setProperty(propertyKey, hash + '|' + now);
-    return {
-      claimed: true,
-      reason: 'claimed',
-    };
-  } finally {
-    lock.releaseLock();
+    return { claimed: false, reason: 'property_duplicate' };
   }
+
+  const historyEntry = formatSalesNoteHistoryValue_(normalizedNote, new Date());
+  properties.setProperty(inProgressKey, JSON.stringify({
+    hash: hash,
+    startedAt: now,
+    historyEntry: historyEntry,
+    note: normalizedNote,
+  }));
+  return {
+    claimed: true,
+    reason: 'claimed',
+    hash: hash,
+    cacheKey: cacheKey,
+    propertyKey: propertyKey,
+    inProgressKey: inProgressKey,
+    historyEntry: historyEntry,
+    note: normalizedNote,
+  };
+}
+
+function parseLeadsViewSalesNoteInProgress_(raw, leadId) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch (err) {
+    throw new Error('Malformed Sales Note in-progress state; refusing to overwrite it.');
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Malformed Sales Note in-progress state; refusing to overwrite it.');
+  }
+  if (typeof value.hash !== 'string' || !/^[A-Za-z0-9_-]{40}$/.test(value.hash)) {
+    throw new Error('Malformed Sales Note in-progress hash; refusing to overwrite it.');
+  }
+  if (typeof value.startedAt !== 'number' || !Number.isFinite(value.startedAt) || value.startedAt <= 0) {
+    throw new Error('Malformed Sales Note in-progress timestamp; refusing to overwrite it.');
+  }
+  if (typeof value.historyEntry !== 'string' || !value.historyEntry.trim()) {
+    throw new Error('Malformed Sales Note in-progress History entry; refusing to overwrite it.');
+  }
+  // The note field is required for new state. Older valid state can recover
+  // using its already-persisted History entry without being overwritten.
+  if (value.note !== undefined && (typeof value.note !== 'string' || !value.note.trim())) {
+    throw new Error('Malformed Sales Note in-progress note; refusing to overwrite it.');
+  }
+  if (value.note !== undefined) {
+    const normalizedNote = value.note.trim().replace(/\s+/g, ' ');
+    const expectedHash = Utilities.base64EncodeWebSafe(
+      Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, leadId + '|' + normalizedNote)
+    ).slice(0, 40);
+    if (expectedHash !== value.hash) {
+      throw new Error('Sales Note in-progress hash does not match its note; refusing to overwrite it.');
+    }
+  }
+  const legacyNote = value.historyEntry.replace(/^\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\]\s+/, '').trim();
+  return {
+    hash: value.hash,
+    startedAt: value.startedAt,
+    historyEntry: value.historyEntry,
+    note: value.note === undefined ? (legacyNote || value.historyEntry) : value.note,
+    leadId: leadId,
+  };
+}
+
+function recoverLeadsViewSalesNoteInProgress_(sheet, row, leadId, expectedInProgress) {
+  const properties = PropertiesService.getScriptProperties();
+  const inProgressKey = 'LEADS_SALES_NOTE_IN_PROGRESS_' + leadId;
+  const currentRaw = String(properties.getProperty(inProgressKey) || '');
+  if (!currentRaw) throw new Error('Original LEADS Sales Note recovery state is missing; refusing to process a later note.');
+  const current = parseLeadsViewSalesNoteInProgress_(currentRaw, leadId);
+  if (current.hash !== expectedInProgress.hash
+    || current.startedAt !== expectedInProgress.startedAt
+    || current.historyEntry !== expectedInProgress.historyEntry
+    || current.note !== expectedInProgress.note) {
+    throw new Error('Original LEADS Sales Note recovery state changed during recovery; refusing to process a later note.');
+  }
+
+  // Re-read the row and headers immediately before recovery. The snapshot
+  // updater performs its own fresh, fail-closed snapshot validation/read.
+  const freshLead = getRowObject_(sheet, row);
+  const freshLeadId = String(freshLead.lead_id || '').trim();
+  if (freshLeadId !== leadId) throw new Error('LEADS Sales Note recovery Lead ID changed; refusing to process a later note.');
+  const freshHeaderMap = getHeaderMap_(sheet);
+  const historyColumn = freshHeaderMap.sales_note_history;
+  if (!historyColumn) throw new Error('LEADS Sales Note recovery History column is missing; refusing to process a later note.');
+  const beforeHistory = sheet.getRange(row, historyColumn).getValue();
+  if (!salesNoteHistoryContainsEntry_(beforeHistory, current.historyEntry)) {
+    appendSalesNoteHistoryToLeadsView_(sheet, row, current.historyEntry, new Date());
+  }
+  const recoveredHistory = sheet.getRange(row, historyColumn).getValue();
+  updateLeadsNoteSnapshotForLeadUnlocked_(leadId, row, recoveredHistory, '', current.note, 'Sales Note');
+  recordLeadsViewSalesNoteSuccess_({
+    hash: current.hash,
+    cacheKey: 'sales_note_' + current.hash,
+    propertyKey: 'LEADS_SALES_NOTE_LAST_' + leadId,
+    inProgressKey: inProgressKey,
+  });
+}
+
+function recordLeadsViewSalesNoteSuccess_(dedupe) {
+  const cache = CacheService.getScriptCache();
+  const properties = PropertiesService.getScriptProperties();
+  cache.put(dedupe.cacheKey, '1', 60);
+  properties.setProperty(dedupe.propertyKey, dedupe.hash + '|' + Date.now());
+  properties.deleteProperty(dedupe.inProgressKey);
+}
+
+function salesNoteHistoryContainsEntry_(history, entry) {
+  const target = String(entry || '').trim().replace(/\s+/g, ' ');
+  if (!target) return false;
+  return String(history || '').split(/\n\s*\n|\n/).some(function (item) {
+    return String(item || '').trim().replace(/\s+/g, ' ') === target;
+  });
 }
 
 function handleLeadsViewOpenDetailEdit_(e, sheet, row) {
@@ -2842,6 +2934,14 @@ function mergeSalesNoteHistoryText_(existingHistory, nextEntry) {
   if (nextKey && existingKeys[nextKey]) return existing;
 
   return existing ? existing + '\n\n' + next : next;
+}
+
+function normalizeLeadMemoText_(value) {
+  return String(value || '')
+    .replace(/\r\n/g, '\n')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
 }
 
 function restoreLeadsViewMemoData_(sheet, memoByLeadId) {

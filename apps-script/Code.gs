@@ -2,6 +2,7 @@
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 const CRM_UI_BATCH_TASK_CURSOR_KEY = 'CRM_UI_BATCH_CURRENT_TASK';
+const SHOW_CRM_DEVELOPER_MENU_PROPERTY = 'SHOW_CRM_DEVELOPER_MENU';
 const CRM_FORMAT_AUDIT_LOG_SHEET_NAME = 'CRM_FORMAT_AUDIT_LOG';
 const CRM_FORMAT_AUDIT_LOG_HEADERS = [
   'timestamp',
@@ -55,13 +56,19 @@ function normalizeHeaderName_(headerName) {
 
 function getHeaderMap_(sheet) {
   const headers = sheet.getRange(HEADER_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
-  return headers.reduce((map, header, index) => {
+  const duplicates = [];
+  const map = headers.reduce((result, header, index) => {
     const name = normalizeHeaderName_(header);
     if (name) {
-      map[name] = index + 1;
+      if (result[name]) duplicates.push(name);
+      else result[name] = index + 1;
     }
-    return map;
+    return result;
   }, {});
+  if (duplicates.length) {
+    throw new Error('Duplicate sheet headers detected: ' + duplicates.join(', ') + '. Refusing to continue.');
+  }
+  return map;
 }
 
 function getHeaderColumn_(sheet, headerName) {
@@ -108,10 +115,14 @@ function appendObjectRow_(sheetName, object) {
 }
 
 function onOpen(e) {
-  SpreadsheetApp
-    .getUi()
-    .createMenu('CRM Tools')
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('CRM Tools')
     .addItem('Add Manual Lead', 'createManualLead')
+    .addToUi();
+
+  // Developer/admin actions are hidden unless explicitly enabled by property.
+  if (!isCrmDeveloperMenuEnabled_()) return;
+  ui.createMenu('CRM Developer Tools')
     .addItem('Diagnose CRM Setup', 'diagnoseCrmSetup')
     .addItem('Sync LEADS View', 'syncLeadsViewNow')
     .addItem('Admin Repair LEADS View', 'adminRepairLeadsViewFromLeadMain')
@@ -121,14 +132,17 @@ function onOpen(e) {
     .addItem('Sync LEADS Note History to Activity Log', 'syncLeadsNoteHistoryToActivityLogNow')
     .addItem('Sync LEADS Note History Continue', 'syncLeadsNoteHistoryToActivityLogContinue')
     .addItem('Sync Audio Files', 'syncLeadAudioFilesNow')
-    .addItem('Audit Audio Metadata', 'auditAudioMetadata')
-    .addItem('Highlight CRM3-only Leads', 'highlightCrm3OnlyLeads')
-    .addItem('Build CRM2 Match Audit', 'buildCrm2MatchAudit')
-    .addItem('Start Legacy Note Match Audit', 'startLegacyNoteMatchAudit')
-    .addItem('Continue Legacy Note Match Audit', 'continueLegacyNoteMatchAudit')
-    .addItem('Backfill LEADS Memo History Dry Run', 'backfillLeadsMemoHistoryFromActivityLogDryRun')
-    .addItem('Backfill LEADS Memo History Apply', 'backfillLeadsMemoHistoryFromActivityLog')
     .addToUi();
+}
+
+function isCrmDeveloperMenuEnabled_() {
+  try {
+    return String(
+      PropertiesService.getScriptProperties().getProperty(SHOW_CRM_DEVELOPER_MENU_PROPERTY) || ''
+    ).trim().toLowerCase() === 'true';
+  } catch (err) {
+    return false;
+  }
 }
 
 function setupCrmUi() {
