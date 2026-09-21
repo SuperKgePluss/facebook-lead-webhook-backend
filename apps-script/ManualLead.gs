@@ -14,13 +14,6 @@ function createManualLead() {
     return;
   }
 
-  const existing = findLeadMainRowByPhone_(phone);
-  if (existing) {
-    navigateToLeadMainRow_(existing.row);
-    ui.alert('Lead with this phone already exists.');
-    return;
-  }
-
   const note = promptManualLeadValue_(ui, 'Additional Note', 'Optional note. Leave blank if not needed.', false);
   if (note === null) return;
 
@@ -35,37 +28,196 @@ function createManualLead() {
 
   const ss = SpreadsheetApp.getActive();
   const leadSheet = ss.getSheetByName('LEADS_MAIN');
-  if (!leadSheet) {
-    ui.alert('Missing LEADS_MAIN sheet.');
+  const detailSheet = ss.getSheetByName('LEAD_DETAILS');
+  const leadsSheet = ss.getSheetByName('LEADS');
+  if (!leadSheet || !detailSheet || !leadsSheet) {
+    const missingSheets = [
+      !leadSheet ? 'LEADS_MAIN' : '',
+      !detailSheet ? 'LEAD_DETAILS' : '',
+      !leadsSheet ? 'LEADS' : '',
+    ].filter(Boolean).join(', ');
+    ui.alert('Manual lead preflight failed. Missing sheet(s): ' + missingSheets);
+    return;
+  }
+
+  const validationError = validateManualLeadDropdownInputs_(leadSheet, salesOwner, preferredCallDay, preferredCallTime);
+  if (validationError) {
+    ui.alert(validationError);
+    return;
+  }
+
+  const existing = findLeadMainRowByPhone_(phone);
+  if (existing) {
+    navigateToLeadMainRow_(existing.row);
+    ui.alert('Lead with this phone already exists.');
     return;
   }
 
   const now = new Date();
   const leadId = generateManualLeadId_();
-  const leadRow = appendObjectRow_('LEADS_MAIN', {
-    lead_id: leadId,
-    customer_name: customerName,
-    phone: phone,
-    source: 'Manual',
-    lead_status: 'New',
-    sales_owner: salesOwner,
-    preferred_call_day: preferredCallDay,
-    preferred_call_time: preferredCallTime,
-    created_at: now,
-    updated_at: now,
-  });
-
-  if (note) {
-    setRowObjectValues_(leadSheet, leadRow, {
-      follow_up_note: note,
-    });
+  if (findManualLeadIdRows_(leadId).length) {
+    ui.alert('Manual lead ID collision detected. No data was written.');
+    return;
   }
 
-  appendManualLeadDetail_(leadId, phone, customerName);
-  setupLeadMainRowUi(leadRow, leadSheet);
-  syncLeadsViewForLeadMainRow_(leadRow);
-  navigateToLeadMainRow_(leadRow);
-  ui.alert('Manual lead created: ' + leadId);
+  let leadRow = null;
+  let detailRow = null;
+  try {
+    // Keep the write order bounded: master row, detail row, then the targeted view sync.
+    leadRow = appendObjectRow_('LEADS_MAIN', {
+      lead_id: leadId,
+      customer_name: customerName,
+      phone: phone,
+      source: 'Manual',
+      lead_status: 'New',
+      sales_owner: salesOwner,
+      preferred_call_day: preferredCallDay,
+      preferred_call_time: preferredCallTime,
+      created_at: now,
+      updated_at: now,
+    });
+
+    if (note) {
+      setRowObjectValues_(leadSheet, leadRow, {
+        follow_up_note: note,
+      });
+    }
+
+    detailRow = appendManualLeadDetail_(leadId, phone, customerName);
+    setupLeadMainRowUi(leadRow, leadSheet);
+    if (syncLeadsViewForLeadMainRow_(leadRow) !== true) {
+      throw new Error('Targeted LEADS sync did not complete.');
+    }
+
+    if (findManualLeadIdRows_(leadId).length !== 3) {
+      throw new Error('Manual lead did not resolve exactly once across the three layers.');
+    }
+
+    navigateToLeadMainRow_(leadRow);
+    ui.alert('Manual lead created: ' + leadId);
+    return leadId;
+  } catch (error) {
+    const rollback = rollbackManualLeadRows_(leadId);
+    Logger.log('createManualLead failed for ' + leadId + ': ' + error + '; rollback=' + JSON.stringify(rollback));
+    if (rollback.failed.length) {
+      ui.alert('Manual lead creation failed and rollback requires review. Lead ID: ' + leadId + '. Failed rollback sheets: ' + rollback.failed.join(', '));
+    } else {
+      ui.alert('Manual lead was not created. All touched rows were rolled back.');
+    }
+    return null;
+  }
+}
+
+function validateManualLeadDropdownInputs_(leadSheet, salesOwner, preferredCallDay, preferredCallTime) {
+  const owner = String(salesOwner || '').trim();
+  if (owner && getManualLeadSettingsColumnValues_(4).indexOf(owner) === -1) {
+    return 'Invalid Sales Owner. Choose a current value from SETTINGS!D2:D or leave it blank.';
+  }
+
+  const dropdownFields = [
+    { header: 'preferred_call_day', value: preferredCallDay, label: 'Preferred Call Day' },
+    { header: 'preferred_call_time', value: preferredCallTime, label: 'Preferred Call Time' },
+  ];
+  for (let i = 0; i < dropdownFields.length; i++) {
+    const field = dropdownFields[i];
+    const value = String(field.value || '').trim();
+    if (!value) continue;
+
+    const allowedValues = getManualLeadDropdownValues_(leadSheet, field.header);
+    if (allowedValues && allowedValues.indexOf(value) === -1) {
+      return 'Invalid ' + field.label + '. Choose a current dropdown value or leave it blank.';
+    }
+  }
+  return '';
+}
+
+function getManualLeadSettingsColumnValues_(column) {
+  const settingsSheet = SpreadsheetApp.getActive().getSheetByName('SETTINGS');
+  const settingsStartRow = 2;
+  if (!settingsSheet || settingsSheet.getLastRow() < settingsStartRow) return [];
+  return settingsSheet
+    .getRange(settingsStartRow, column, settingsSheet.getLastRow() - settingsStartRow + 1, 1)
+    .getValues()
+    .map(row => String(row[0] || '').trim())
+    .filter(Boolean);
+}
+
+function getManualLeadDropdownValues_(sheet, header) {
+  const headerMap = getHeaderMap_(sheet);
+  const column = headerMap[normalizeHeaderName_(header)];
+  if (!column) return null;
+
+  const validation = sheet.getRange(DATA_START_ROW, column).getDataValidation();
+  if (!validation) return null;
+
+  const criteriaType = validation.getCriteriaType();
+  const criteriaValues = validation.getCriteriaValues() || [];
+  if (criteriaType === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+    return (criteriaValues[0] || []).map(value => String(value || '').trim()).filter(Boolean);
+  }
+  if (criteriaType === SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE && criteriaValues[0]) {
+    return criteriaValues[0]
+      .getValues()
+      .reduce((values, row) => values.concat(row), [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function findManualLeadIdRows_(leadId) {
+  const target = String(leadId || '').trim();
+  if (!target) return [];
+
+  const ss = SpreadsheetApp.getActive();
+  const matches = [];
+  ['LEADS_MAIN', 'LEAD_DETAILS', 'LEADS'].forEach(sheetName => {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet || sheet.getLastRow() < DATA_START_ROW) return;
+
+    const headerMap = getHeaderMap_(sheet);
+    const leadIdColumn = headerMap.lead_id;
+    if (!leadIdColumn) return;
+
+    const values = sheet.getRange(DATA_START_ROW, leadIdColumn, sheet.getLastRow() - DATA_START_ROW + 1, 1).getValues();
+    values.forEach((row, index) => {
+      if (String(row[0] || '').trim() === target) {
+        matches.push({ sheetName: sheetName, row: DATA_START_ROW + index });
+      }
+    });
+  });
+  return matches;
+}
+
+function rollbackManualLeadRows_(leadId) {
+  const matches = findManualLeadIdRows_(leadId);
+  const cleared = [];
+  const failed = [];
+  const ss = SpreadsheetApp.getActive();
+  matches.forEach(match => {
+    try {
+      const sheet = ss.getSheetByName(match.sheetName);
+      if (!sheet) throw new Error('Missing sheet: ' + match.sheetName);
+      sheet.getRange(match.row, 1, 1, sheet.getLastColumn()).clearContent();
+      cleared.push(match.sheetName + '!R' + match.row);
+    } catch (error) {
+      failed.push(match.sheetName + '!R' + match.row);
+    }
+  });
+  return { cleared: cleared, failed: failed };
+}
+
+function appendManualLeadDetail_(leadId, phone, customerName) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName('LEAD_DETAILS');
+  if (!sheet) throw new Error('Missing sheet: LEAD_DETAILS');
+
+  return appendObjectRow_('LEAD_DETAILS', {
+    lead_id: leadId,
+    raw_phone: phone,
+    original_customer_name: customerName,
+    created_source: 'Manual',
+  });
 }
 
 function promptManualLeadValue_(ui, title, message, required) {
@@ -104,18 +256,6 @@ function findLeadMainRowByPhone_(phone) {
   }
 
   return null;
-}
-
-function appendManualLeadDetail_(leadId, phone, customerName) {
-  const sheet = SpreadsheetApp.getActive().getSheetByName('LEAD_DETAILS');
-  if (!sheet) return;
-
-  appendObjectRow_('LEAD_DETAILS', {
-    lead_id: leadId,
-    raw_phone: phone,
-    original_customer_name: customerName,
-    created_source: 'Manual',
-  });
 }
 
 function navigateToLeadMainRow_(row) {

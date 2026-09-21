@@ -2,6 +2,7 @@
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
 const CRM_UI_BATCH_TASK_CURSOR_KEY = 'CRM_UI_BATCH_CURRENT_TASK';
+const SHOW_CRM_DEVELOPER_MENU_PROPERTY = 'SHOW_CRM_DEVELOPER_MENU';
 const CRM_FORMAT_AUDIT_LOG_SHEET_NAME = 'CRM_FORMAT_AUDIT_LOG';
 const CRM_FORMAT_AUDIT_LOG_HEADERS = [
   'timestamp',
@@ -108,27 +109,46 @@ function appendObjectRow_(sheetName, object) {
 }
 
 function onOpen(e) {
-  SpreadsheetApp
-    .getUi()
-    .createMenu('CRM Tools')
+  const ui = SpreadsheetApp.getUi();
+
+  // Client-facing menu: keep this safe and simple for normal CRM users.
+  ui.createMenu('CRM Tools')
     .addItem('Add Manual Lead', 'createManualLead')
-    .addItem('Diagnose CRM Setup', 'diagnoseCrmSetup')
-    .addItem('Sync LEADS View', 'syncLeadsViewNow')
-    .addItem('Admin Repair LEADS View', 'adminRepairLeadsViewFromLeadMain')
-    .addItem('Run Date Audit (Report Only)', 'runLeadsDateAuditReport')
-    .addItem('Apply Safe Date Format & Sort', 'applyLeadsDateNormalizationAndSort')
-    .addItem('Initialize LEADS Note Snapshot', 'initializeLeadsNoteSnapshot')
-    .addItem('Sync LEADS Note History to Activity Log', 'syncLeadsNoteHistoryToActivityLogNow')
-    .addItem('Sync LEADS Note History Continue', 'syncLeadsNoteHistoryToActivityLogContinue')
-    .addItem('Sync Audio Files', 'syncLeadAudioFilesNow')
-    .addItem('Audit Audio Metadata', 'auditAudioMetadata')
-    .addItem('Highlight CRM3-only Leads', 'highlightCrm3OnlyLeads')
-    .addItem('Build CRM2 Match Audit', 'buildCrm2MatchAudit')
-    .addItem('Start Legacy Note Match Audit', 'startLegacyNoteMatchAudit')
-    .addItem('Continue Legacy Note Match Audit', 'continueLegacyNoteMatchAudit')
-    .addItem('Backfill LEADS Memo History Dry Run', 'backfillLeadsMemoHistoryFromActivityLogDryRun')
-    .addItem('Backfill LEADS Memo History Apply', 'backfillLeadsMemoHistoryFromActivityLog')
     .addToUi();
+
+  // Developer/admin tools are intentionally separated from the client-facing menu.
+  // To show this menu, set Script Property:
+  // SHOW_CRM_DEVELOPER_MENU = true
+  if (isCrmDeveloperMenuEnabled_()) {
+    ui.createMenu('CRM Developer Tools')
+      .addItem('Diagnose CRM Setup', 'diagnoseCrmSetup')
+      .addItem('Sync LEADS View', 'syncLeadsViewNow')
+      .addItem('Admin Repair LEADS View', 'adminRepairLeadsViewFromLeadMain')
+      .addItem('Run Date Audit (Report Only)', 'runLeadsDateAuditReport')
+      .addItem('Audit Facebook Lead Incident Evidence', 'auditFacebookLeadIncidentEvidence')
+      .addItem('Test Date Sort on LEADS Copy', 'testLeadsDateNormalizationAndSortOnCopy')
+      .addItem('Apply Safe Date Format & Sort', 'applyLeadsDateNormalizationAndSort')
+      .addItem('Initialize LEADS Note Snapshot', 'initializeLeadsNoteSnapshot')
+      .addItem('Sync LEADS Note History to Activity Log', 'syncLeadsNoteHistoryToActivityLogNow')
+      .addItem('Sync LEADS Note History Continue', 'syncLeadsNoteHistoryToActivityLogContinue')
+      .addItem('Sync Audio Files', 'syncLeadAudioFilesNow')
+      .addItem('Audit Audio Metadata', 'auditAudioMetadata')
+      .addItem('Highlight CRM3-only Leads', 'highlightCrm3OnlyLeads')
+      .addItem('Build CRM2 Match Audit', 'buildCrm2MatchAudit')
+      .addItem('Start Legacy Note Match Audit', 'startLegacyNoteMatchAudit')
+      .addItem('Continue Legacy Note Match Audit', 'continueLegacyNoteMatchAudit')
+      .addItem('Backfill LEADS Memo History Dry Run', 'backfillLeadsMemoHistoryFromActivityLogDryRun')
+      .addItem('Backfill LEADS Memo History Apply', 'backfillLeadsMemoHistoryFromActivityLog')
+      .addToUi();
+  }
+}
+
+function isCrmDeveloperMenuEnabled_() {
+  return String(
+    PropertiesService
+      .getScriptProperties()
+      .getProperty(SHOW_CRM_DEVELOPER_MENU_PROPERTY) || ''
+  ).trim().toLowerCase() === 'true';
 }
 
 function setupCrmUi() {

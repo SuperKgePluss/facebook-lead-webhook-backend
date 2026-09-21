@@ -3,6 +3,12 @@
 const HANDOFF_DATE_REVIEW_SHEET_NAME = '_HANDOFF_DATE_VISUAL_REVIEW';
 const HANDOFF_NOTE_MARKER_REPORT_SHEET_NAME = '_HANDOFF_NOTE_HISTORY_MARKER_REPORT';
 const HANDOFF_TEST_LEAD_CLEANUP_REPORT_SHEET_NAME = '_HANDOFF_TEST_LEAD_CLEANUP_DRY_RUN';
+const HANDOFF_TEST_LEAD_DELETE_DRY_RUN_SHEET_NAME = '_HANDOFF_TEST_LEAD_DELETE_DRY_RUN';
+const HANDOFF_TEST_LEAD_DELETE_APPLY_REPORT_SHEET_NAME = '_HANDOFF_TEST_LEAD_DELETE_APPLY_REPORT';
+const HANDOFF_DATE_STRING_CONVERT_DRY_RUN_SHEET_NAME = '_HANDOFF_DATE_STRING_CONVERT_DRY_RUN';
+const HANDOFF_DATE_STRING_CONVERT_APPLY_REPORT_SHEET_NAME = '_HANDOFF_DATE_STRING_CONVERT_APPLY_REPORT';
+const HANDOFF_SALES_NOTE_DUP_DRY_RUN_SHEET_NAME = '_HANDOFF_SALES_NOTE_DUPLICATE_CLEANUP_DRY_RUN';
+const HANDOFF_SALES_NOTE_DUP_APPLY_REPORT_SHEET_NAME = '_HANDOFF_SALES_NOTE_DUPLICATE_CLEANUP_APPLY_REPORT';
 const HANDOFF_REPORT_SHEET_NOTE = 'created_by_handoff_polish_helper_v1';
 const HANDOFF_NOTE_MARKER_BACKGROUND = '#fff2cc';
 const HANDOFF_NOTE_MARKER_FONT = '#7f6000';
@@ -230,6 +236,134 @@ function clearSuspiciousSalesNoteHistoryMarkersForHandoff() {
   return { restored: restored, skipped_moved_or_mismatched: skippedMovedOrMismatched };
 }
 
+function dryRunHandoffSalesNoteHistoryDuplicateCleanup() {
+  const ss = SpreadsheetApp.getActive();
+  const reportSheet = getOrCreateHandoffReportSheet_(HANDOFF_SALES_NOTE_DUP_DRY_RUN_SHEET_NAME);
+  const headers = getHandoffSalesNoteDuplicateCleanupReportHeaders_();
+  const auditAt = new Date();
+  const rows = [];
+  let leadsCandidates = 0;
+  let leadsMainCandidates = 0;
+
+  ['LEADS', 'LEADS_MAIN'].forEach(function (sheetName) {
+    const scope = sheetName === 'LEADS' ? 'apply_eligible' : 'report_only_not_apply_scope';
+    const candidates = scanHandoffSalesNoteDuplicateCandidates_(ss, sheetName, auditAt, scope);
+    if (sheetName === 'LEADS') leadsCandidates += candidates.candidateCount;
+    if (sheetName === 'LEADS_MAIN') leadsMainCandidates += candidates.candidateCount;
+    candidates.rows.forEach(function (row) { rows.push(row); });
+  });
+
+  rows.push(getHandoffSalesNoteDuplicateSummaryRow_(
+    auditAt,
+    'dry_run_summary',
+    'leads_candidates=' + leadsCandidates + '; leads_main_report_only_candidates=' + leadsMainCandidates,
+    'Dry run only. No Sales Note History cells were modified.'
+  ));
+
+  writeHandoffReport_(reportSheet, headers, rows);
+  return {
+    report_sheet: HANDOFF_SALES_NOTE_DUP_DRY_RUN_SHEET_NAME,
+    leads_candidates: leadsCandidates,
+    leads_main_report_only_candidates: leadsMainCandidates,
+  };
+}
+
+function applyHandoffSalesNoteHistoryDuplicateCleanup(confirm) {
+  const ss = SpreadsheetApp.getActive();
+  const reportSheet = getOrCreateHandoffReportSheet_(HANDOFF_SALES_NOTE_DUP_APPLY_REPORT_SHEET_NAME);
+  const headers = getHandoffSalesNoteDuplicateCleanupReportHeaders_();
+  const auditAt = new Date();
+  const rows = [];
+  let cleaned = 0;
+  let skipped = 0;
+
+  if (confirm !== 'CONFIRM') {
+    rows.push(getHandoffSalesNoteDuplicateSummaryRow_(
+      auditAt,
+      'refused',
+      'confirm_required',
+      'Call applyHandoffSalesNoteHistoryDuplicateCleanup("CONFIRM") only after reviewing the dry-run report.'
+    ));
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { cleaned: 0, skipped: 0, refused: true, reason: 'confirm_required', report_sheet: HANDOFF_SALES_NOTE_DUP_APPLY_REPORT_SHEET_NAME };
+  }
+
+  const leadsSheet = ss.getSheetByName('LEADS');
+  if (!leadsSheet || leadsSheet.getLastRow() < DATA_START_ROW) {
+    rows.push(getHandoffSalesNoteDuplicateSummaryRow_(auditAt, 'refused', 'missing_or_empty_LEADS_sheet', 'LEADS sheet was not available.'));
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { cleaned: 0, skipped: 0, refused: true, reason: 'missing_or_empty_LEADS_sheet', report_sheet: HANDOFF_SALES_NOTE_DUP_APPLY_REPORT_SHEET_NAME };
+  }
+
+  const headerMap = getHeaderMap_(leadsSheet);
+  if (!headerMap.lead_id || !headerMap.customer_name || !headerMap.sales_note_history) {
+    rows.push(getHandoffSalesNoteDuplicateSummaryRow_(auditAt, 'refused', 'missing_required_headers', 'LEADS requires lead_id, customer_name, and sales_note_history headers.'));
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { cleaned: 0, skipped: 0, refused: true, reason: 'missing_required_headers', report_sheet: HANDOFF_SALES_NOTE_DUP_APPLY_REPORT_SHEET_NAME };
+  }
+
+  const candidates = scanHandoffSalesNoteDuplicateCandidates_(ss, 'LEADS', auditAt, 'apply_eligible');
+  candidates.items.forEach(function (item) {
+    const leadIdCell = leadsSheet.getRange(item.row, headerMap.lead_id);
+    const noteCell = leadsSheet.getRange(item.row, headerMap.sales_note_history);
+    const currentLeadId = String(leadIdCell.getValue() || '').trim();
+    const currentText = String(noteCell.getValue() || '');
+    const currentCleanup = buildHandoffSalesNoteExactDuplicateCleanup_(currentText);
+
+    if (!currentLeadId || currentLeadId !== item.leadId || currentText !== item.beforeText || !currentCleanup.changed) {
+      skipped++;
+      rows.push(getHandoffSalesNoteDuplicateReportRow_(
+        auditAt,
+        'LEADS',
+        item.row,
+        item.leadId,
+        item.customerName,
+        currentText.length,
+        currentCleanup.cleanedText.length,
+        currentCleanup.duplicateCount,
+        currentCleanup.sampleDuplicate,
+        currentCleanup.changed ? 'high_exact_block_match' : 'none',
+        'Skipped because lead_id/value changed or no exact duplicate proof remained at apply time.',
+        'skipped',
+        'current_cell_not_eligible_or_changed',
+        'No Sales Note History content was changed for this row.'
+      ));
+      return;
+    }
+
+    noteCell.setValue(currentCleanup.cleanedText);
+    noteCell.setWrap(true);
+    noteCell.setVerticalAlignment('top');
+    cleaned++;
+    rows.push(getHandoffSalesNoteDuplicateReportRow_(
+      auditAt,
+      'LEADS',
+      item.row,
+      item.leadId,
+      item.customerName,
+      item.beforeText.length,
+      currentCleanup.cleanedText.length,
+      currentCleanup.duplicateCount,
+      currentCleanup.sampleDuplicate,
+      'high_exact_block_match',
+      'Exact duplicate note blocks removed; first occurrence preserved.',
+      'cleaned',
+      'duplicate_blocks_removed',
+      'Sales Note History was rewritten only for this cell. Unique blocks were preserved in original order.'
+    ));
+  });
+
+  rows.push(getHandoffSalesNoteDuplicateSummaryRow_(
+    auditAt,
+    'apply_summary',
+    'cleaned=' + cleaned + '; skipped=' + skipped,
+    'Apply scope was LEADS.sales_note_history only. LEADS_MAIN was not modified.'
+  ));
+
+  writeHandoffReport_(reportSheet, headers, rows);
+  return { cleaned: cleaned, skipped: skipped, refused: false, report_sheet: HANDOFF_SALES_NOTE_DUP_APPLY_REPORT_SHEET_NAME };
+}
+
 function auditHandoffTestLeadCleanupCandidates() {
   const ss = SpreadsheetApp.getActive();
   const leadsSheet = ss.getSheetByName('LEADS');
@@ -304,6 +438,279 @@ function auditHandoffTestLeadCleanupCandidates() {
 
   writeHandoffReport_(reportSheet, headers, rows);
   return { rows_written: rows.length, report_sheet: HANDOFF_TEST_LEAD_CLEANUP_REPORT_SHEET_NAME };
+}
+
+function dryRunConfirmedTestLeadCleanupForHandoff() {
+  const ss = SpreadsheetApp.getActive();
+  const reportSheet = getOrCreateHandoffReportSheet_(HANDOFF_TEST_LEAD_DELETE_DRY_RUN_SHEET_NAME);
+  const headers = getConfirmedTestLeadCleanupReportHeaders_();
+  const plan = buildConfirmedTestLeadCleanupPlan_(ss);
+  const rows = [];
+
+  plan.resolutionRows.forEach(function (row) {
+    rows.push(row);
+  });
+
+  plan.matches.forEach(function (match) {
+    rows.push([
+      plan.auditAt,
+      match.inputRow,
+      match.leadId,
+      match.sheetName,
+      match.row,
+      match.customerName,
+      match.phone,
+      match.sourceOrType,
+      match.status,
+      'would_delete',
+      'dry_run_only',
+      'Exact lead_id match. No deletion performed by dry run.',
+    ]);
+  });
+
+  plan.notFoundRows.forEach(function (row) {
+    rows.push(row);
+  });
+
+  rows.push([
+    plan.auditAt,
+    '',
+    plan.targetLeadIds.join(', '),
+    'SUMMARY',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'dry_run_summary',
+    'total_rows_would_delete=' + plan.matches.length,
+    plan.unresolvedRows.length ? 'WARNING: unresolved target LEADS rows: ' + plan.unresolvedRows.join(', ') : 'All target LEADS rows resolved to Lead ID.',
+  ]);
+
+  writeHandoffReport_(reportSheet, headers, rows);
+  return {
+    report_sheet: HANDOFF_TEST_LEAD_DELETE_DRY_RUN_SHEET_NAME,
+    target_lead_ids: plan.targetLeadIds,
+    unresolved_target_rows: plan.unresolvedRows,
+    total_rows_would_delete: plan.matches.length,
+  };
+}
+
+function applyConfirmedTestLeadCleanupForHandoff(confirm) {
+  const ss = SpreadsheetApp.getActive();
+  const reportSheet = getOrCreateHandoffReportSheet_(HANDOFF_TEST_LEAD_DELETE_APPLY_REPORT_SHEET_NAME);
+  const headers = getConfirmedTestLeadCleanupReportHeaders_();
+  const plan = buildConfirmedTestLeadCleanupPlan_(ss);
+  const rows = [];
+  let deleted = 0;
+  let skipped = 0;
+
+  if (confirm !== true) {
+    rows.push([
+      plan.auditAt,
+      '',
+      plan.targetLeadIds.join(', '),
+      'SAFETY',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'refused',
+      'confirm_required',
+      'Call applyConfirmedTestLeadCleanupForHandoff(true) only after reviewing dry-run output.',
+    ]);
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { deleted: 0, skipped: 0, refused: true, reason: 'confirm_required', report_sheet: HANDOFF_TEST_LEAD_DELETE_APPLY_REPORT_SHEET_NAME };
+  }
+
+  if (plan.unresolvedRows.length || !plan.targetLeadIds.length) {
+    rows.push([
+      plan.auditAt,
+      '',
+      plan.targetLeadIds.join(', '),
+      'SAFETY',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'refused',
+      'unresolved_target_lead_ids',
+      'Refusing to delete because every target LEADS row must resolve to a nonblank Lead ID. Unresolved rows: ' + plan.unresolvedRows.join(', '),
+    ]);
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { deleted: 0, skipped: 0, refused: true, reason: 'unresolved_target_lead_ids', unresolved_target_rows: plan.unresolvedRows, report_sheet: HANDOFF_TEST_LEAD_DELETE_APPLY_REPORT_SHEET_NAME };
+  }
+
+  plan.resolutionRows.forEach(function (row) {
+    rows.push(row);
+  });
+
+  const matchesBySheet = groupConfirmedTestLeadMatchesBySheet_(plan.matches);
+  Object.keys(matchesBySheet).forEach(function (sheetName) {
+    const sheet = ss.getSheetByName(sheetName);
+    const sheetMatches = matchesBySheet[sheetName].sort(function (a, b) { return b.row - a.row; });
+    const headerMap = sheet ? getHeaderMap_(sheet) : {};
+
+    sheetMatches.forEach(function (match) {
+      if (!sheet || !headerMap.lead_id) {
+        skipped++;
+        rows.push(getConfirmedTestLeadApplyRow_(plan.auditAt, match, 'skipped', 'missing_sheet_or_lead_id_header', 'Sheet or lead_id header was not available at apply time.'));
+        return;
+      }
+
+      const currentLeadId = String(sheet.getRange(match.row, headerMap.lead_id).getValue() || '').trim();
+      if (!currentLeadId || currentLeadId !== match.leadId || plan.targetLeadIdSet[currentLeadId] !== true) {
+        skipped++;
+        rows.push(getConfirmedTestLeadApplyRow_(plan.auditAt, match, 'skipped', 'lead_id_mismatch_or_blank', 'Current row lead_id did not exactly match the confirmed target Lead ID at apply time.'));
+        return;
+      }
+
+      sheet.deleteRow(match.row);
+      deleted++;
+      rows.push(getConfirmedTestLeadApplyRow_(plan.auditAt, match, 'deleted', 'exact_lead_id_match', 'Deleted bottom-up within sheet after exact lead_id verification.'));
+    });
+  });
+
+  plan.notFoundRows.forEach(function (row) {
+    rows.push(row);
+  });
+
+  rows.push([
+    plan.auditAt,
+    '',
+    plan.targetLeadIds.join(', '),
+    'SUMMARY',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'apply_summary',
+    'deleted=' + deleted + '; skipped=' + skipped,
+    'Only exact lead_id matches from the confirmed target list were eligible for deletion.',
+  ]);
+
+  writeHandoffReport_(reportSheet, headers, rows);
+  return { deleted: deleted, skipped: skipped, refused: false, report_sheet: HANDOFF_TEST_LEAD_DELETE_APPLY_REPORT_SHEET_NAME };
+}
+
+function dryRunHandoffFacebookCreatedTimeStringDateConversion() {
+  const ss = SpreadsheetApp.getActive();
+  const reportSheet = getOrCreateHandoffReportSheet_(HANDOFF_DATE_STRING_CONVERT_DRY_RUN_SHEET_NAME);
+  const headers = getHandoffDateStringConversionReportHeaders_();
+  const plan = buildHandoffFacebookCreatedTimeStringDateConversionPlan_(ss);
+  const rows = plan.reportRows.slice();
+
+  rows.push(getHandoffDateStringConversionSummaryRow_(
+    plan.auditAt,
+    'dry_run_summary',
+    'would_convert=' + plan.eligibleCount + '; skipped=' + plan.skippedCount,
+    'Dry run only. No LEADS cells were modified.'
+  ));
+
+  writeHandoffReport_(reportSheet, headers, rows);
+  return {
+    report_sheet: HANDOFF_DATE_STRING_CONVERT_DRY_RUN_SHEET_NAME,
+    would_convert: plan.eligibleCount,
+    skipped: plan.skippedCount,
+  };
+}
+
+function applyHandoffFacebookCreatedTimeStringDateConversion(confirm) {
+  const ss = SpreadsheetApp.getActive();
+  const reportSheet = getOrCreateHandoffReportSheet_(HANDOFF_DATE_STRING_CONVERT_APPLY_REPORT_SHEET_NAME);
+  const headers = getHandoffDateStringConversionReportHeaders_();
+  const plan = buildHandoffFacebookCreatedTimeStringDateConversionPlan_(ss);
+  const rows = [];
+  let converted = 0;
+  let skipped = 0;
+
+  if (confirm !== true) {
+    rows.push(getHandoffDateStringConversionSummaryRow_(
+      plan.auditAt,
+      'refused',
+      'confirm_required',
+      'Call applyHandoffFacebookCreatedTimeStringDateConversion(true) only after reviewing the dry-run report.'
+    ));
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { converted: 0, skipped: 0, refused: true, reason: 'confirm_required', report_sheet: HANDOFF_DATE_STRING_CONVERT_APPLY_REPORT_SHEET_NAME };
+  }
+
+  if (!plan.leadsSheet || !plan.headerMap.facebook_created_time) {
+    rows.push(getHandoffDateStringConversionSummaryRow_(
+      plan.auditAt,
+      'refused',
+      'missing_LEADS_or_facebook_created_time_header',
+      'Refusing to apply because LEADS or facebook_created_time header was not available.'
+    ));
+    writeHandoffReport_(reportSheet, headers, rows);
+    return { converted: 0, skipped: 0, refused: true, reason: 'missing_LEADS_or_facebook_created_time_header', report_sheet: HANDOFF_DATE_STRING_CONVERT_APPLY_REPORT_SHEET_NAME };
+  }
+
+  plan.items.forEach(function (item) {
+    const currentCell = plan.leadsSheet.getRange(item.row, plan.headerMap.facebook_created_time);
+    const currentValue = currentCell.getValue();
+    const currentDisplay = currentCell.getDisplayValue();
+    const currentRawType = getHandoffValueType_(currentValue);
+    const currentText = typeof currentValue === 'string' ? String(currentValue).trim() : '';
+    const currentCandidate = parseHandoffUsFacebookCreatedTimeString_(currentText, item.isReviewTarget);
+
+    if (!item.eligible || currentRawType !== 'string' || currentText !== item.rawValue || !currentCandidate.eligible) {
+      skipped++;
+      rows.push(getHandoffDateStringConversionReportRow_(
+        plan.auditAt,
+        item.row,
+        item.leadId,
+        item.customerName,
+        serializeHandoffValue_(currentValue),
+        currentRawType,
+        currentDisplay,
+        currentCandidate.parsedDate ? formatHandoffDateStringTargetDisplay_(currentCandidate.parsedDate) : '',
+        currentCandidate.parsedDate ? formatHandoffDateStringTargetDisplay_(currentCandidate.parsedDate) : '',
+        'LEADS.facebook_created_time',
+        'skipped',
+        'current_cell_not_eligible_or_changed',
+        'Apply re-read skipped this cell because the current value no longer exactly matches an eligible string.'
+      ));
+      return;
+    }
+
+    currentCell.setValue(currentCandidate.parsedDate);
+    currentCell.setNumberFormat(LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT);
+    converted++;
+    rows.push(getHandoffDateStringConversionReportRow_(
+      plan.auditAt,
+      item.row,
+      item.leadId,
+      item.customerName,
+      item.rawValue,
+      item.rawType,
+      item.currentDisplayValue,
+      item.parsedAs,
+      item.targetDisplayValue,
+      'LEADS.facebook_created_time',
+      'converted',
+      'converted',
+      'Converted string MM/DD/YYYY time to Date object and applied dd/MM/yyyy HH:mm format. No sorting performed.'
+    ));
+  });
+
+  plan.skippedReportRows.forEach(function (row) {
+    skipped++;
+    rows.push(row);
+  });
+
+  rows.push(getHandoffDateStringConversionSummaryRow_(
+    plan.auditAt,
+    'apply_summary',
+    'converted=' + converted + '; skipped=' + skipped,
+    'No sort, row move, or other date column updates were performed.'
+  ));
+
+  writeHandoffReport_(reportSheet, headers, rows);
+  return { converted: converted, skipped: skipped, refused: false, report_sheet: HANDOFF_DATE_STRING_CONVERT_APPLY_REPORT_SHEET_NAME };
 }
 
 function getHandoffSheetVisualPolishChecklist() {
@@ -425,6 +832,630 @@ function getExistingHandoffMarkerFormatMap_(reportSheet) {
   return result;
 }
 
+function getConfirmedTestLeadCleanupReportHeaders_() {
+  return [
+    'audit_at',
+    'input_LEADS_row',
+    'resolved_lead_id',
+    'sheet_name',
+    'matched_row',
+    'customer_name',
+    'phone',
+    'source_or_type',
+    'status',
+    'action',
+    'result',
+    'notes',
+  ];
+}
+
+function buildConfirmedTestLeadCleanupPlan_(ss) {
+  const auditAt = new Date();
+  const leadsSheet = ss.getSheetByName('LEADS');
+  const targetLeadIdsByRow = resolveHandoffLeadIdsFromLeadsRows_(leadsSheet, HANDOFF_TEST_LEADS_ROWS);
+  const targetLeadIdSet = {};
+  const targetLeadIds = [];
+  const unresolvedRows = [];
+  const resolutionRows = [];
+  const notFoundRows = [];
+  const matches = [];
+
+  HANDOFF_TEST_LEADS_ROWS.forEach(function (inputRow) {
+    const leadId = String(targetLeadIdsByRow[inputRow] || '').trim();
+    if (!leadId) {
+      unresolvedRows.push(inputRow);
+      resolutionRows.push([
+        auditAt,
+        inputRow,
+        '',
+        'LEADS',
+        inputRow,
+        '',
+        '',
+        '',
+        '',
+        'resolve_target',
+        'unresolved',
+        'No Lead ID found at this LEADS row. Cleanup must not delete by row number alone.',
+      ]);
+      return;
+    }
+
+    if (!targetLeadIdSet[leadId]) {
+      targetLeadIdSet[leadId] = true;
+      targetLeadIds.push(leadId);
+    }
+    resolutionRows.push([
+      auditAt,
+      inputRow,
+      leadId,
+      'LEADS',
+      inputRow,
+      '',
+      '',
+      '',
+      '',
+      'resolve_target',
+      'resolved',
+      'Target LEADS row resolved to Lead ID. Deletion eligibility still requires exact lead_id matches in each sheet.',
+    ]);
+  });
+
+  HANDOFF_RELATED_LEAD_SHEETS.forEach(function (sheetName) {
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      targetLeadIds.forEach(function (leadId) {
+        notFoundRows.push([
+          auditAt,
+          getInputRowForHandoffLeadId_(targetLeadIdsByRow, leadId),
+          leadId,
+          sheetName,
+          '',
+          '',
+          '',
+          '',
+          '',
+          'scan',
+          'skipped_missing_sheet',
+          'Related sheet not found.',
+        ]);
+      });
+      return;
+    }
+
+    const headerMap = getHeaderMap_(sheet);
+    if (!headerMap.lead_id) {
+      targetLeadIds.forEach(function (leadId) {
+        notFoundRows.push([
+          auditAt,
+          getInputRowForHandoffLeadId_(targetLeadIdsByRow, leadId),
+          leadId,
+          sheetName,
+          '',
+          '',
+          '',
+          '',
+          '',
+          'scan',
+          'skipped_missing_lead_id_header',
+          'Sheet does not have a lead_id header, so no rows are eligible for deletion here.',
+        ]);
+      });
+      return;
+    }
+
+    targetLeadIds.forEach(function (leadId) {
+      const found = findHandoffLeadIdRows_(sheet, leadId);
+      if (!found.length) {
+        notFoundRows.push([
+          auditAt,
+          getInputRowForHandoffLeadId_(targetLeadIdsByRow, leadId),
+          leadId,
+          sheetName,
+          '',
+          '',
+          '',
+          '',
+          '',
+          'scan',
+          'not_found',
+          'Lead ID not found in this sheet.',
+        ]);
+        return;
+      }
+
+      found.forEach(function (record) {
+        matches.push({
+          inputRow: getInputRowForHandoffLeadId_(targetLeadIdsByRow, leadId),
+          leadId: leadId,
+          sheetName: sheetName,
+          row: record.row,
+          customerName: record.customerName,
+          phone: record.phone,
+          sourceOrType: record.sourceOrType,
+          status: record.status,
+        });
+      });
+    });
+  });
+
+  return {
+    auditAt: auditAt,
+    targetLeadIdsByRow: targetLeadIdsByRow,
+    targetLeadIds: targetLeadIds,
+    targetLeadIdSet: targetLeadIdSet,
+    unresolvedRows: unresolvedRows,
+    resolutionRows: resolutionRows,
+    matches: matches,
+    notFoundRows: notFoundRows,
+  };
+}
+
+function groupConfirmedTestLeadMatchesBySheet_(matches) {
+  const result = {};
+  matches.forEach(function (match) {
+    if (!result[match.sheetName]) result[match.sheetName] = [];
+    result[match.sheetName].push(match);
+  });
+  return result;
+}
+
+function getConfirmedTestLeadApplyRow_(auditAt, match, action, result, notes) {
+  return [
+    auditAt,
+    match.inputRow,
+    match.leadId,
+    match.sheetName,
+    match.row,
+    match.customerName,
+    match.phone,
+    match.sourceOrType,
+    match.status,
+    action,
+    result,
+    notes,
+  ];
+}
+
+function getInputRowForHandoffLeadId_(leadIdsByRow, leadId) {
+  const rows = Object.keys(leadIdsByRow || {});
+  for (let index = 0; index < rows.length; index++) {
+    const rowNumber = rows[index];
+    if (String(leadIdsByRow[rowNumber] || '').trim() === leadId) return Number(rowNumber);
+  }
+  return '';
+}
+
+function getHandoffDateStringConversionReportHeaders_() {
+  return [
+    'audit_at',
+    'row',
+    'lead_id',
+    'customer_name',
+    'raw_value',
+    'raw_type',
+    'current_display_value',
+    'parsed_as',
+    'target_display_value',
+    'source_field',
+    'action',
+    'result',
+    'notes',
+  ];
+}
+
+function buildHandoffFacebookCreatedTimeStringDateConversionPlan_(ss) {
+  const auditAt = new Date();
+  const leadsSheet = ss.getSheetByName('LEADS');
+  const reportRows = [];
+  const skippedReportRows = [];
+  const items = [];
+  let eligibleCount = 0;
+  let skippedCount = 0;
+
+  if (!leadsSheet || leadsSheet.getLastRow() < DATA_START_ROW) {
+    skippedCount++;
+    reportRows.push(getHandoffDateStringConversionSummaryRow_(auditAt, 'skipped', 'missing_or_empty_LEADS_sheet', 'LEADS sheet was not available.'));
+    return { auditAt: auditAt, leadsSheet: leadsSheet, headerMap: {}, reportRows: reportRows, skippedReportRows: skippedReportRows, items: items, eligibleCount: eligibleCount, skippedCount: skippedCount };
+  }
+
+  const headerMap = getHeaderMap_(leadsSheet);
+  if (!headerMap.lead_id || !headerMap.facebook_created_time) {
+    skippedCount++;
+    reportRows.push(getHandoffDateStringConversionSummaryRow_(auditAt, 'skipped', 'missing_required_headers', 'LEADS requires lead_id and facebook_created_time headers.'));
+    return { auditAt: auditAt, leadsSheet: leadsSheet, headerMap: headerMap, reportRows: reportRows, skippedReportRows: skippedReportRows, items: items, eligibleCount: eligibleCount, skippedCount: skippedCount };
+  }
+
+  const reviewTargets = getHandoffDateStringReviewTargetMap_(ss);
+  const rowCount = leadsSheet.getLastRow() - DATA_START_ROW + 1;
+  const lastColumn = leadsSheet.getLastColumn();
+  const values = leadsSheet.getRange(DATA_START_ROW, 1, rowCount, lastColumn).getValues();
+  const displays = leadsSheet.getRange(DATA_START_ROW, 1, rowCount, lastColumn).getDisplayValues();
+
+  values.forEach(function (row, index) {
+    const sheetRow = DATA_START_ROW + index;
+    const rawValue = row[headerMap.facebook_created_time - 1];
+    if (rawValue === '' || rawValue === null || rawValue === undefined || rawValue instanceof Date || typeof rawValue !== 'string') return;
+
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const customerName = headerMap.customer_name ? String(displays[index][headerMap.customer_name - 1] || '') : '';
+    const currentDisplayValue = String(displays[index][headerMap.facebook_created_time - 1] || '');
+    const rawText = String(rawValue || '').trim();
+    const isReviewTarget = reviewTargets[sheetRow] === true;
+    const candidate = parseHandoffUsFacebookCreatedTimeString_(rawText, isReviewTarget);
+    const base = {
+      row: sheetRow,
+      leadId: leadId,
+      customerName: customerName,
+      rawValue: rawText,
+      rawType: getHandoffValueType_(rawValue),
+      currentDisplayValue: currentDisplayValue,
+      parsedAs: candidate.parsedDate ? formatHandoffDateStringTargetDisplay_(candidate.parsedDate) : '',
+      targetDisplayValue: candidate.parsedDate ? formatHandoffDateStringTargetDisplay_(candidate.parsedDate) : '',
+      isReviewTarget: isReviewTarget,
+      eligible: candidate.eligible,
+    };
+
+    if (candidate.eligible) {
+      eligibleCount++;
+      items.push(base);
+      reportRows.push(getHandoffDateStringConversionReportRow_(
+        auditAt,
+        sheetRow,
+        leadId,
+        customerName,
+        rawText,
+        base.rawType,
+        currentDisplayValue,
+        base.parsedAs,
+        base.targetDisplayValue,
+        'LEADS.facebook_created_time',
+        'would_convert',
+        'eligible',
+        candidate.reason
+      ));
+      return;
+    }
+
+    skippedCount++;
+    const skippedRow = getHandoffDateStringConversionReportRow_(
+      auditAt,
+      sheetRow,
+      leadId,
+      customerName,
+      rawText,
+      base.rawType,
+      currentDisplayValue,
+      base.parsedAs,
+      base.targetDisplayValue,
+      'LEADS.facebook_created_time',
+      'skipped',
+      candidate.result,
+      candidate.reason
+    );
+    reportRows.push(skippedRow);
+    skippedReportRows.push(skippedRow);
+  });
+
+  return {
+    auditAt: auditAt,
+    leadsSheet: leadsSheet,
+    headerMap: headerMap,
+    reportRows: reportRows,
+    skippedReportRows: skippedReportRows,
+    items: items,
+    eligibleCount: eligibleCount,
+    skippedCount: skippedCount,
+  };
+}
+
+function parseHandoffUsFacebookCreatedTimeString_(value, isReviewTarget) {
+  const text = String(value || '').trim();
+  const match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) {
+    return { eligible: false, result: 'not_clear_us_datetime_string', reason: 'String does not match MM/DD/YYYY HH:mm or MM/DD/YYYY HH:mm:ss.', parsedDate: null };
+  }
+
+  const month = Number(match[1]);
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = match[6] === undefined ? 0 : Number(match[6]);
+
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return { eligible: false, result: 'invalid_datetime_parts', reason: 'Date/time parts are outside allowed ranges.', parsedDate: null };
+  }
+
+  const parsedDate = new Date(year, month - 1, day, hour, minute, second);
+  if (parsedDate.getFullYear() !== year || parsedDate.getMonth() !== month - 1 || parsedDate.getDate() !== day || parsedDate.getHours() !== hour || parsedDate.getMinutes() !== minute || parsedDate.getSeconds() !== second) {
+    return { eligible: false, result: 'invalid_calendar_date', reason: 'Date does not round-trip as a real calendar date.', parsedDate: null };
+  }
+
+  if (day <= 12 && !isReviewTarget) {
+    return { eligible: false, result: 'ambiguous_day_month_without_review_target', reason: 'Day is 12 or less; skipped unless latest handoff date visual review scoped this row as string_date/ambiguous_date.', parsedDate: parsedDate };
+  }
+
+  return {
+    eligible: true,
+    result: 'eligible_us_style_string',
+    reason: day > 12 ? 'Clear US-style string because day is greater than 12.' : 'Eligible because latest handoff date visual review scoped this row as string_date/ambiguous_date.',
+    parsedDate: parsedDate,
+  };
+}
+
+function getHandoffDateStringReviewTargetMap_(ss) {
+  const result = {};
+  const sheet = ss.getSheetByName(HANDOFF_DATE_REVIEW_SHEET_NAME);
+  if (!sheet || sheet.getRange(1, 1).getNote() !== HANDOFF_REPORT_SHEET_NOTE || sheet.getLastRow() < 2) return result;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.row || !headerMap.source_field || !headerMap.reason) return result;
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+  values.forEach(function (row) {
+    const sheetRow = Number(row[headerMap.row - 1]);
+    const sourceField = String(row[headerMap.source_field - 1] || '').trim();
+    const reason = String(row[headerMap.reason - 1] || '').trim();
+    if (!sheetRow || sourceField !== 'LEADS.facebook_created_time') return;
+    if (reason.indexOf('string_date') !== -1 || reason.indexOf('ambiguous_date') !== -1) result[sheetRow] = true;
+  });
+  return result;
+}
+
+function getHandoffDateStringConversionReportRow_(auditAt, row, leadId, customerName, rawValue, rawType, currentDisplayValue, parsedAs, targetDisplayValue, sourceField, action, result, notes) {
+  return [
+    auditAt,
+    row,
+    leadId,
+    customerName,
+    rawValue,
+    rawType,
+    currentDisplayValue,
+    parsedAs,
+    targetDisplayValue,
+    sourceField,
+    action,
+    result,
+    notes,
+  ];
+}
+
+function getHandoffDateStringConversionSummaryRow_(auditAt, action, result, notes) {
+  return getHandoffDateStringConversionReportRow_(
+    auditAt,
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'LEADS.facebook_created_time',
+    action,
+    result,
+    notes
+  );
+}
+
+function formatHandoffDateStringTargetDisplay_(date) {
+  if (!(date instanceof Date) || isNaN(date.getTime())) return '';
+  return Utilities.formatDate(date, Session.getScriptTimeZone() || 'Asia/Bangkok', LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT);
+}
+
+function getHandoffSalesNoteDuplicateCleanupReportHeaders_() {
+  return [
+    'audit_at',
+    'sheet_name',
+    'row',
+    'lead_id',
+    'customer_name',
+    'before_length',
+    'after_length',
+    'duplicate_block_count',
+    'sample_duplicated_block',
+    'confidence',
+    'reason',
+    'action',
+    'result',
+    'notes',
+  ];
+}
+
+function scanHandoffSalesNoteDuplicateCandidates_(ss, sheetName, auditAt, scope) {
+  const sheet = ss.getSheetByName(sheetName);
+  const rows = [];
+  const items = [];
+  let candidateCount = 0;
+
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) {
+    rows.push(getHandoffSalesNoteDuplicateReportRow_(
+      auditAt,
+      sheetName,
+      '',
+      '',
+      '',
+      '',
+      '',
+      0,
+      '',
+      'none',
+      'Sheet missing or empty.',
+      'skipped',
+      'missing_or_empty_sheet',
+      'No Sales Note History cells were inspected for this sheet.'
+    ));
+    return { rows: rows, items: items, candidateCount: candidateCount };
+  }
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id || !headerMap.customer_name || !headerMap.sales_note_history) {
+    rows.push(getHandoffSalesNoteDuplicateReportRow_(
+      auditAt,
+      sheetName,
+      '',
+      '',
+      '',
+      '',
+      '',
+      0,
+      '',
+      'none',
+      'Required headers are missing.',
+      'skipped',
+      'missing_required_headers',
+      'Requires lead_id, customer_name, and sales_note_history headers.'
+    ));
+    return { rows: rows, items: items, candidateCount: candidateCount };
+  }
+
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
+  const displays = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getDisplayValues();
+
+  values.forEach(function (row, index) {
+    const sheetRow = DATA_START_ROW + index;
+    const beforeText = String(row[headerMap.sales_note_history - 1] || '');
+    if (!beforeText.trim()) return;
+
+    const cleanup = buildHandoffSalesNoteExactDuplicateCleanup_(beforeText);
+    if (!cleanup.changed) return;
+
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    const customerName = String(displays[index][headerMap.customer_name - 1] || '');
+    const action = sheetName === 'LEADS' ? 'would_clean' : 'report_only';
+    const result = sheetName === 'LEADS' ? 'eligible_exact_duplicate_blocks' : 'not_apply_scope';
+    const notes = sheetName === 'LEADS'
+      ? 'Dry run only. Apply will re-read and verify this exact cell before rewriting.'
+      : 'Reported separately only. Apply helper does not modify ' + sheetName + '.';
+
+    candidateCount++;
+    rows.push(getHandoffSalesNoteDuplicateReportRow_(
+      auditAt,
+      sheetName,
+      sheetRow,
+      leadId,
+      customerName,
+      beforeText.length,
+      cleanup.cleanedText.length,
+      cleanup.duplicateCount,
+      cleanup.sampleDuplicate,
+      'high_exact_block_match',
+      'Exact duplicate note blocks found within the same Sales Note History cell; first occurrence would be preserved.',
+      action,
+      result,
+      notes
+    ));
+
+    if (scope === 'apply_eligible' && sheetName === 'LEADS') {
+      items.push({
+        sheetName: sheetName,
+        row: sheetRow,
+        leadId: leadId,
+        customerName: customerName,
+        beforeText: beforeText,
+        cleanedText: cleanup.cleanedText,
+        duplicateCount: cleanup.duplicateCount,
+        sampleDuplicate: cleanup.sampleDuplicate,
+      });
+    }
+  });
+
+  return { rows: rows, items: items, candidateCount: candidateCount };
+}
+
+function buildHandoffSalesNoteExactDuplicateCleanup_(text) {
+  const originalText = String(text || '');
+  const blocks = splitHandoffSalesNoteHistoryBlocks_(originalText);
+  const seen = {};
+  const kept = [];
+  let duplicateCount = 0;
+  let sampleDuplicate = '';
+
+  blocks.forEach(function (block) {
+    const key = normalizeHandoffSalesNoteExactBlockKey_(block);
+    if (!key) return;
+    if (seen[key]) {
+      duplicateCount++;
+      if (!sampleDuplicate) sampleDuplicate = block.slice(0, 500);
+      return;
+    }
+    seen[key] = true;
+    kept.push(block);
+  });
+
+  if (!duplicateCount || kept.length === blocks.length) {
+    return {
+      changed: false,
+      cleanedText: originalText,
+      duplicateCount: 0,
+      sampleDuplicate: '',
+    };
+  }
+
+  return {
+    changed: true,
+    cleanedText: kept.join('\n\n'),
+    duplicateCount: duplicateCount,
+    sampleDuplicate: sampleDuplicate,
+  };
+}
+
+function splitHandoffSalesNoteHistoryBlocks_(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split(/\n\s*\n|\n(?=\[[^\]]+\])/)
+    .map(function (block) { return String(block || '').trim(); })
+    .filter(Boolean);
+}
+
+function normalizeHandoffSalesNoteExactBlockKey_(block) {
+  return String(block || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
+}
+
+function getHandoffSalesNoteDuplicateReportRow_(auditAt, sheetName, row, leadId, customerName, beforeLength, afterLength, duplicateBlockCount, sampleDuplicatedBlock, confidence, reason, action, result, notes) {
+  return [
+    auditAt,
+    sheetName,
+    row,
+    leadId,
+    customerName,
+    beforeLength,
+    afterLength,
+    duplicateBlockCount,
+    sampleDuplicatedBlock,
+    confidence,
+    reason,
+    action,
+    result,
+    notes,
+  ];
+}
+
+function getHandoffSalesNoteDuplicateSummaryRow_(auditAt, action, result, notes) {
+  return getHandoffSalesNoteDuplicateReportRow_(
+    auditAt,
+    'SUMMARY',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    action,
+    result,
+    notes
+  );
+}
+
 function resolveHandoffLeadIdsFromLeadsRows_(leadsSheet, rows) {
   const result = {};
   if (!leadsSheet || !rows || !rows.length) return result;
@@ -485,6 +1516,8 @@ function getOrCreateHandoffReportSheet_(sheetName) {
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
     sheet.getRange(1, 1).setNote(HANDOFF_REPORT_SHEET_NOTE);
+  } else if (sheet.getRange(1, 1).getNote() !== HANDOFF_REPORT_SHEET_NOTE) {
+    throw new Error('Refusing to use existing sheet without handoff helper marker note: ' + sheetName);
   }
   return sheet;
 }

@@ -1260,6 +1260,187 @@ function applyLeadsDateNormalizationAndSort() {
   return withLeadsViewScriptLock_('applyLeadsDateNormalizationAndSort', 15000, () => applyLeadsDateNormalizationAndSortUnlocked_());
 }
 
+function testLeadsDateNormalizationAndSortOnCopy() {
+  if (!confirmLeadsDateSortCopyTest_()) {
+    Logger.log('testLeadsDateNormalizationAndSortOnCopy cancelled by user.');
+    return {
+      cancelled: true,
+    };
+  }
+
+  return withLeadsViewScriptLock_('testLeadsDateNormalizationAndSortOnCopy', 15000, () => testLeadsDateNormalizationAndSortOnCopyUnlocked_());
+}
+
+function auditFacebookLeadIncidentEvidence() {
+  return withLeadsViewScriptLock_('auditFacebookLeadIncidentEvidence', 15000, () => auditFacebookLeadIncidentEvidenceUnlocked_());
+}
+
+function auditFacebookLeadIncidentEvidenceUnlocked_() {
+  const ss = SpreadsheetApp.getActive();
+  const leadsSheet = ss.getSheetByName('LEADS');
+  const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
+  const leadDetailsSheet = ss.getSheetByName('LEAD_DETAILS');
+  const reportSheet = getOrCreateIncidentAuditSheet_();
+  const auditAt = new Date();
+
+  reportSheet.clearContents();
+  const headers = [
+    'audit_at',
+    'source_reason',
+    'LEADS row',
+    'Lead ID',
+    'LEADS customer name preview',
+    'LEADS phone',
+    'LEADS Facebook Created Time raw',
+    'LEADS Facebook Created Time display',
+    'LEADS_MAIN customer name preview',
+    'LEADS_MAIN phone',
+    'LEADS_MAIN facebook_created_time raw',
+    'LEAD_DETAILS facebook_leadgen_id',
+    'LEAD_DETAILS form_id',
+    'LEAD_DETAILS facebook_created_time raw',
+    'LEAD_DETAILS original_customer_name preview',
+    'raw_data_json field_data preview if available',
+    'notes',
+  ];
+  reportSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+
+  if (!leadsSheet) {
+    reportSheet.getRange(2, 1, 1, headers.length).setValues([[auditAt, 'missing_sheet', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 'Missing LEADS sheet']]);
+    return { rows_written: 1 };
+  }
+
+  const leadsHeaderMap = getHeaderMap_(leadsSheet);
+  const leadMainByLeadId = getIncidentAuditRowsByLeadId_(leadMainSheet);
+  const leadDetailsByLeadId = getIncidentAuditRowsByLeadId_(leadDetailsSheet);
+  const rows = [];
+  const rowCount = Math.max(leadsSheet.getLastRow() - DATA_START_ROW + 1, 0);
+  if (rowCount > 0 && leadsHeaderMap.lead_id) {
+    const values = leadsSheet.getRange(DATA_START_ROW, 1, rowCount, leadsSheet.getLastColumn()).getValues();
+    const displayValues = leadsSheet.getRange(DATA_START_ROW, 1, rowCount, leadsSheet.getLastColumn()).getDisplayValues();
+    values.forEach((row, index) => {
+      const leadId = String(row[leadsHeaderMap.lead_id - 1] || '').trim();
+      if (!leadId) return;
+      const customerName = leadsHeaderMap.customer_name ? String(row[leadsHeaderMap.customer_name - 1] || '') : '';
+      const dateValue = leadsHeaderMap.facebook_created_time ? row[leadsHeaderMap.facebook_created_time - 1] : '';
+      const dateDisplay = leadsHeaderMap.facebook_created_time ? displayValues[index][leadsHeaderMap.facebook_created_time - 1] : '';
+      const reasons = [];
+      const leadMain = leadMainByLeadId[leadId] || {};
+      const detail = leadDetailsByLeadId[leadId] || {};
+      const sourceLabel = String(leadMain.source || detail.source || '').trim();
+      const originalName = String(detail.original_customer_name || '').trim();
+      const isManualTest = isManualOrTestLeadForIncidentAudit_(customerName, sourceLabel);
+      if (!isManualTest && isSuspiciousLeadsCustomerName_(customerName)) reasons.push('suspicious_customer_name');
+      if (!isManualTest && customerName && !isSuspiciousLeadsCustomerName_(customerName) && isSuspiciousLeadsCustomerName_(originalName)) {
+        reasons.push('operational_name_valid_original_raw_suspicious');
+      }
+      if (String(dateDisplay || '').indexOf('18/06/2026 17:49') !== -1 || String(dateDisplay || '').indexOf('06/18/2026 17:49') !== -1) reasons.push('reported_time_display_match');
+      if (!reasons.length) return;
+      rows.push([
+        auditAt,
+        reasons.join(', '),
+        DATA_START_ROW + index,
+        leadId,
+        customerName.slice(0, 500),
+        leadsHeaderMap.phone ? String(row[leadsHeaderMap.phone - 1] || '') : '',
+        serializeLeadsDateAuditValue_(dateValue),
+        dateDisplay,
+        String(leadMain.customer_name || '').slice(0, 500),
+        leadMain.phone || '',
+        serializeLeadsDateAuditValue_(leadMain.facebook_created_time),
+        detail.facebook_leadgen_id || '',
+        detail.form_id || '',
+        serializeLeadsDateAuditValue_(detail.facebook_created_time),
+        String(detail.original_customer_name || '').slice(0, 500),
+        extractFieldDataPreviewFromRawJson_(detail.raw_data_json),
+        'Use leadgen_id with backend /debug/lead/:leadgenId for full Facebook raw field_data if raw_data_json is not present.',
+      ]);
+    });
+  }
+
+  if (rows.length) {
+    reportSheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  }
+  reportSheet.setFrozenRows(1);
+  return { rows_written: rows.length };
+}
+
+function confirmLeadsDateSortCopyTest_() {
+  try {
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.alert(
+      'Test Date Sort on LEADS Copy',
+      'This creates a test-only copy of LEADS, applies the latest LEADS_DATE_AUDIT plan to that copy, sorts the copy oldest to newest with blank-date rows last, and writes a test report. Production LEADS is not changed. Continue?',
+      ui.ButtonSet.OK_CANCEL
+    );
+    return response === ui.Button.OK;
+  } catch (err) {
+    Logger.log('Test Date Sort confirmation failed: ' + err.message);
+    throw new Error('Test Date Sort on LEADS Copy requires interactive confirmation.');
+  }
+}
+
+function testLeadsDateNormalizationAndSortOnCopyUnlocked_() {
+  const ss = SpreadsheetApp.getActive();
+  const startedAt = new Date();
+  const result = {
+    timestamp: startedAt,
+    testSheetName: '',
+    rowsChecked: 0,
+    rowsSorted: 0,
+    validationStatus: 'FAILED',
+    errors: [],
+  };
+
+  try {
+    const leadsSheet = ss.getSheetByName('LEADS');
+    const auditSheet = ss.getSheetByName(LEADS_DATE_AUDIT_SHEET_NAME);
+    if (!leadsSheet) throw new Error('Missing required sheet: LEADS');
+    if (!auditSheet) throw new Error('Missing required sheet: ' + LEADS_DATE_AUDIT_SHEET_NAME);
+
+    const testSheetName = 'LEADS_DATE_SORT_TEST_' + Utilities.formatDate(startedAt, Session.getScriptTimeZone() || 'Asia/Bangkok', 'yyyyMMdd_HHmmss');
+    const testSheet = leadsSheet.copyTo(ss).setName(testSheetName);
+    result.testSheetName = testSheetName;
+
+    const headerMap = getHeaderMap_(testSheet);
+    if (!headerMap.lead_id) throw new Error('Missing copied LEADS.Lead ID header.');
+    if (!headerMap.facebook_created_time) throw new Error('Missing copied LEADS.Facebook Created Time header.');
+
+    const plan = readLeadsDateApplyPlan_(auditSheet);
+    result.rowsChecked = plan.rowsChecked;
+    const lastLeadRow = getLastPopulatedLeadIdRow_(testSheet, headerMap.lead_id);
+    const leadCountBefore = countPopulatedLeadIds_(testSheet, headerMap.lead_id, lastLeadRow);
+    if (leadCountBefore !== plan.rowsChecked) {
+      throw new Error('Date Audit is stale for copied test sheet. audit=' + plan.rowsChecked + ' current=' + leadCountBefore);
+    }
+    validateLeadsDateApplyFingerprint_(testSheet, headerMap, lastLeadRow, plan);
+    validateLeadsDateApplyRowsBeforeWrite_(testSheet, headerMap, plan.actions);
+
+    const beforeSnapshot = getLeadsDateApplySnapshot_(testSheet, headerMap, lastLeadRow);
+    applyLeadsDateAuditPlan_(testSheet, headerMap, plan.actions);
+    validateLeadsDateApplyBeforeSort_(testSheet, headerMap, plan.actions, leadCountBefore);
+
+    const finalColumn = Math.max(testSheet.getLastColumn(), LEADS_VIEW_HEADERS.length);
+    const sortRowCount = lastLeadRow - DATA_START_ROW + 1;
+    result.sortDiagnostics = sortLeadsByFacebookCreatedTimeOldestFirst_(testSheet, headerMap, sortRowCount, finalColumn, {
+      sourceSheetName: leadsSheet.getName(),
+      removeBasicFilterBeforeSort: true,
+    });
+    result.rowsSorted = sortRowCount;
+
+    validateLeadsDateApplyAfterSort_(testSheet, headerMap, beforeSnapshot, leadCountBefore, plan.actions);
+    result.validationStatus = 'OK';
+    SpreadsheetApp.getActive().toast('Date sort copy test passed: ' + testSheetName, 'Test Date Sort', 8);
+    return result;
+  } catch (err) {
+    result.validationStatus = 'FAILED';
+    result.errors.push(err && err.message ? err.message : String(err));
+    throw err;
+  } finally {
+    writeLeadsDateSortTestReport_(result);
+  }
+}
+
 function confirmLeadsDateNormalizationAndSort_() {
   try {
     const ui = SpreadsheetApp.getUi();
@@ -1287,6 +1468,7 @@ function applyLeadsDateNormalizationAndSortUnlocked_() {
     blanksPreserved: 0,
     rowsSorted: 0,
     validationStatus: 'FAILED',
+    rollbackStatus: '',
     errors: [],
     activeUser: typeof getSafeSessionEmail_ === 'function' ? getSafeSessionEmail_(true) : '',
     effectiveUser: typeof getSafeSessionEmail_ === 'function' ? getSafeSessionEmail_(false) : '',
@@ -1329,7 +1511,7 @@ function applyLeadsDateNormalizationAndSortUnlocked_() {
     sortLeadsByFacebookCreatedTimeOldestFirst_(leadsSheet, headerMap, sortRowCount, finalColumn);
     result.rowsSorted = sortRowCount;
 
-    validateLeadsDateApplyAfterSort_(leadsSheet, headerMap, beforeSnapshot, leadCountBefore);
+    validateLeadsDateApplyAfterSort_(leadsSheet, headerMap, beforeSnapshot, leadCountBefore, plan.actions);
     result.validationStatus = 'OK';
     SpreadsheetApp.getActive().toast('LEADS dates normalized and sorted oldest-first. Backup: ' + result.backupSheetName, 'Apply Safe Date Format & Sort', 8);
     Logger.log('applyLeadsDateNormalizationAndSort completed ' + JSON.stringify(result));
@@ -1337,6 +1519,17 @@ function applyLeadsDateNormalizationAndSortUnlocked_() {
   } catch (err) {
     result.validationStatus = 'FAILED';
     result.errors.push(err && err.message ? err.message : String(err));
+    if (result.backupSheetName) {
+      try {
+        const rollback = rollbackLeadsDateApplyFromBackup_(ss, result.backupSheetName);
+        result.rollbackStatus = 'ROLLBACK_OK';
+        result.rollbackSheetName = rollback.restoredSheetName;
+        result.failedSheetName = rollback.failedSheetName;
+      } catch (rollbackErr) {
+        result.rollbackStatus = 'ROLLBACK_FAILED';
+        result.errors.push('Rollback failed: ' + (rollbackErr && rollbackErr.message ? rollbackErr.message : rollbackErr));
+      }
+    }
     Logger.log('applyLeadsDateNormalizationAndSort failed: ' + result.errors.join('; '));
     throw err;
   } finally {
@@ -1394,23 +1587,40 @@ function readLeadsDateApplyPlan_(auditSheet) {
     const safeToApply = headerMap.safe_to_apply !== undefined
       ? String(row[headerMap.safe_to_apply] || '').trim().toLowerCase() === 'yes'
       : ['safe_to_normalize', 'already_valid'].indexOf(proposedAction) !== -1;
+    const canonicalEpochValue = headerMap.canonical_epoch_milliseconds !== undefined
+      ? row[headerMap.canonical_epoch_milliseconds]
+      : '';
     const proposedDateValue = headerMap.proposed_safe_datetime !== undefined
       ? row[headerMap.proposed_safe_datetime]
       : headerMap.proposed_normalized_datetime !== undefined
         ? row[headerMap.proposed_normalized_datetime]
         : '';
     const classification = normalizeLeadsDateApplyClassification_(classificationValue);
-    const proposedDate = parseLeadsDateAuditCellValue_(proposedDateValue, proposedDateValue).parsedDate;
+    const canonicalEpoch = Number(canonicalEpochValue);
+    const proposedDate = Number.isFinite(canonicalEpoch) && canonicalEpoch > 0
+      ? new Date(canonicalEpoch)
+      : parseLeadsDateAuditCellValue_(proposedDateValue, proposedDateValue).parsedDate;
     let action = '';
     classificationCounts[classification] = (classificationCounts[classification] || 0) + 1;
 
-    if (classification === 'date_object_safe' || classification === 'already_valid') {
+    if (classification === 'date_object_safe'
+      || classification === 'already_valid'
+      || classification === 'facebook_date_safe'
+      || classification === 'manual_created_date_safe') {
       action = 'format_only';
       dateObjectsFormatted++;
-    } else if ((classification === 'text_us_unambiguous' || classification === 'mm_dd_yyyy') && safeToApply && proposedDate) {
+    } else if ((classification === 'text_us_unambiguous'
+      || classification === 'mm_dd_yyyy'
+      || classification === 'same_instant_timezone_normalized'
+      || classification === 'safe_recover_from_leads_main'
+      || classification === 'safe_recover_from_lead_details'
+      || classification === 'safe_recover_from_manual_created_at') && safeToApply && proposedDate) {
       action = 'convert_text';
       textDatesConverted++;
-    } else if (classification === 'blank' || classification === 'canonical_source_missing' || classification === 'no_canonical_date') {
+    } else if (classification === 'blank'
+      || classification === 'blank_manual_test'
+      || classification === 'canonical_source_missing'
+      || classification === 'no_canonical_date') {
       action = 'preserve_blank';
       blanksPreserved++;
     } else {
@@ -1503,6 +1713,14 @@ function normalizeLeadsDateApplyClassification_(value) {
   if (raw === 'safe_to_normalize') return 'text_us_unambiguous';
   if (raw === 'mm/dd/yyyy' || raw === 'mm_dd_yyyy') return 'mm_dd_yyyy';
   if (raw === 'no_canonical_date') return 'no_canonical_date';
+  if (raw === 'same_instant_timezone_normalized') return 'same_instant_timezone_normalized';
+  if (raw === 'facebook_date_safe') return 'facebook_date_safe';
+  if (raw === 'manual_created_date_safe') return 'manual_created_date_safe';
+  if (raw === 'blank_manual_test') return 'blank_manual_test';
+  if (raw === 'unsupported_source') return 'unsupported_source';
+  if (raw === 'safe_recover_from_leads_main') return 'safe_recover_from_leads_main';
+  if (raw === 'safe_recover_from_lead_details') return 'safe_recover_from_lead_details';
+  if (raw === 'safe_recover_from_manual_created_at') return 'safe_recover_from_manual_created_at';
   return raw;
 }
 
@@ -1614,70 +1832,185 @@ function createLeadsDateBackupSheet_(ss, sourceSheet, timestamp) {
   return backupSheet;
 }
 
-function sortLeadsByFacebookCreatedTimeOldestFirst_(sheet, headerMap, sortRowCount, finalColumn) {
+function sortLeadsByFacebookCreatedTimeOldestFirst_(sheet, headerMap, sortRowCount, finalColumn, options) {
+  const sortOptions = options || {};
   const helperColumn = finalColumn + 1;
+  const epochHelperColumn = finalColumn + 2;
   let helperInserted = false;
+  const diagnostics = {
+    testSheetName: sheet ? sheet.getName() : '',
+    sourceSheetName: sortOptions.sourceSheetName || '',
+    dataStartRow: DATA_START_ROW,
+    lastPopulatedLeadIdRow: sortRowCount > 0 ? DATA_START_ROW + sortRowCount - 1 : DATA_START_ROW - 1,
+    rowCount: sortRowCount,
+    originalLastColumn: finalColumn,
+    helperColumn: helperColumn,
+    epochHelperColumn: epochHelperColumn,
+    sortRangeA1: '',
+    helperValueCount0: 0,
+    helperValueCount1: 0,
+    originalBlankDateRowPositions: [],
+    sortSpecifications: [
+      { column: helperColumn, ascending: true, purpose: 'blank-date rows last' },
+      { column: epochHelperColumn, ascending: true, purpose: 'Facebook Created Time epoch oldest to newest' },
+    ],
+    basicFilterRemovedBeforeSort: false,
+    helperRowsAfterSort: [],
+    first10RowsAfterSort: [],
+    rowsAroundBlankBoundaryAfterSort: [],
+    last10RowsAfterSort: [],
+  };
+
   try {
-    sheet.insertColumnAfter(finalColumn);
+    const existingFilter = sheet.getFilter();
+    if (existingFilter && sortOptions.removeBasicFilterBeforeSort) {
+      existingFilter.remove();
+      diagnostics.basicFilterRemovedBeforeSort = true;
+      SpreadsheetApp.flush();
+    }
+
+    sheet.insertColumnsAfter(finalColumn, 2);
     helperInserted = true;
 
     const dateValues = sheet.getRange(DATA_START_ROW, headerMap.facebook_created_time, sortRowCount, 1).getValues();
-    const helperValues = dateValues.map(row => {
+    const helperValues = dateValues.map((row, index) => {
       const value = row[0];
-      return [value instanceof Date && !isNaN(value.getTime()) ? 0 : 1];
+      const isDate = value instanceof Date && !isNaN(value.getTime());
+      const blankFlag = isDate ? 0 : 1;
+      const epochValue = isDate ? value.getTime() : 0;
+      if (blankFlag === 0) diagnostics.helperValueCount0++;
+      if (blankFlag === 1) {
+        diagnostics.helperValueCount1++;
+        diagnostics.originalBlankDateRowPositions.push(DATA_START_ROW + index);
+      }
+      return [blankFlag, epochValue];
     });
-    sheet.getRange(DATA_START_ROW, helperColumn, sortRowCount, 1).setValues(helperValues);
-    sheet.getRange(DATA_START_ROW, 1, sortRowCount, helperColumn).sort([
+    sheet.getRange(DATA_START_ROW, helperColumn, sortRowCount, 2).setValues(helperValues);
+    SpreadsheetApp.flush();
+    const sortRange = sheet.getRange(DATA_START_ROW, 1, sortRowCount, epochHelperColumn);
+    diagnostics.sortRangeA1 = sortRange.getA1Notation();
+    sortRange.sort([
       {
         column: helperColumn,
         ascending: true,
       },
       {
-        column: headerMap.facebook_created_time,
+        column: epochHelperColumn,
         ascending: true,
       },
     ]);
+    SpreadsheetApp.flush();
+    Object.assign(diagnostics, collectLeadsDateSortPostDiagnostics_(sheet, headerMap, sortRowCount, helperColumn, epochHelperColumn));
+    return diagnostics;
   } finally {
     if (helperInserted) {
       try {
-        sheet.deleteColumn(helperColumn);
+        sheet.deleteColumns(helperColumn, 2);
+        SpreadsheetApp.flush();
       } catch (err) {
-        Logger.log('Failed to remove temporary LEADS date sort helper column ' + helperColumn + ': ' + (err && err.message ? err.message : err));
+        Logger.log('Failed to remove temporary LEADS date sort helper columns starting at ' + helperColumn + ': ' + (err && err.message ? err.message : err));
         throw err;
       }
     }
   }
 }
 
+function collectLeadsDateSortPostDiagnostics_(sheet, headerMap, sortRowCount, helperColumn, epochHelperColumn) {
+  const rowCount = Math.max(sortRowCount, 0);
+  if (!sheet || rowCount <= 0) {
+    return {
+      helperRowsAfterSort: [],
+      first10RowsAfterSort: [],
+      rowsAroundBlankBoundaryAfterSort: [],
+      last10RowsAfterSort: [],
+    };
+  }
+
+  const finalColumn = Math.max(epochHelperColumn, headerMap.facebook_created_time, headerMap.lead_id);
+  const values = sheet.getRange(DATA_START_ROW, 1, rowCount, finalColumn).getValues();
+  const displays = sheet.getRange(DATA_START_ROW, 1, rowCount, finalColumn).getDisplayValues();
+  const helperRows = [];
+  let firstBlankIndex = -1;
+  const summaries = values.map((row, index) => {
+    const helperValue = row[helperColumn - 1];
+    const epochValue = row[epochHelperColumn - 1];
+    const summary = {
+      row: DATA_START_ROW + index,
+      helper: helperValue,
+      epochHelper: epochValue,
+      leadId: String(row[headerMap.lead_id - 1] || ''),
+      rawDate: serializeLeadsDateAuditValue_(row[headerMap.facebook_created_time - 1]),
+      displayedDate: displays[index][headerMap.facebook_created_time - 1],
+    };
+    if (helperValue === 1 || String(helperValue) === '1') {
+      if (firstBlankIndex < 0) firstBlankIndex = index;
+      helperRows.push(summary);
+    }
+    return summary;
+  });
+
+  const boundaryStart = firstBlankIndex < 0 ? Math.max(0, summaries.length - 10) : Math.max(0, firstBlankIndex - 5);
+  const boundaryEnd = firstBlankIndex < 0 ? summaries.length : Math.min(summaries.length, firstBlankIndex + 7);
+  return {
+    testSheetNameUsedByValidator: sheet.getName(),
+    helperRowsAfterSort: helperRows,
+    first10RowsAfterSort: summaries.slice(0, 10),
+    rowsAroundBlankBoundaryAfterSort: summaries.slice(boundaryStart, boundaryEnd),
+    last10RowsAfterSort: summaries.slice(Math.max(0, summaries.length - 10)),
+  };
+}
+
+function rollbackLeadsDateApplyFromBackup_(ss, backupSheetName) {
+  const backupSheet = ss.getSheetByName(backupSheetName);
+  if (!backupSheet) throw new Error('Missing LEADS date backup sheet: ' + backupSheetName);
+
+  const currentLeads = ss.getSheetByName('LEADS');
+  const timestamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Bangkok', 'yyyyMMdd_HHmmss');
+  const failedSheetName = 'LEADS_FAILED_DATE_APPLY_' + timestamp;
+  if (currentLeads) {
+    currentLeads.setName(failedSheetName);
+    currentLeads.hideSheet();
+  }
+
+  const restoredSheet = backupSheet.copyTo(ss).setName('LEADS');
+  restoredSheet.showSheet();
+  ss.setActiveSheet(restoredSheet);
+  SpreadsheetApp.flush();
+  return {
+    restoredSheetName: restoredSheet.getName(),
+    failedSheetName: currentLeads ? failedSheetName : '',
+  };
+}
+
 function applyLeadsDateAuditPlan_(sheet, headerMap, actions) {
   const dateColumn = headerMap.facebook_created_time;
   actions.forEach(action => {
     const cell = sheet.getRange(action.leadsRow, dateColumn);
-    if (action.action === 'format_only') {
+    if (action.action === 'format_only' || action.action === 'convert_text') {
+      if (action.proposedDate instanceof Date && !isNaN(action.proposedDate.getTime())) {
+        cell.setValue(action.proposedDate);
+      }
       cell.setNumberFormat(LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT);
       return;
-    }
-    if (action.action === 'convert_text') {
-      cell.setValue(action.proposedDate);
-      cell.setNumberFormat(LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT);
     }
   });
 }
 
 function validateLeadsDateApplyBeforeSort_(sheet, headerMap, actions, expectedLeadCount) {
+  const sheetName = sheet ? sheet.getName() : 'unknown sheet';
   const leadCount = countPopulatedLeadIds_(sheet, headerMap.lead_id, getLastPopulatedLeadIdRow_(sheet, headerMap.lead_id));
-  if (leadCount !== expectedLeadCount) throw new Error('Lead ID count changed before sort. expected=' + expectedLeadCount + ' actual=' + leadCount);
+  if (leadCount !== expectedLeadCount) throw new Error(sheetName + ': Lead ID count changed before sort. expected=' + expectedLeadCount + ' actual=' + leadCount);
 
   const errors = [];
   actions.forEach(action => {
     const value = sheet.getRange(action.leadsRow, headerMap.facebook_created_time).getValue();
     if (action.action === 'format_only' || action.action === 'convert_text') {
       if (!(value instanceof Date) || isNaN(value.getTime())) {
-        errors.push('LEADS row ' + action.leadsRow + ' date is not a valid Date object after apply.');
+        errors.push(sheetName + ' row ' + action.leadsRow + ' date is not a valid Date object after apply.');
       }
     } else if (action.action === 'preserve_blank') {
       if (value !== '' && value !== null) {
-        errors.push('LEADS row ' + action.leadsRow + ' expected blank/no-canonical date to remain blank.');
+        errors.push(sheetName + ' row ' + action.leadsRow + ' expected blank/no-canonical date to remain blank.');
       }
     }
   });
@@ -1722,10 +2055,24 @@ function getLeadsDateApplySnapshot_(sheet, headerMap, lastLeadRow) {
   return snapshot;
 }
 
-function validateLeadsDateApplyAfterSort_(sheet, headerMap, beforeSnapshot, expectedLeadCount) {
+function validateLeadsDateApplyAfterSort_(sheet, headerMap, beforeSnapshot, expectedLeadCount, actions) {
+  const sheetName = sheet ? sheet.getName() : 'unknown sheet';
   const lastLeadRow = getLastPopulatedLeadIdRow_(sheet, headerMap.lead_id);
   const leadCount = countPopulatedLeadIds_(sheet, headerMap.lead_id, lastLeadRow);
-  if (leadCount !== expectedLeadCount) throw new Error('Lead ID count changed after sort. expected=' + expectedLeadCount + ' actual=' + leadCount);
+  if (leadCount !== expectedLeadCount) throw new Error(sheetName + ': Lead ID count changed after sort. expected=' + expectedLeadCount + ' actual=' + leadCount);
+
+  const expectedEpochByLeadId = {};
+  const expectedBlankByLeadId = {};
+  (actions || []).forEach(action => {
+    if (!action || !action.leadId) return;
+    if ((action.action === 'format_only' || action.action === 'convert_text')
+      && action.proposedDate instanceof Date
+      && !isNaN(action.proposedDate.getTime())) {
+      expectedEpochByLeadId[action.leadId] = action.proposedDate.getTime();
+      return;
+    }
+    if (action.action === 'preserve_blank') expectedBlankByLeadId[action.leadId] = true;
+  });
 
   const afterSnapshot = getLeadsDateApplySnapshot_(sheet, headerMap, lastLeadRow);
   const errors = [];
@@ -1735,21 +2082,21 @@ function validateLeadsDateApplyAfterSort_(sheet, headerMap, beforeSnapshot, expe
     const leadId = String(row[0] || '').trim();
     if (!leadId) return;
     if (leadIdKeys[leadId]) {
-      errors.push('Duplicate Lead ID after sort: ' + leadId + ' at LEADS row ' + (DATA_START_ROW + index));
+      errors.push('Duplicate Lead ID after sort: ' + leadId + ' at ' + sheetName + ' row ' + (DATA_START_ROW + index));
     }
     leadIdKeys[leadId] = true;
   });
   const seen = {};
   Object.keys(beforeSnapshot).forEach(leadId => {
     if (!afterSnapshot[leadId]) {
-      errors.push('Lead ID missing after sort: ' + leadId);
+      errors.push(sheetName + ': Lead ID missing after sort: ' + leadId);
       return;
     }
-    if (seen[leadId]) errors.push('Duplicate Lead ID after sort: ' + leadId);
+    if (seen[leadId]) errors.push(sheetName + ': Duplicate Lead ID after sort: ' + leadId);
     seen[leadId] = true;
     ['customerName', 'phone', 'noteHistory', 'latestAudioLink', 'audioMemoValues'].forEach(field => {
       if (beforeSnapshot[leadId][field] !== afterSnapshot[leadId][field]) {
-        errors.push('Row-associated field changed for lead_id=' + leadId + ' field=' + field);
+        errors.push(sheetName + ': Row-associated field changed for lead_id=' + leadId + ' field=' + field);
       }
     });
   });
@@ -1762,21 +2109,31 @@ function validateLeadsDateApplyAfterSort_(sheet, headerMap, beforeSnapshot, expe
   dateValues.forEach((row, index) => {
     const value = row[0];
     const sheetRow = DATA_START_ROW + index;
+    const leadId = String(leadIdValues[index][0] || '').trim();
     if (value === '' || value === null) {
+      if (leadId && expectedEpochByLeadId[leadId] !== undefined) {
+        errors.push('Expected canonical date is blank after sort at ' + sheetName + ' row ' + sheetRow + ' lead_id=' + leadId);
+      }
       blankStarted = true;
       return;
     }
+    if (leadId && expectedBlankByLeadId[leadId]) {
+      errors.push('Expected blank/no-canonical date became nonblank after sort at ' + sheetName + ' row ' + sheetRow + ' lead_id=' + leadId);
+    }
     if (!(value instanceof Date) || isNaN(value.getTime())) {
-      errors.push('Non-blank date is not a Date object after sort at LEADS row ' + sheetRow);
+      errors.push('Non-blank date is not a Date object after sort at ' + sheetName + ' row ' + sheetRow);
       return;
     }
     if (String(dateFormats[index][0] || '') !== LEADS_DATE_AUDIT_TARGET_DATETIME_FORMAT) {
-      errors.push('Non-blank date does not use dd/MM/yyyy HH:mm format at LEADS row ' + sheetRow);
+      errors.push('Non-blank date does not use dd/MM/yyyy HH:mm format at ' + sheetName + ' row ' + sheetRow);
     }
-    if (blankStarted) errors.push('Dated row appears after blank-date row at LEADS row ' + sheetRow);
+    if (blankStarted) errors.push('Dated row appears after blank-date row at ' + sheetName + ' row ' + sheetRow);
     const time = value.getTime();
     if (previousTime !== null && time < previousTime) {
-      errors.push('Dates are not sorted oldest-first near LEADS row ' + sheetRow);
+      errors.push('Dates are not sorted oldest-first near ' + sheetName + ' row ' + sheetRow);
+    }
+    if (leadId && expectedEpochByLeadId[leadId] !== undefined && Math.abs(time - expectedEpochByLeadId[leadId]) > 1000) {
+      errors.push('Date epoch does not match canonical source at ' + sheetName + ' row ' + sheetRow + ' lead_id=' + leadId + ' expected=' + expectedEpochByLeadId[leadId] + ' actual=' + time);
     }
     previousTime = time;
   });
@@ -1803,6 +2160,8 @@ function writeLeadsDateApplyLog_(result) {
       'blanks preserved',
       'rows sorted',
       'validation status',
+      'rollback status',
+      'failed sheet name',
       'errors',
       'active user',
       'effective user',
@@ -1819,12 +2178,110 @@ function writeLeadsDateApplyLog_(result) {
       result.blanksPreserved || 0,
       result.rowsSorted || 0,
       result.validationStatus || '',
+      result.rollbackStatus || '',
+      result.failedSheetName || '',
       (result.errors || []).join('; '),
       result.activeUser || '',
       result.effectiveUser || '',
     ]);
   } catch (err) {
     Logger.log('Unable to write LEADS date apply log: ' + (err && err.message ? err.message : err));
+  }
+}
+
+function writeLeadsDateSortTestReport_(result) {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    let sheet = ss.getSheetByName('LEADS_DATE_SORT_TEST_REPORT');
+    if (!sheet) sheet = ss.insertSheet('LEADS_DATE_SORT_TEST_REPORT');
+    const headers = [
+      'timestamp',
+      'test sheet name',
+      'rows checked',
+      'rows sorted',
+      'validation status',
+      'errors',
+      'sort diagnostics json',
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.appendRow([
+      result.timestamp || new Date(),
+      result.testSheetName || '',
+      result.rowsChecked || 0,
+      result.rowsSorted || 0,
+      result.validationStatus || '',
+      (result.errors || []).join('; '),
+      JSON.stringify(result.sortDiagnostics || {}),
+    ]);
+  } catch (err) {
+    Logger.log('Unable to write LEADS date sort test report: ' + (err && err.message ? err.message : err));
+  }
+}
+
+function getOrCreateIncidentAuditSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  let sheet = ss.getSheetByName('FACEBOOK_LEAD_INCIDENT_AUDIT');
+  if (!sheet) sheet = ss.insertSheet('FACEBOOK_LEAD_INCIDENT_AUDIT');
+  return sheet;
+}
+
+function getIncidentAuditRowsByLeadId_(sheet) {
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id) return data;
+
+  const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
+  const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
+  values.forEach(row => {
+    const leadId = String(row[headerMap.lead_id - 1] || '').trim();
+    if (!leadId || data[leadId]) return;
+
+    data[leadId] = {
+      customer_name: headerMap.customer_name ? row[headerMap.customer_name - 1] : '',
+      phone: headerMap.phone ? row[headerMap.phone - 1] : '',
+      facebook_created_time: headerMap.facebook_created_time ? row[headerMap.facebook_created_time - 1] : '',
+      facebook_leadgen_id: headerMap.facebook_leadgen_id ? row[headerMap.facebook_leadgen_id - 1] : '',
+      form_id: headerMap.form_id ? row[headerMap.form_id - 1] : '',
+      original_customer_name: headerMap.original_customer_name ? row[headerMap.original_customer_name - 1] : '',
+      raw_data_json: headerMap.raw_data_json ? row[headerMap.raw_data_json - 1] : '',
+      source: headerMap.source ? row[headerMap.source - 1] : '',
+    };
+  });
+  return data;
+}
+
+function isSuspiciousLeadsCustomerName_(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  if (raw.length > 120) return true;
+  if (/\r|\n/.test(raw)) return true;
+  if (/https?:\/\//i.test(raw)) return true;
+  if (/[^\s@]+@[^\s@]+\.[^\s@]+/.test(raw)) return true;
+  if (/[.!?]/.test(raw) && raw.length > 60) return true;
+  return false;
+}
+
+function isManualOrTestLeadForIncidentAudit_(customerName, sourceLabel) {
+  const source = String(sourceLabel || '').toLowerCase();
+  const name = String(customerName || '').toLowerCase();
+  return source.indexOf('manual') !== -1 || name.indexOf('test manual lead') !== -1;
+}
+
+function extractFieldDataPreviewFromRawJson_(rawJson) {
+  const raw = String(rawJson || '').trim();
+  if (!raw) return '';
+
+  try {
+    const parsed = JSON.parse(raw);
+    const fieldData = Array.isArray(parsed.field_data) ? parsed.field_data : [];
+    return fieldData.map(item => {
+      const values = Array.isArray(item.values) ? item.values.join(' | ') : '';
+      return String(item.name || '') + ': ' + values;
+    }).join('\n').slice(0, 1000);
+  } catch (err) {
+    return 'raw_data_json parse failed: ' + (err && err.message ? err.message : err);
   }
 }
 
@@ -1921,8 +2378,11 @@ function runLeadsDateAuditReportUnlocked_() {
     const currentValue = row[leadsHeaderMap.facebook_created_time - 1];
     const currentDisplay = displayRow[leadsHeaderMap.facebook_created_time - 1];
       const currentFormat = formatRow[leadsHeaderMap.facebook_created_time - 1] || '';
-      const currentAudit = parseLeadsDateAuditCellValue_(currentValue, currentDisplay);
-      const canonical = resolveLeadsDateAuditCanonicalValue_(leadMainByLeadId[leadId], leadDetailsByLeadId[leadId]);
+      const currentAudit = parseLeadsDateAuditCellValue_(currentValue, currentDisplay, {
+        source: 'LEADS.facebook_created_time',
+      });
+      const leadDetails = leadDetailsByLeadId[leadId] || {};
+      const canonical = resolveLeadsDateAuditCanonicalValue_(leadMainByLeadId[leadId], leadDetails);
       const classification = classifyLeadsDateAuditRecord_(currentAudit, canonical, currentDisplay, currentFormat);
       incrementLeadsDateAuditCounts_(counts, currentAudit, classification);
 
@@ -1937,14 +2397,27 @@ function runLeadsDateAuditReportUnlocked_() {
         buildLeadsDateDisplaySignature_(currentDisplay, currentFormat),
         getLeadsDateAuditValueType_(currentValue),
         currentFormat,
+        canonical.leadSource || '',
         canonical.source,
+        canonical.rawType || '',
         serializeLeadsDateAuditValue_(canonical.rawValue),
+        canonical.parserBranch || '',
         canonical.parsedDate ? formatLeadsDateAuditDate_(canonical.parsedDate) : '',
         classification.classification,
         canonical.parsedDate ? formatLeadsDateAuditDate_(canonical.parsedDate) : '',
         canonical.parsedDate ? formatLeadsDateAuditDisplayValue_(canonical.parsedDate) : '',
         classification.safeToApply ? 'yes' : 'no',
         classification.reason,
+        canonical.timezoneAssumption || '',
+        canonical.epochMs === null || canonical.epochMs === undefined ? '' : canonical.epochMs,
+        currentAudit.epochMs === null || currentAudit.epochMs === undefined ? '' : currentAudit.epochMs,
+        classification.diffSeconds === null || classification.diffSeconds === undefined ? '' : classification.diffSeconds,
+        canonical.parsedDate ? formatLeadsDateAuditDisplayValue_(canonical.parsedDate) : '',
+        currentAudit.failureReason || '',
+        leadDetails.facebook_leadgen_id || '',
+        leadDetails.form_id || '',
+        leadDetails.facebook_created_time ? serializeLeadsDateAuditValue_(leadDetails.facebook_created_time) : '',
+        leadDetails.created_at ? serializeLeadsDateAuditValue_(leadDetails.created_at) : '',
     ]);
   });
   }
@@ -2074,6 +2547,7 @@ function getLeadsDateAuditLeadMainByLeadId_(sheet) {
       facebook_created_time_display: headerMap.facebook_created_time ? displayValues[index][headerMap.facebook_created_time - 1] : '',
       created_at: headerMap.created_at ? row[headerMap.created_at - 1] : '',
       created_at_display: headerMap.created_at ? displayValues[index][headerMap.created_at - 1] : '',
+      source: headerMap.source ? row[headerMap.source - 1] : '',
     };
   });
   return data;
@@ -2084,7 +2558,7 @@ function getLeadsDateAuditLeadDetailsByLeadId_(sheet) {
   if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
 
   const headerMap = getHeaderMap_(sheet);
-  if (!headerMap.lead_id || !headerMap.facebook_created_time) return data;
+  if (!headerMap.lead_id) return data;
 
   const rowCount = sheet.getLastRow() - DATA_START_ROW + 1;
   const values = sheet.getRange(DATA_START_ROW, 1, rowCount, sheet.getLastColumn()).getValues();
@@ -2094,35 +2568,77 @@ function getLeadsDateAuditLeadDetailsByLeadId_(sheet) {
     if (!leadId || data[leadId]) return;
 
     data[leadId] = {
-      facebook_created_time: row[headerMap.facebook_created_time - 1],
-      facebook_created_time_display: displayValues[index][headerMap.facebook_created_time - 1],
+      facebook_created_time: headerMap.facebook_created_time ? row[headerMap.facebook_created_time - 1] : '',
+      facebook_created_time_display: headerMap.facebook_created_time ? displayValues[index][headerMap.facebook_created_time - 1] : '',
+      facebook_leadgen_id: headerMap.facebook_leadgen_id ? row[headerMap.facebook_leadgen_id - 1] : '',
+      form_id: headerMap.form_id ? row[headerMap.form_id - 1] : '',
+      created_at: headerMap.created_at ? row[headerMap.created_at - 1] : '',
+      created_at_display: headerMap.created_at ? displayValues[index][headerMap.created_at - 1] : '',
+      original_customer_name: headerMap.original_customer_name ? row[headerMap.original_customer_name - 1] : '',
+      source: headerMap.source ? row[headerMap.source - 1] : '',
+      created_source: headerMap.created_source ? row[headerMap.created_source - 1] : '',
     };
   });
   return data;
 }
 
 function resolveLeadsDateAuditCanonicalValue_(leadMainData, leadDetailsData) {
+  const leadSource = getLeadsDateAuditLeadSource_(leadMainData, leadDetailsData);
   const candidates = [
-    {
-      source: 'LEADS_MAIN.facebook_created_time',
-      value: leadMainData ? leadMainData.facebook_created_time : '',
-      display: leadMainData ? leadMainData.facebook_created_time_display : '',
-    },
-    {
-      source: 'LEAD_DETAILS.facebook_created_time',
-      value: leadDetailsData ? leadDetailsData.facebook_created_time : '',
-      display: leadDetailsData ? leadDetailsData.facebook_created_time_display : '',
-    },
-    {
-      source: 'LEADS_MAIN.created_at',
-      value: leadMainData ? leadMainData.created_at : '',
-      display: leadMainData ? leadMainData.created_at_display : '',
-    },
-  ];
+    leadSource === 'manual'
+      ? {
+          source: 'LEADS_MAIN.created_at',
+          value: leadMainData ? leadMainData.created_at : '',
+          display: leadMainData ? leadMainData.created_at_display : '',
+          parseOptions: {
+            source: 'LEADS_MAIN.created_at',
+          },
+        }
+      : null,
+    leadSource === 'facebook'
+      ? {
+          source: 'LEAD_DETAILS.facebook_created_time',
+          value: leadDetailsData ? leadDetailsData.facebook_created_time : '',
+          display: leadDetailsData ? leadDetailsData.facebook_created_time_display : '',
+          parseOptions: {
+            source: 'LEAD_DETAILS.facebook_created_time',
+            slashTimezone: 'UTC',
+            slashOrder: 'MDY',
+          },
+        }
+      : null,
+    leadSource === 'facebook'
+      ? {
+          source: 'LEADS_MAIN.facebook_created_time',
+          value: leadMainData ? leadMainData.facebook_created_time : '',
+          display: leadMainData ? leadMainData.facebook_created_time_display : '',
+          parseOptions: {
+            source: 'LEADS_MAIN.facebook_created_time',
+            rejectAmbiguousSlashText: true,
+          },
+        }
+      : null,
+  ].filter(Boolean);
+
+  if (!candidates.length) {
+    return {
+      source: '',
+      rawValue: '',
+      rawDisplay: '',
+      parsedDate: null,
+      parsedKind: 'unsupported_source',
+      rawType: '',
+      parserBranch: '',
+      timezoneAssumption: '',
+      epochMs: null,
+      leadSource: leadSource,
+      failureReason: 'Lead source is not supported for automatic date canonicalization.',
+    };
+  }
 
   for (let index = 0; index < candidates.length; index++) {
     const candidate = candidates[index];
-    const parsed = parseLeadsDateAuditCellValue_(candidate.value, candidate.display);
+    const parsed = parseLeadsDateAuditCellValue_(candidate.value, candidate.display, candidate.parseOptions || {});
     if (parsed.parsedDate) {
       return {
         source: candidate.source,
@@ -2130,6 +2646,12 @@ function resolveLeadsDateAuditCanonicalValue_(leadMainData, leadDetailsData) {
         rawDisplay: candidate.display,
         parsedDate: parsed.parsedDate,
         parsedKind: parsed.kind,
+        rawType: parsed.rawType || '',
+        parserBranch: parsed.parserBranch || '',
+        timezoneAssumption: parsed.timezoneAssumption || '',
+        epochMs: parsed.epochMs,
+        leadSource: leadSource,
+        failureReason: '',
       };
     }
   }
@@ -2140,62 +2662,150 @@ function resolveLeadsDateAuditCanonicalValue_(leadMainData, leadDetailsData) {
     rawDisplay: '',
     parsedDate: null,
     parsedKind: 'canonical_source_missing',
+    rawType: '',
+    parserBranch: '',
+    timezoneAssumption: '',
+    epochMs: null,
+    leadSource: leadSource,
+    failureReason: leadSource === 'manual'
+      ? 'No valid Manual lead creation timestamp found in LEADS_MAIN.created_at.'
+      : 'No valid canonical Facebook Created Time found by Lead ID.',
   };
 }
 
-function parseLeadsDateAuditCellValue_(value, displayValue) {
-  const display = String(displayValue || '').trim();
-  if ((value === '' || value === null || value === undefined) && !display) {
+function getLeadsDateAuditLeadSource_(leadMainData, leadDetailsData) {
+  const leadMainSource = String(leadMainData && leadMainData.source || '').trim().toLowerCase();
+  const detailSource = String(leadDetailsData && (leadDetailsData.created_source || leadDetailsData.source) || '').trim().toLowerCase();
+  if (leadMainSource === 'manual' || detailSource === 'manual') return 'manual';
+  if (leadMainSource && leadMainSource !== 'facebook' && leadMainSource !== 'fb' && leadMainSource !== 'lead_ads') return 'unsupported';
+  return 'facebook';
+}
+
+function parseLeadsDateAuditCellValue_(value, displayValue, options) {
+  const parseOptions = options || {};
+  if (value === '' || value === null || value === undefined) {
     return {
       kind: 'blank',
       parsedDate: null,
+      epochMs: null,
       ambiguous: false,
+      rawType: getLeadsDateAuditValueType_(value),
+      parserBranch: 'empty',
+      timezoneAssumption: '',
+      failureReason: '',
     };
   }
 
   if (value instanceof Date) {
+    const validDate = !isNaN(value.getTime());
     return {
-      kind: isNaN(value.getTime()) ? 'invalid_date' : 'date_object_safe',
-      parsedDate: isNaN(value.getTime()) ? null : value,
+      kind: validDate ? 'date_object_safe' : 'invalid_date',
+      parsedDate: validDate ? value : null,
+      epochMs: validDate ? value.getTime() : null,
       ambiguous: false,
+      rawType: getLeadsDateAuditValueType_(value),
+      parserBranch: 'date_object',
+      timezoneAssumption: 'Date object epoch milliseconds',
+      failureReason: validDate ? '' : 'Invalid JavaScript Date object.',
     };
   }
 
-  const raw = String(value || display || '').trim();
+  if (typeof value === 'number') {
+    const parsedSerial = parseLeadsDateAuditSheetsSerial_(value);
+    return {
+      kind: parsedSerial ? 'date_object_safe' : 'invalid_date',
+      parsedDate: parsedSerial,
+      epochMs: parsedSerial ? parsedSerial.getTime() : null,
+      ambiguous: false,
+      rawType: getLeadsDateAuditValueType_(value),
+      parserBranch: 'sheets_serial_number',
+      timezoneAssumption: parsedSerial ? 'Google Sheets serial interpreted in Asia/Bangkok spreadsheet timezone' : '',
+      failureReason: parsedSerial ? '' : 'Numeric value is not a valid Google Sheets date serial.',
+    };
+  }
+
+  const raw = String(value || '').trim();
   if (!raw) {
     return {
       kind: 'blank',
       parsedDate: null,
+      epochMs: null,
       ambiguous: false,
+      rawType: getLeadsDateAuditValueType_(value),
+      parserBranch: 'empty_string',
+      timezoneAssumption: '',
+      failureReason: '',
     };
   }
 
   const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?/);
   if (isoMatch) {
-    return parseLeadsDateAuditIsoValue_(raw, isoMatch);
+    return parseLeadsDateAuditIsoValue_(raw, isoMatch, parseOptions);
   }
 
-  const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/);
+  const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
   if (slashMatch) {
-    return parseLeadsDateAuditSlashValue_(slashMatch);
+    return parseLeadsDateAuditSlashValue_(slashMatch, parseOptions);
   }
 
   return {
     kind: 'invalid_date',
     parsedDate: null,
+    epochMs: null,
     ambiguous: false,
+    rawType: getLeadsDateAuditValueType_(value),
+    parserBranch: 'unsupported_text',
+    timezoneAssumption: '',
+    failureReason: 'Value is not a Date object, numeric Sheets serial, ISO timestamp, or supported slash date.',
   };
 }
 
-function parseLeadsDateAuditIsoValue_(raw, match) {
+function parseLeadsDateAuditSheetsSerial_(value) {
+  const serial = Number(value);
+  if (!Number.isFinite(serial) || serial <= 0) return null;
+
+  const epoch = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
+  const wallTimeMs = epoch + serial * 86400000;
+  const spreadsheetTimeZone = (SpreadsheetApp.getActive().getSpreadsheetTimeZone && SpreadsheetApp.getActive().getSpreadsheetTimeZone()) || Session.getScriptTimeZone() || 'Asia/Bangkok';
+  const offsetMinutes = getLeadsDateAuditFixedTimezoneOffsetMinutes_(spreadsheetTimeZone);
+  const date = new Date(wallTimeMs - offsetMinutes * 60000);
+  return isNaN(date.getTime()) ? null : date;
+}
+
+function getLeadsDateAuditFixedTimezoneOffsetMinutes_(timeZone) {
+  if (String(timeZone || '') === 'Asia/Bangkok') return 420;
+  Logger.log('LEADS Date Audit numeric serial parser used zero offset for unsupported timezone: ' + timeZone);
+  return 0;
+}
+
+function parseLeadsDateAuditIsoValue_(raw, match, options) {
   const hasTimeZone = Boolean(match[7]);
   const hasTime = Boolean(match[4]);
   if (hasTimeZone) {
     const date = new Date(raw);
+    const validDate = !isNaN(date.getTime());
     return {
-      kind: isNaN(date.getTime()) ? 'invalid_date' : 'text_iso_safe',
-      parsedDate: isNaN(date.getTime()) ? null : date,
+      kind: validDate ? 'text_iso_safe' : 'invalid_date',
+      parsedDate: validDate ? date : null,
+      epochMs: validDate ? date.getTime() : null,
       ambiguous: false,
+      rawType: 'string',
+      parserBranch: 'iso_explicit_timezone',
+      timezoneAssumption: validDate ? 'ISO timestamp with explicit timezone offset' : '',
+      failureReason: validDate ? '' : 'ISO timestamp with timezone could not be parsed.',
+    };
+  }
+
+  if (!(options && options.allowIsoWithoutOffset)) {
+    return {
+      kind: 'invalid_date',
+      parsedDate: null,
+      epochMs: null,
+      ambiguous: false,
+      rawType: 'string',
+      parserBranch: 'iso_without_explicit_timezone_rejected',
+      timezoneAssumption: '',
+      failureReason: 'ISO-like timestamp does not include an explicit Z or UTC offset.',
     };
   }
 
@@ -2204,52 +2814,132 @@ function parseLeadsDateAuditIsoValue_(raw, match) {
   const day = Number(match[3]);
   const hour = hasTime ? Number(match[4]) : 0;
   const minute = hasTime ? Number(match[5]) : 0;
-  const date = new Date(year, month - 1, day, hour, minute);
+  const second = hasTime ? Number(match[6] || 0) : 0;
+  const assumeUtc = options && options.isoTimezone === 'UTC';
+  const date = assumeUtc
+    ? new Date(Date.UTC(year, month - 1, day, hour, minute, second))
+    : new Date(year, month - 1, day, hour, minute, second);
+  const validDate = !isNaN(date.getTime());
   return {
-    kind: isNaN(date.getTime()) ? 'invalid_date' : 'text_iso_safe',
-    parsedDate: isNaN(date.getTime()) ? null : date,
+    kind: validDate ? 'text_iso_safe' : 'invalid_date',
+    parsedDate: validDate ? date : null,
+    epochMs: validDate ? date.getTime() : null,
     ambiguous: false,
+    rawType: 'string',
+    parserBranch: assumeUtc ? 'iso_without_offset_utc' : 'iso_without_offset_local',
+    timezoneAssumption: validDate ? (assumeUtc ? 'ISO-like timestamp without offset interpreted as UTC for confirmed source field' : 'ISO-like timestamp without offset interpreted in Apps Script timezone') : '',
+    failureReason: validDate ? '' : 'ISO-like timestamp without timezone could not be parsed.',
   };
 }
 
-function parseLeadsDateAuditSlashValue_(match) {
+function parseLeadsDateAuditSlashValue_(match, options) {
   const first = Number(match[1]);
-  const second = Number(match[2]);
+  const secondPart = Number(match[2]);
   const year = Number(match[3]);
   const hour = Number(match[4] || 0);
   const minute = Number(match[5] || 0);
+  const timeSecond = Number(match[6] || 0);
+  const slashOrder = options && options.slashOrder;
+  const slashTimezone = options && options.slashTimezone;
 
-  if (first >= 1 && first <= 12 && second >= 1 && second <= 12) {
+  if (slashOrder === 'MDY' && first >= 1 && first <= 12 && secondPart >= 1 && secondPart <= 31) {
+    const date = slashTimezone === 'UTC'
+      ? new Date(Date.UTC(year, first - 1, secondPart, hour, minute, timeSecond))
+      : new Date(year, first - 1, secondPart, hour, minute, timeSecond);
+    const validDate = isStrictLeadsDateAuditPartsMatch_(date, year, first, secondPart, hour, minute, timeSecond, slashTimezone === 'UTC');
+    return {
+      kind: validDate ? 'text_us_unambiguous' : 'invalid_date',
+      parsedDate: validDate ? date : null,
+      epochMs: validDate ? date.getTime() : null,
+      ambiguous: false,
+      rawType: 'string',
+      parserBranch: slashTimezone === 'UTC' ? 'strict_us_slash_utc' : 'strict_us_slash_local',
+      timezoneAssumption: validDate ? 'MM/DD/YYYY interpreted as ' + (slashTimezone === 'UTC' ? 'UTC for LEAD_DETAILS.facebook_created_time' : 'Apps Script timezone') : '',
+      failureReason: validDate ? '' : 'Source-specific MM/DD/YYYY value failed strict component validation.',
+    };
+  }
+
+  if ((options && options.rejectAmbiguousSlashText) || (first >= 1 && first <= 12 && secondPart >= 1 && secondPart <= 12)) {
     return {
       kind: 'ambiguous_slash_date',
       parsedDate: null,
+      epochMs: null,
       ambiguous: true,
+      rawType: 'string',
+      parserBranch: 'ambiguous_slash_rejected',
+      timezoneAssumption: '',
+      failureReason: 'Slash date text is not trusted for this source without a source-specific format.',
     };
   }
-  if (first > 12 && second <= 12) {
+  if (first > 12 && secondPart <= 12) {
+    const date = new Date(year, secondPart - 1, first, hour, minute, timeSecond);
+    const validDate = isStrictLeadsDateAuditPartsMatch_(date, year, secondPart, first, hour, minute, timeSecond, false);
     return {
-      kind: 'text_day_first_unambiguous',
-      parsedDate: new Date(year, second - 1, first, hour, minute),
+      kind: validDate ? 'text_day_first_unambiguous' : 'invalid_date',
+      parsedDate: validDate ? date : null,
+      epochMs: validDate ? date.getTime() : null,
       ambiguous: false,
+      rawType: 'string',
+      parserBranch: 'strict_day_first_slash_local',
+      timezoneAssumption: 'DD/MM/YYYY interpreted in Apps Script timezone',
+      failureReason: validDate ? '' : 'DD/MM/YYYY value failed strict component validation.',
     };
   }
-  if (second > 12 && first <= 12) {
+  if (secondPart > 12 && first <= 12) {
+    const date = new Date(year, first - 1, secondPart, hour, minute, timeSecond);
+    const validDate = isStrictLeadsDateAuditPartsMatch_(date, year, first, secondPart, hour, minute, timeSecond, false);
     return {
-      kind: 'text_us_unambiguous',
-      parsedDate: new Date(year, first - 1, second, hour, minute),
+      kind: validDate ? 'text_us_unambiguous' : 'invalid_date',
+      parsedDate: validDate ? date : null,
+      epochMs: validDate ? date.getTime() : null,
       ambiguous: false,
+      rawType: 'string',
+      parserBranch: 'strict_us_slash_local',
+      timezoneAssumption: 'MM/DD/YYYY interpreted in Apps Script timezone',
+      failureReason: validDate ? '' : 'MM/DD/YYYY value failed strict component validation.',
     };
   }
 
   return {
     kind: 'invalid_date',
     parsedDate: null,
+    epochMs: null,
     ambiguous: false,
+    rawType: 'string',
+    parserBranch: 'invalid_slash',
+    timezoneAssumption: '',
+    failureReason: 'Slash date components are outside supported date ranges.',
   };
+}
+
+function isStrictLeadsDateAuditPartsMatch_(date, year, month, day, hour, minute, second, useUtc) {
+  if (!(date instanceof Date) || isNaN(date.getTime())) return false;
+  if (useUtc) {
+    return date.getUTCFullYear() === year
+      && date.getUTCMonth() + 1 === month
+      && date.getUTCDate() === day
+      && date.getUTCHours() === hour
+      && date.getUTCMinutes() === minute
+      && date.getUTCSeconds() === second;
+  }
+  return date.getFullYear() === year
+    && date.getMonth() + 1 === month
+    && date.getDate() === day
+    && date.getHours() === hour
+    && date.getMinutes() === minute
+    && date.getSeconds() === second;
 }
 
 function classifyLeadsDateAuditRecord_(current, canonical, currentDisplay, currentNumberFormat) {
   if (current.kind === 'blank') {
+    if (canonical.leadSource === 'manual' && !canonical.parsedDate) {
+      return {
+        classification: 'blank_manual_test',
+        safeToApply: false,
+        diffSeconds: null,
+        reason: 'Manual/test lead has no trusted creation timestamp; keep blank and sort after dated rows.',
+      };
+    }
     return {
       classification: 'blank',
       safeToApply: false,
@@ -2257,10 +2947,27 @@ function classifyLeadsDateAuditRecord_(current, canonical, currentDisplay, curre
     };
   }
   if (!canonical.parsedDate) {
+    if (canonical.leadSource === 'unsupported') {
+      return {
+        classification: 'unsupported_source',
+        safeToApply: false,
+        diffSeconds: null,
+        reason: canonical.failureReason || 'Lead source is unsupported for date canonicalization.',
+      };
+    }
+    if (!current.parsedDate || current.kind === 'invalid_date') {
+      return {
+        classification: 'manual_review_required',
+        safeToApply: false,
+        diffSeconds: null,
+        reason: 'Current LEADS date is invalid and no valid canonical timestamp was found by Lead ID. ' + (current.failureReason || ''),
+      };
+    }
     return {
       classification: 'canonical_source_missing',
       safeToApply: false,
-      reason: 'No valid canonical timestamp found by Lead ID from LEADS_MAIN.facebook_created_time, LEAD_DETAILS.facebook_created_time, or LEADS_MAIN.created_at.',
+      diffSeconds: null,
+      reason: 'No valid canonical Facebook Created Time found by Lead ID from LEAD_DETAILS.facebook_created_time or trusted LEADS_MAIN.facebook_created_time.',
     };
   }
   if (current.kind === 'ambiguous_slash_date') {
@@ -2271,36 +2978,71 @@ function classifyLeadsDateAuditRecord_(current, canonical, currentDisplay, curre
     };
   }
   if (!current.parsedDate || current.kind === 'invalid_date') {
+    if (canonical.parsedDate) {
+      return {
+        classification: getLeadsDateSafeRecoverClassification_(canonical.source),
+        safeToApply: true,
+        diffSeconds: null,
+        reason: 'Current LEADS date is invalid (' + (current.failureReason || 'parse failed') + '), but a safe canonical timestamp was found in ' + canonical.source + '.',
+      };
+    }
     return {
       classification: 'invalid_date',
       safeToApply: false,
+      diffSeconds: null,
       reason: 'Current LEADS date is not parseable as a Date object, ISO value, or unambiguous slash date.',
     };
   }
 
-  const currentKey = formatLeadsDateAuditDate_(current.parsedDate);
-  const canonicalKey = formatLeadsDateAuditDate_(canonical.parsedDate);
-  if (currentKey !== canonicalKey) {
-    const currentDay = Utilities.formatDate(current.parsedDate, Session.getScriptTimeZone() || 'Asia/Bangkok', 'yyyy-MM-dd');
-    const canonicalDay = Utilities.formatDate(canonical.parsedDate, Session.getScriptTimeZone() || 'Asia/Bangkok', 'yyyy-MM-dd');
+  const diffSeconds = Math.abs(current.parsedDate.getTime() - canonical.parsedDate.getTime()) / 1000;
+  if (diffSeconds > 60) {
+    const currentKey = formatLeadsDateAuditDate_(current.parsedDate);
+    const canonicalKey = formatLeadsDateAuditDate_(canonical.parsedDate);
+    const recoverClassification = getLeadsDateSafeRecoverClassification_(canonical.source);
+    if (recoverClassification !== 'manual_review_required') {
+      return {
+        classification: recoverClassification,
+        safeToApply: true,
+        diffSeconds: Math.round(diffSeconds),
+        reason: 'Current parsed datetime (' + currentKey + ') differs from trusted canonical Facebook Created Time (' + canonicalKey + ') by ' + Math.round(diffSeconds) + ' seconds; apply will replace it with the canonical source epoch.',
+      };
+    }
     return {
-      classification: currentDay === canonicalDay ? 'timezone_mismatch' : 'invalid_date',
+      classification: 'timezone_mismatch',
       safeToApply: false,
-      reason: 'Current parsed datetime (' + currentKey + ') differs from canonical datetime (' + canonicalKey + ').',
+      diffSeconds: Math.round(diffSeconds),
+      reason: 'Current parsed datetime (' + currentKey + ') differs from canonical datetime (' + canonicalKey + ') by ' + Math.round(diffSeconds) + ' seconds.',
     };
   }
 
   const targetDisplay = formatLeadsDateAuditDisplayValue_(canonical.parsedDate);
   const displayOnlyMismatch = String(currentDisplay || '').trim() !== targetDisplay
     || isUsStyleLeadsDateNumberFormat_(currentNumberFormat);
+  const normalizedInstant = current.timezoneAssumption !== canonical.timezoneAssumption
+    && (current.timezoneAssumption || canonical.timezoneAssumption);
+  const sourceSafeClassification = canonical.leadSource === 'manual'
+    ? 'manual_created_date_safe'
+    : canonical.leadSource === 'facebook'
+      ? 'facebook_date_safe'
+      : current.kind;
   return {
-    classification: current.kind,
+    classification: normalizedInstant ? 'same_instant_timezone_normalized' : sourceSafeClassification,
     safeToApply: true,
     displayOnlyMismatch: displayOnlyMismatch,
+    diffSeconds: Math.round(diffSeconds),
     reason: displayOnlyMismatch
       ? 'Underlying datetime matches canonical, but displayed value or number format is not target dd/MM/yyyy HH:mm.'
-      : 'Current value is safe and already aligns with the canonical source.',
+      : normalizedInstant
+        ? 'Current LEADS value and canonical source represent the same instant after source-specific timezone normalization.'
+        : 'Current value is safe and already aligns with the canonical source.',
   };
+}
+
+function getLeadsDateSafeRecoverClassification_(canonicalSource) {
+  if (canonicalSource === 'LEADS_MAIN.facebook_created_time') return 'safe_recover_from_leads_main';
+  if (canonicalSource === 'LEAD_DETAILS.facebook_created_time') return 'safe_recover_from_lead_details';
+  if (canonicalSource === 'LEADS_MAIN.created_at') return 'safe_recover_from_manual_created_at';
+  return 'manual_review_required';
 }
 
 function incrementLeadsDateAuditCounts_(counts, current, classification) {
@@ -2584,14 +3326,27 @@ function writeLeadsDateAuditReport_(sheet, auditAt, metadata, counts, rows, prob
     'display signature',
     'underlying value type',
     'current number format',
+    'lead source',
     'canonical source sheet',
+    'canonical raw type',
     'canonical raw value',
+    'canonical parser branch',
     'parsed canonical datetime',
     'classification',
     'proposed safe datetime',
     'proposed display value',
     'safe to apply',
     'reason',
+    'canonical source timezone assumption',
+    'canonical epoch milliseconds',
+    'LEADS epoch milliseconds',
+    'absolute difference seconds',
+    'normalized Bangkok display',
+    'parser failure reason',
+    'LEAD_DETAILS facebook_leadgen_id',
+    'LEAD_DETAILS form_id',
+    'LEAD_DETAILS facebook_created_time raw',
+    'LEAD_DETAILS created_at diagnostic',
   ];
   sheet.getRange(headerRow, 1, 1, headers.length).setValues([headers]);
   if (rows.length) {
