@@ -1,4 +1,11 @@
 const { google } = require("googleapis");
+const {
+    assertExactFacebookLeadgenId,
+    buildFacebookRepeatSubmissionEvent,
+    classifyFacebookIdentityMatch,
+    dedupeRepeatSubmissionEvents,
+    PHONE_COLLISION_REVIEW,
+} = require("./facebookIdentity");
 
 const SHEETS = {
     LEADS_MAIN: "LEADS_MAIN",
@@ -6,7 +13,16 @@ const SHEETS = {
     DEALS: "DEALS",
     INSTALLATIONS: "INSTALLATIONS",
     SYNC_STATE: "SYNC_STATE",
+    ACTIVITY_LOG: "ACTIVITY_LOG",
 };
+
+const FACEBOOK_INGESTION_STATE = Object.freeze({
+    COMPLETE_EXISTING: "COMPLETE_EXISTING",
+    PARTIAL_EXISTING_REPAIRABLE: "PARTIAL_EXISTING_REPAIRABLE",
+    PHONE_COLLISION_REVIEW: PHONE_COLLISION_REVIEW,
+    SAFE_NEW: "SAFE_NEW",
+    AMBIGUOUS_STOP: "AMBIGUOUS_STOP",
+});
 
 const HEADER_ROW = 1;
 const DATA_START_ROW = 3;
@@ -287,10 +303,92 @@ function groupObjectRanges(headers, rowNumber, object) {
 
         return {
             rowNumber,
+            startIndex: group.startIndex,
+            endIndex: group.endIndex,
+            canonicalHeaders: headers
+                .slice(group.startIndex, group.endIndex + 1)
+                .map(normalizeHeaderName),
             rangeSuffix: `${startColumn}${rowNumber}:${endColumn}${rowNumber}`,
             values: [group.values],
         };
     });
+}
+
+function buildObjectWriteOperations(sheetName, headers, rowNumber, object, options = {}) {
+    const rawFields = new Set((options.rawFields || []).map(normalizeHeaderName));
+    if (sheetName === SHEETS.LEAD_DETAILS) rawFields.add("facebook_leadgen_id");
+    const identityField = normalizeHeaderName(options.identityField || "facebook_leadgen_id");
+    const enteredData = [];
+    const rawData = [];
+    const identityAnchorData = [];
+    const identityVerifications = [];
+
+    for (const group of groupObjectRanges(headers, rowNumber, object)) {
+        let segment = null;
+        const flushSegment = () => {
+            if (!segment) return;
+
+            const startColumn = columnToLetter(segment.startIndex + 1);
+            const endColumn = columnToLetter(segment.endIndex + 1);
+            const operation = {
+                range: `${sheetName}!${startColumn}${rowNumber}:${endColumn}${rowNumber}`,
+                values: [segment.values],
+            };
+
+            if (segment.raw) rawData.push(operation);
+            else enteredData.push(operation);
+            segment = null;
+        };
+
+        group.canonicalHeaders.forEach((canonicalHeader, offset) => {
+            const raw = rawFields.has(canonicalHeader);
+            const index = group.startIndex + offset;
+            const value = group.values[0][offset];
+
+            if (!segment || segment.raw !== raw || segment.endIndex + 1 !== index) {
+                flushSegment();
+                segment = {
+                    startIndex: index,
+                    endIndex: index,
+                    values: [value],
+                    raw,
+                };
+            } else {
+                segment.endIndex = index;
+                segment.values.push(value);
+            }
+
+            if (raw && canonicalHeader === identityField) {
+                identityVerifications.push({
+                    sheetName,
+                    rowNumber,
+                    headerName: canonicalHeader,
+                    expectedValue: value,
+                });
+            }
+        });
+
+        flushSegment();
+    }
+
+    const anchorFields = sheetName === SHEETS.LEAD_DETAILS
+        ? ["lead_id"]
+        : sheetName === SHEETS.ACTIVITY_LOG
+            ? ["activity_id", "event_id", "idempotency_key"]
+            : [];
+    if (identityVerifications.length && anchorFields.length) {
+        for (const anchorField of anchorFields) {
+            const index = headers.findIndex(header => normalizeHeaderName(header) === anchorField);
+            if (index < 0 || !Object.prototype.hasOwnProperty.call(object, anchorField)) continue;
+            const column = columnToLetter(index + 1);
+            identityAnchorData.push({
+                range: `${sheetName}!${column}${rowNumber}:${column}${rowNumber}`,
+                values: [[getObjectValueForCanonicalHeader(object, anchorField)]],
+            });
+        }
+    }
+
+    return { enteredData, rawData, identityAnchorData, identityVerifications };
 }
 
 async function createSheetsClient() {
@@ -416,16 +514,80 @@ async function saveFacebookBackfillState(state) {
     return normalizedState;
 }
 
-async function batchUpdateValues(sheets, spreadsheetId, data) {
+async function batchUpdateValues(sheets, spreadsheetId, data, valueInputOption = "USER_ENTERED") {
     if (!data.length) return;
 
     await sheets.spreadsheets.values.batchUpdate({
         spreadsheetId,
         requestBody: {
-            valueInputOption: "USER_ENTERED",
+            valueInputOption,
             data,
         },
     });
+}
+
+async function verifyExactFacebookLeadgenReadbacks(sheets, spreadsheetId, verifications) {
+    const uniqueVerifications = Array.from(new Map(
+        verifications.map(item => [
+            `${item.sheetName}:${item.rowNumber}:${item.headerName}`,
+            item,
+        ])
+    ).values());
+
+    for (const verification of uniqueVerifications) {
+        const headers = await readSheet(
+            sheets,
+            spreadsheetId,
+            `${verification.sheetName}!A${verification.rowNumber}:ZZ${verification.rowNumber}`
+        );
+        const row = headers[0] || [];
+        const headerRows = await readSheet(
+            sheets,
+            spreadsheetId,
+            `${verification.sheetName}!A${HEADER_ROW}:ZZ${HEADER_ROW}`
+        );
+        const header = headerRows[0] || [];
+        const index = header.findIndex(item => normalizeHeaderName(item) === verification.headerName);
+        const actualValue = index >= 0 ? row[index] : undefined;
+
+        if (typeof actualValue !== "string" || actualValue !== verification.expectedValue) {
+            throw new Error(
+                `Facebook Leadgen ID readback mismatch at ${verification.sheetName} row ${verification.rowNumber}.`
+            );
+        }
+
+        assertExactFacebookLeadgenId(actualValue, `${verification.sheetName}.${verification.headerName}`);
+    }
+}
+
+async function writeObjectOperations(sheets, spreadsheetId, entries) {
+    const enteredData = [];
+    const rawData = [];
+    const identityAnchorData = [];
+    const verifications = [];
+
+    for (const entry of entries) {
+        const operations = buildObjectWriteOperations(
+            entry.sheetName,
+            entry.headers,
+            entry.rowNumber,
+            entry.object,
+            entry.options
+        );
+        enteredData.push(...operations.enteredData);
+        rawData.push(...operations.rawData);
+        identityAnchorData.push(...operations.identityAnchorData);
+        verifications.push(...operations.identityVerifications);
+    }
+
+    await batchUpdateValues(sheets, spreadsheetId, rawData, "RAW");
+    await batchUpdateValues(sheets, spreadsheetId, identityAnchorData);
+
+    if (verifications.length) {
+        await verifyExactFacebookLeadgenReadbacks(sheets, spreadsheetId, verifications);
+    }
+
+    await batchUpdateValues(sheets, spreadsheetId, enteredData);
 }
 
 async function getSheetRows(sheetName) {
@@ -550,6 +712,161 @@ function findLeadDetailRowForObject(headers, rows, detailObject = {}) {
     return phoneMatch || leadIdMatch;
 }
 
+function findLeadDetailRowsByFacebookLeadgenId(headers, rows, facebookLeadgenId) {
+    const leadgenIndex = headerIndex(headers, "facebook_leadgen_id");
+    const target = assertExactFacebookLeadgenId(facebookLeadgenId, "Facebook Leadgen ID");
+    const matches = [];
+
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const row = rows[i] || [];
+        const value = row[leadgenIndex];
+
+        if (typeof value === "string" && value === target) {
+            matches.push({
+                ...rowToObject(headers, row),
+                rowNumber: i + 1,
+                matchType: "facebook_leadgen_id",
+            });
+        }
+    }
+
+    return matches;
+}
+
+function findLeadRowsByLeadId(headers, rows, leadId) {
+    const leadIdIndex = headerIndex(headers, "lead_id");
+    const target = String(leadId || "").trim();
+    if (!target) return [];
+
+    const matches = [];
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const row = rows[i] || [];
+        if (String(row[leadIdIndex] || "").trim() !== target) continue;
+        matches.push({
+            ...rowToObject(headers, row),
+            rowNumber: i + 1,
+        });
+    }
+
+    return matches;
+}
+
+function inspectFacebookIngestionState({
+    facebookLeadgenId,
+    lead,
+    leadHeaders,
+    leadsRows,
+    detailHeaders,
+    detailsRows,
+    dealHeaders,
+    dealsRows,
+} = {}) {
+    const targetId = assertExactFacebookLeadgenId(facebookLeadgenId, "Facebook Leadgen ID");
+    const exactDetailRows = findLeadDetailRowsByFacebookLeadgenId(
+        detailHeaders,
+        detailsRows,
+        targetId
+    );
+
+    if (!exactDetailRows.length) {
+        return {
+            classification: FACEBOOK_INGESTION_STATE.SAFE_NEW,
+            facebookLeadgenId: targetId,
+            exactDetailRows,
+            detail: null,
+            lead: null,
+            deals: [],
+            leadId: "",
+            detailNeedsRepair: false,
+            leadMissing: false,
+            dealMissing: false,
+        };
+    }
+
+    if (exactDetailRows.length > 1) {
+        return {
+            classification: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+            reason: "duplicate_exact_facebook_id",
+            facebookLeadgenId: targetId,
+            exactDetailRows,
+        };
+    }
+
+    const detail = exactDetailRows[0];
+    const leadId = String(detail.lead_id || "").trim();
+    if (!leadId) {
+        return {
+            classification: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+            reason: "exact_facebook_id_missing_lead_id",
+            facebookLeadgenId: targetId,
+            exactDetailRows,
+            detail,
+            leadId,
+        };
+    }
+
+    const leadRows = findLeadRowsByLeadId(leadHeaders, leadsRows, leadId);
+    if (leadRows.length > 1) {
+        return {
+            classification: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+            reason: "multiple_leads_for_detail_lead_id",
+            facebookLeadgenId: targetId,
+            exactDetailRows,
+            detail,
+            leadId,
+            leadRows,
+        };
+    }
+
+    const existingPhoneLead = findLeadByPhone(
+        leadHeaders,
+        leadsRows,
+        lead?.phone || lead?.raw_phone || detail.raw_phone
+    );
+    if (existingPhoneLead && String(existingPhoneLead.lead_id || "").trim() !== leadId) {
+        return {
+            classification: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+            reason: "exact_detail_conflicts_with_phone_lead",
+            facebookLeadgenId: targetId,
+            exactDetailRows,
+            detail,
+            leadId,
+            leadRows,
+            existingPhoneLead,
+        };
+    }
+
+    const existingLead = leadRows[0] || null;
+    const deals = findLeadRowsByLeadId(dealHeaders, dealsRows, leadId);
+    const expectedDetail = lead ? buildLeadDetailObject(leadId, lead) : null;
+    const mergedDetail = expectedDetail
+        ? mergeObjectPreserveExisting(detail, expectedDetail)
+        : detail;
+    const detailNeedsRepair = Boolean(
+        expectedDetail
+        && hasMeaningfulObjectChanges(detailHeaders, detail, mergedDetail)
+    );
+    const leadMissing = !existingLead;
+    const dealMissing = deals.length === 0;
+
+    return {
+        classification: !leadMissing && !dealMissing && !detailNeedsRepair
+            ? FACEBOOK_INGESTION_STATE.COMPLETE_EXISTING
+            : FACEBOOK_INGESTION_STATE.PARTIAL_EXISTING_REPAIRABLE,
+        facebookLeadgenId: targetId,
+        exactDetailRows,
+        detail,
+        lead: existingLead,
+        leadRows,
+        deals,
+        leadId,
+        detailNeedsRepair,
+        leadMissing,
+        dealMissing,
+        expectedDetail,
+    };
+}
+
 function normalizeSheetObject(sheetName, object = {}) {
     const normalizedObject = { ...object };
 
@@ -633,32 +950,75 @@ function objectToRow(headers, object) {
     return headers.map(header => getObjectValueForCanonicalHeader(object, normalizeHeaderName(header)));
 }
 
-async function appendObjects(sheetName, objects) {
+async function appendObjects(sheetName, objects, options = {}) {
     if (!objects.length) return [];
 
-    const { sheets, spreadsheetId } = await createSheetsClient();
+    const client = await createSheetsClient();
+    return appendObjectsWithClient(sheetName, objects, options, client);
+}
+
+async function appendObjectsWithClient(sheetName, objects, options = {}, { sheets, spreadsheetId }) {
+    if (!objects.length) return [];
+
     const rows = await readSheet(sheets, spreadsheetId, `${sheetName}!A:ZZ`);
     const headers = rows[HEADER_ROW - 1] || [];
+    const workingRows = rows.map(row => [...row]);
     let nextRow = getNextDataRow(rows);
-    const data = [];
     const appendedRows = [];
+    const entries = [];
 
     for (const object of objects) {
         const normalizedObject = normalizeSheetObject(sheetName, object);
-        const rowNumber = nextRow++;
-        const groups = groupObjectRanges(headers, rowNumber, normalizedObject);
+        let rowNumber;
 
-        for (const group of groups) {
-            data.push({
-                range: `${sheetName}!${group.rangeSuffix}`,
-                values: group.values,
-            });
+        if (sheetName === SHEETS.LEAD_DETAILS && normalizedObject.facebook_leadgen_id) {
+            const exactId = assertExactFacebookLeadgenId(
+                normalizedObject.facebook_leadgen_id,
+                "LEAD_DETAILS.facebook_leadgen_id"
+            );
+            const exactRows = findLeadDetailRowsByFacebookLeadgenId(
+                headers,
+                workingRows,
+                exactId
+            );
+
+            if (exactRows.length > 1) {
+                throw new Error(
+                    `AMBIGUOUS_STOP: duplicate LEAD_DETAILS rows for Facebook Leadgen ID ${exactId}.`
+                );
+            }
+
+            if (exactRows.length === 1) {
+                rowNumber = exactRows[0].rowNumber;
+                const merged = mergeObjectPreserveExisting(exactRows[0], normalizedObject);
+                if (hasMeaningfulObjectChanges(headers, exactRows[0], merged)) {
+                    entries.push({
+                        sheetName,
+                        headers,
+                        rowNumber,
+                        object: merged,
+                        options,
+                    });
+                    workingRows[rowNumber - 1] = objectToRow(headers, merged);
+                }
+                appendedRows.push(rowNumber);
+                continue;
+            }
         }
 
+        rowNumber = nextRow++;
+        entries.push({
+            sheetName,
+            headers,
+            rowNumber,
+            object: normalizedObject,
+            options,
+        });
+        workingRows[rowNumber - 1] = objectToRow(headers, normalizedObject);
         appendedRows.push(rowNumber);
     }
 
-    await batchUpdateValues(sheets, spreadsheetId, data);
+    await writeObjectOperations(sheets, spreadsheetId, entries);
 
     return appendedRows;
 }
@@ -666,16 +1026,13 @@ async function appendObjects(sheetName, objects) {
 async function updateObjectRow(sheetName, rowNumber, object) {
     const { sheets, spreadsheetId } = await createSheetsClient();
     const headers = await getHeaders(sheetName);
-    const groups = groupObjectRanges(headers, rowNumber, normalizeSheetObject(sheetName, object));
-
-    await batchUpdateValues(
-        sheets,
-        spreadsheetId,
-        groups.map(group => ({
-            range: `${sheetName}!${group.rangeSuffix}`,
-            values: group.values,
-        }))
-    );
+    await writeObjectOperations(sheets, spreadsheetId, [{
+        sheetName,
+        headers,
+        rowNumber,
+        object: normalizeSheetObject(sheetName, object),
+        options: {},
+    }]);
 }
 
 async function updateObjectRows(sheetName, updates, chunkSize = 100) {
@@ -683,25 +1040,20 @@ async function updateObjectRows(sheetName, updates, chunkSize = 100) {
 
     const { sheets, spreadsheetId } = await createSheetsClient();
     const headers = await getHeaders(sheetName);
-    const data = [];
+    const entries = [];
 
     for (const update of updates) {
-        const groups = groupObjectRanges(
+        entries.push({
+            sheetName,
             headers,
-            update.rowNumber,
-            normalizeSheetObject(sheetName, update.object || update.patch || {})
-        );
-
-        for (const group of groups) {
-            data.push({
-                range: `${sheetName}!${group.rangeSuffix}`,
-                values: group.values,
-            });
-        }
+            rowNumber: update.rowNumber,
+            object: normalizeSheetObject(sheetName, update.object || update.patch || {}),
+            options: {},
+        });
     }
 
-    for (let i = 0; i < data.length; i += chunkSize) {
-        await batchUpdateValues(sheets, spreadsheetId, data.slice(i, i + chunkSize));
+    for (let i = 0; i < entries.length; i += chunkSize) {
+        await writeObjectOperations(sheets, spreadsheetId, entries.slice(i, i + chunkSize));
     }
 
     return updates.length;
@@ -710,7 +1062,34 @@ async function updateObjectRows(sheetName, updates, chunkSize = 100) {
 async function upsertLeadDetailObject(detailObject) {
     const rows = await getSheetRows(SHEETS.LEAD_DETAILS);
     const headers = rows[HEADER_ROW - 1] || [];
+    const rawIncomingFacebookId = detailObject.facebook_leadgen_id;
+    const incomingFacebookId = rawIncomingFacebookId
+        ? assertExactFacebookLeadgenId(rawIncomingFacebookId, "LEAD_DETAILS.facebook_leadgen_id")
+        : "";
+    if (incomingFacebookId) {
+        const exactRows = findLeadDetailRowsByFacebookLeadgenId(
+            headers,
+            rows,
+            incomingFacebookId
+        );
+        if (exactRows.length > 1) {
+            throw new Error(
+                `AMBIGUOUS_STOP: duplicate LEAD_DETAILS rows for Facebook Leadgen ID ${incomingFacebookId}.`
+            );
+        }
+    }
     const existing = findLeadDetailRowForObject(headers, rows, detailObject);
+    const existingFacebookId = String(existing?.facebook_leadgen_id || "").trim();
+
+    if (
+        incomingFacebookId
+        && existing?.rowNumber
+        && existing.matchType !== "facebook_leadgen_id"
+        && existingFacebookId
+        && existingFacebookId !== incomingFacebookId
+    ) {
+        throw new Error(`${PHONE_COLLISION_REVIEW}: Facebook identity does not match the existing Lead Details row.`);
+    }
 
     if (existing?.rowNumber) {
         const merged = mergeObjectPreserveExisting(existing, detailObject);
@@ -728,6 +1107,140 @@ async function upsertLeadDetailObject(detailObject) {
         rowNumber: appendedRows[0] || null,
         matchType: "",
     };
+}
+
+function findPrimaryFacebookLeadgenId(headers, rows, leadId) {
+    const target = String(leadId || "").trim();
+    if (!target) return "";
+
+    for (let i = DATA_START_ROW - 1; i < rows.length; i++) {
+        const object = rowToObject(headers, rows[i] || []);
+        if (String(object.lead_id || "").trim() !== target) continue;
+        return String(object.facebook_leadgen_id || "").trim();
+    }
+
+    return "";
+}
+
+function validateFacebookRepeatSubmissionActivityHeaders(headers) {
+    const normalizedHeaders = new Set((headers || []).map(normalizeHeaderName));
+    const identityField = normalizedHeaders.has("facebook_leadgen_id")
+        ? "facebook_leadgen_id"
+        : normalizedHeaders.has("new_value")
+            ? "new_value"
+            : "";
+    const eventIdFields = ["activity_id", "event_id", "idempotency_key"]
+        .filter(field => normalizedHeaders.has(field));
+    const requiredFields = [
+        "lead_id",
+        "sheet_name",
+        "action_type",
+        "old_value",
+        "note",
+        "created_by",
+        "created_at",
+    ];
+    const missingFields = requiredFields.filter(field => !normalizedHeaders.has(field));
+
+    if (!identityField) {
+        throw new Error(
+            "ACTIVITY_LOG_SCHEMA_INVALID: expected facebook_leadgen_id or new_value for the exact secondary Facebook ID."
+        );
+    }
+
+    if (!eventIdFields.length) {
+        throw new Error(
+            "ACTIVITY_LOG_SCHEMA_INVALID: expected activity_id, event_id, or idempotency_key."
+        );
+    }
+
+    if (missingFields.length) {
+        throw new Error(
+            `ACTIVITY_LOG_SCHEMA_INVALID: missing required field(s): ${missingFields.join(", ")}.`
+        );
+    }
+
+    return { identityField, eventIdFields };
+}
+
+async function appendFacebookRepeatSubmissionEvents(sheets, spreadsheetId, events) {
+    if (!events.length) {
+        return { created: 0, skipped_existing: 0 };
+    }
+
+    const rows = await readSheet(sheets, spreadsheetId, `${SHEETS.ACTIVITY_LOG}!A:ZZ`);
+    const headers = rows[HEADER_ROW - 1] || [];
+    const { identityField, eventIdFields } = validateFacebookRepeatSubmissionActivityHeaders(headers);
+
+    const existingEventIds = new Set();
+    rows.slice(DATA_START_ROW - 1).forEach(row => {
+        const object = rowToObject(headers, row);
+        for (const field of eventIdFields) {
+            const value = String(object[field] || "").trim();
+            if (value) existingEventIds.add(value);
+        }
+    });
+
+    const { pendingEvents, skippedExisting } = dedupeRepeatSubmissionEvents(existingEventIds, events);
+    if (!pendingEvents.length) {
+        return { created: 0, skipped_existing: skippedExisting };
+    }
+
+    const entries = [];
+    let nextRow = getNextDataRow(rows);
+    for (const event of pendingEvents) {
+        entries.push({
+            sheetName: SHEETS.ACTIVITY_LOG,
+            headers,
+            rowNumber: nextRow++,
+            object: event,
+            options: {
+                rawFields: ["facebook_leadgen_id", "new_value"],
+                identityField,
+            },
+        });
+    }
+
+    await writeObjectOperations(sheets, spreadsheetId, entries);
+    return {
+        created: pendingEvents.length,
+        skipped_existing: skippedExisting,
+    };
+}
+
+async function verifyCompleteFacebookIngestionStates(sheets, spreadsheetId, targets) {
+    const uniqueTargets = Array.from(new Map(
+        (targets || []).map(target => [target.facebookLeadgenId, target])
+    ).values());
+    if (!uniqueTargets.length) return;
+
+    const [leadsRows, detailsRows, dealsRows] = await Promise.all([
+        readSheet(sheets, spreadsheetId, `${SHEETS.LEADS_MAIN}!A:ZZ`),
+        readSheet(sheets, spreadsheetId, `${SHEETS.LEAD_DETAILS}!A:ZZ`),
+        readSheet(sheets, spreadsheetId, `${SHEETS.DEALS}!A:ZZ`),
+    ]);
+    const leadHeaders = leadsRows[HEADER_ROW - 1] || [];
+    const detailHeaders = detailsRows[HEADER_ROW - 1] || [];
+    const dealHeaders = dealsRows[HEADER_ROW - 1] || [];
+
+    for (const target of uniqueTargets) {
+        const state = inspectFacebookIngestionState({
+            facebookLeadgenId: target.facebookLeadgenId,
+            lead: target.lead,
+            leadHeaders,
+            leadsRows,
+            detailHeaders,
+            detailsRows,
+            dealHeaders,
+            dealsRows,
+        });
+
+        if (state.classification !== FACEBOOK_INGESTION_STATE.COMPLETE_EXISTING) {
+            throw new Error(
+                `FACEBOOK_INGESTION_STATE_INCOMPLETE: ${target.facebookLeadgenId} is ${state.classification}.`
+            );
+        }
+    }
 }
 
 async function deleteSheetRows(sheetName, rowNumbers) {
@@ -966,13 +1479,41 @@ async function appendLeadToSheet(lead) {
         };
     }
 
+    if (result.repaired_existing > 0) {
+        return {
+            action: "repaired_existing",
+            repaired_items: result.repaired_items || [],
+            affected_rows: result.affected_rows || [],
+        };
+    }
+
+    if (result.phone_collision_review > 0) {
+        return {
+            action: PHONE_COLLISION_REVIEW,
+            collision_items: result.collision_items || [],
+            repeat_submission_events_created: result.repeat_submission_events_created || 0,
+            repeat_submission_events_skipped: result.repeat_submission_events_skipped || 0,
+        };
+    }
+
+    if (result.ambiguous_stop > 0) {
+        return {
+            action: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+            ambiguous_items: result.ambiguous_items || [],
+        };
+    }
+
     return {
         action: "no_action",
     };
 }
 
 async function appendLeadsToSheetBatch(leads) {
-    const { sheets, spreadsheetId } = await createSheetsClient();
+    const client = await createSheetsClient();
+    return appendLeadsToSheetBatchWithClient(leads, client);
+}
+
+async function appendLeadsToSheetBatchWithClient(leads, { sheets, spreadsheetId }) {
 
     const [leadsRows, detailsRows, dealsRows] = await Promise.all([
         readSheet(sheets, spreadsheetId, `${SHEETS.LEADS_MAIN}!A:ZZ`),
@@ -1014,10 +1555,15 @@ async function appendLeadsToSheetBatch(leads) {
     const skippedExistingItems = [];
     const skippedUnchangedItems = [];
     const skippedEmptyItems = [];
+    const collisionItems = [];
+    const ambiguousItems = [];
+    const repairedItems = [];
+    const repeatSubmissionEvents = [];
+    const verificationTargets = [];
     const newLeadObjects = [];
     const newDetailObjects = [];
     const newDealObjects = [];
-    const updateData = [];
+    const writeEntries = [];
     const affectedRows = new Set();
 
     const inMemoryLeadRows = leadsRows.map(row => [...row]);
@@ -1050,12 +1596,13 @@ async function appendLeadsToSheetBatch(leads) {
                 };
             }
 
-            for (const group of groupObjectRanges(detailHeaders, existingDetail.rowNumber, mergedDetail)) {
-                updateData.push({
-                    range: `${SHEETS.LEAD_DETAILS}!${group.rangeSuffix}`,
-                    values: group.values,
-                });
-            }
+            writeEntries.push({
+                sheetName: SHEETS.LEAD_DETAILS,
+                headers: detailHeaders,
+                rowNumber: existingDetail.rowNumber,
+                object: mergedDetail,
+                options: {},
+            });
 
             inMemoryDetailRows[existingDetail.rowNumber - 1] = objectToRow(detailHeaders, mergedDetail);
             return {
@@ -1076,14 +1623,25 @@ async function appendLeadsToSheetBatch(leads) {
     };
 
     for (const lead of leads) {
-        const leadgenId = String(lead.facebook_leadgen_id || "").trim();
+        const rawLeadgenId = lead.facebook_leadgen_id;
         const normalizedPhone = normalizePhone(lead.phone);
 
-        if (!leadgenId) {
+        if (rawLeadgenId === undefined || rawLeadgenId === null || String(rawLeadgenId).trim() === "") {
             skippedEmptyItems.push({
                 reason: "missing_facebook_leadgen_id",
                 name: lead.name || "",
                 phone: lead.phone || "",
+            });
+            continue;
+        }
+
+        let leadgenId;
+        try {
+            leadgenId = assertExactFacebookLeadgenId(rawLeadgenId);
+        } catch (error) {
+            skippedEmptyItems.push({
+                reason: "invalid_facebook_leadgen_id",
+                error: error.message,
             });
             continue;
         }
@@ -1096,6 +1654,79 @@ async function appendLeadsToSheetBatch(leads) {
             continue;
         }
 
+        const ingestionState = inspectFacebookIngestionState({
+            facebookLeadgenId: leadgenId,
+            lead,
+            leadHeaders,
+            leadsRows: inMemoryLeadRows,
+            detailHeaders,
+            detailsRows: inMemoryDetailRows,
+            dealHeaders,
+            dealsRows: inMemoryDealRows,
+        });
+
+        if (ingestionState.classification === FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP) {
+            ambiguousItems.push({
+                facebook_leadgen_id: leadgenId,
+                classification: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+                reason: ingestionState.reason,
+            });
+            continue;
+        }
+
+        if (ingestionState.classification === FACEBOOK_INGESTION_STATE.COMPLETE_EXISTING) {
+            skippedExistingItems.push({
+                facebook_leadgen_id: leadgenId,
+                lead_id: ingestionState.leadId,
+                reason: "complete_existing",
+                classification: FACEBOOK_INGESTION_STATE.COMPLETE_EXISTING,
+            });
+            seenLeadgenIds.add(leadgenId);
+            continue;
+        }
+
+        if (ingestionState.classification === FACEBOOK_INGESTION_STATE.PARTIAL_EXISTING_REPAIRABLE) {
+            const leadId = ingestionState.leadId;
+            const repairActions = [];
+            const detailObject = buildLeadDetailObject(leadId, lead);
+            const detailWriteResult = queueLeadDetailWrite(detailObject);
+
+            if (ingestionState.leadMissing) {
+                const leadObject = buildLeadMainObject(leadId, lead);
+                const leadRowNumber = nextLeadRow;
+                newLeadObjects.push(leadObject);
+                inMemoryLeadRows[leadRowNumber - 1] = objectToRow(leadHeaders, leadObject);
+                nextLeadRow++;
+                affectedRows.add(leadRowNumber);
+                repairActions.push("created_missing_lead");
+            }
+
+            let dealId = ingestionState.deals[0]?.deal_id || "";
+            if (ingestionState.dealMissing) {
+                dealId = generateId("DEAL");
+                const dealObject = buildDealObject(dealId, leadId, lead);
+                newDealObjects.push(dealObject);
+                inMemoryDealRows[nextDealRow - 1] = objectToRow(dealHeaders, dealObject);
+                nextDealRow++;
+                affectedRows.add(ingestionState.lead?.rowNumber || nextLeadRow - 1);
+                repairActions.push("created_missing_deal");
+            }
+
+            if (detailWriteResult?.action === "updated") repairActions.push("repaired_detail");
+            if (detailWriteResult?.action === "created") repairActions.push("created_missing_detail");
+
+            repairedItems.push({
+                facebook_leadgen_id: leadgenId,
+                lead_id: leadId,
+                deal_id: dealId,
+                classification: FACEBOOK_INGESTION_STATE.PARTIAL_EXISTING_REPAIRABLE,
+                action: repairActions.join("+") || "reconciled_existing",
+            });
+            verificationTargets.push({ facebookLeadgenId: leadgenId, lead });
+            seenLeadgenIds.add(leadgenId);
+            continue;
+        }
+
         if (seenLeadgenIds.has(leadgenId)) {
             skippedExistingItems.push({
                 facebook_leadgen_id: leadgenId,
@@ -1105,6 +1736,49 @@ async function appendLeadsToSheetBatch(leads) {
         }
 
         const existingLead = findLeadByPhone(leadHeaders, inMemoryLeadRows, normalizedPhone);
+        const primaryFacebookLeadgenId = existingLead
+            ? findPrimaryFacebookLeadgenId(
+                detailHeaders,
+                inMemoryDetailRows,
+                String(existingLead.lead_id || "").trim()
+            )
+            : "";
+
+        const identityMatch = classifyFacebookIdentityMatch({
+            incomingFacebookLeadgenId: leadgenId,
+            exactMatch: false,
+            phoneMatch: Boolean(existingLead && primaryFacebookLeadgenId),
+        });
+
+        if (identityMatch.classification === PHONE_COLLISION_REVIEW) {
+            const leadId = String(existingLead.lead_id || "").trim();
+            const event = buildFacebookRepeatSubmissionEvent({
+                leadId,
+                facebookLeadgenId: leadgenId,
+                sourceCreatedTime: lead.facebook_created_time || "",
+                primaryFacebookLeadgenId,
+            });
+
+            repeatSubmissionEvents.push(event);
+            collisionItems.push({
+                lead_id: leadId,
+                facebook_leadgen_id: leadgenId,
+                classification: PHONE_COLLISION_REVIEW,
+                action: "repeat_submission_event",
+            });
+            seenLeadgenIds.add(leadgenId);
+            continue;
+        }
+
+        if (existingLead) {
+            ambiguousItems.push({
+                facebook_leadgen_id: leadgenId,
+                lead_id: String(existingLead.lead_id || "").trim(),
+                classification: FACEBOOK_INGESTION_STATE.AMBIGUOUS_STOP,
+                reason: "phone_match_without_distinct_primary_facebook_id",
+            });
+            continue;
+        }
 
         if (!existingLead) {
             const leadId = generateId("LEAD");
@@ -1133,6 +1807,8 @@ async function appendLeadsToSheetBatch(leads) {
                 phone: normalizedPhone,
                 name: lead.name || "",
             });
+
+            verificationTargets.push({ facebookLeadgenId: leadgenId, lead });
 
             continue;
         }
@@ -1168,12 +1844,13 @@ async function appendLeadsToSheetBatch(leads) {
                 ...updateLeadObject,
                 updated_at: dateToBangkokSheetsDateSerial(new Date()),
             };
-            for (const group of groupObjectRanges(leadHeaders, existingLead.rowNumber, leadObjectWithUpdatedAt)) {
-                updateData.push({
-                    range: `${SHEETS.LEADS_MAIN}!${group.rangeSuffix}`,
-                    values: group.values,
-                });
-            }
+            writeEntries.push({
+                sheetName: SHEETS.LEADS_MAIN,
+                headers: leadHeaders,
+                rowNumber: existingLead.rowNumber,
+                object: leadObjectWithUpdatedAt,
+                options: {},
+            });
             affectedRows.add(existingLead.rowNumber);
         }
 
@@ -1207,12 +1884,13 @@ async function appendLeadsToSheetBatch(leads) {
         let rowNumber = startRow;
 
         for (const object of newLeadObjects) {
-            for (const group of groupObjectRanges(leadHeaders, rowNumber, object)) {
-                updateData.push({
-                    range: `${SHEETS.LEADS_MAIN}!${group.rangeSuffix}`,
-                    values: group.values,
-                });
-            }
+            writeEntries.push({
+                sheetName: SHEETS.LEADS_MAIN,
+                headers: leadHeaders,
+                rowNumber,
+                object,
+                options: {},
+            });
             rowNumber++;
         }
     }
@@ -1222,12 +1900,13 @@ async function appendLeadsToSheetBatch(leads) {
         let rowNumber = startRow;
 
         for (const object of newDetailObjects) {
-            for (const group of groupObjectRanges(detailHeaders, rowNumber, object)) {
-                updateData.push({
-                    range: `${SHEETS.LEAD_DETAILS}!${group.rangeSuffix}`,
-                    values: group.values,
-                });
-            }
+            writeEntries.push({
+                sheetName: SHEETS.LEAD_DETAILS,
+                headers: detailHeaders,
+                rowNumber,
+                object,
+                options: {},
+            });
             rowNumber++;
         }
     }
@@ -1237,23 +1916,37 @@ async function appendLeadsToSheetBatch(leads) {
         let rowNumber = startRow;
 
         for (const object of newDealObjects) {
-            for (const group of groupObjectRanges(dealHeaders, rowNumber, object)) {
-                updateData.push({
-                    range: `${SHEETS.DEALS}!${group.rangeSuffix}`,
-                    values: group.values,
-                });
-            }
+            writeEntries.push({
+                sheetName: SHEETS.DEALS,
+                headers: dealHeaders,
+                rowNumber,
+                object,
+                options: {},
+            });
             rowNumber++;
         }
     }
 
-    await batchUpdateValues(sheets, spreadsheetId, updateData);
+    await writeObjectOperations(sheets, spreadsheetId, writeEntries);
+    await verifyCompleteFacebookIngestionStates(
+        sheets,
+        spreadsheetId,
+        verificationTargets
+    );
+    const repeatSubmissionResult = await appendFacebookRepeatSubmissionEvents(
+        sheets,
+        spreadsheetId,
+        repeatSubmissionEvents
+    );
 
     console.log(`Batch sync created: ${createdItems.length}`);
     console.log(`Batch sync updated_existing: ${updatedItems.length}`);
     console.log(`Batch sync skipped_existing: ${skippedExistingItems.length}`);
     console.log(`Batch sync skipped_unchanged: ${skippedUnchangedItems.length}`);
     console.log(`Batch sync skipped_empty: ${skippedEmptyItems.length}`);
+    console.log(`Batch sync phone_collision_review: ${collisionItems.length}`);
+    console.log(`Batch sync ambiguous_stop: ${ambiguousItems.length}`);
+    console.log(`Batch sync repaired_existing: ${repairedItems.length}`);
 
     return {
         created: createdItems.length,
@@ -1261,6 +1954,11 @@ async function appendLeadsToSheetBatch(leads) {
         skipped_existing: skippedExistingItems.length,
         skipped_unchanged: skippedUnchangedItems.length,
         skipped_empty: skippedEmptyItems.length,
+        phone_collision_review: collisionItems.length,
+        ambiguous_stop: ambiguousItems.length,
+        repaired_existing: repairedItems.length,
+        repeat_submission_events_created: repeatSubmissionResult.created,
+        repeat_submission_events_skipped: repeatSubmissionResult.skipped_existing,
         affected_rows: Array.from(affectedRows).sort((a, b) => a - b),
         incremental_cleanup_attempted: false,
         incremental_cleanup_rows: 0,
@@ -1270,12 +1968,16 @@ async function appendLeadsToSheetBatch(leads) {
         skipped_existing_items: skippedExistingItems,
         skipped_unchanged_items: skippedUnchangedItems,
         skipped_empty_items: skippedEmptyItems,
+        collision_items: collisionItems,
+        ambiguous_items: ambiguousItems,
+        repaired_items: repairedItems,
     };
 }
 
 module.exports = {
     appendLeadToSheet,
     appendLeadsToSheetBatch,
+    appendLeadsToSheetBatchWithClient,
     getExistingLeadgenIds,
     getExistingLeadgenIdsNarrow,
     createSheetsClient,
@@ -1288,6 +1990,7 @@ module.exports = {
     getFacebookBackfillState,
     saveFacebookBackfillState,
     appendObjects,
+    appendObjectsWithClient,
     updateObjectRow,
     updateObjectRows,
     upsertLeadDetailObject,
@@ -1296,4 +1999,12 @@ module.exports = {
     normalizeHeaderName,
     dateToBangkokSheetsDateSerial,
     valueToBangkokSheetsDateSerial,
+    FACEBOOK_INGESTION_STATE,
+    buildObjectWriteOperations,
+    verifyExactFacebookLeadgenReadbacks,
+    inspectFacebookIngestionState,
+    findLeadDetailRowsByFacebookLeadgenId,
+    validateFacebookRepeatSubmissionActivityHeaders,
+    classifyFacebookIdentityMatch,
+    buildFacebookRepeatSubmissionEvent,
 };
