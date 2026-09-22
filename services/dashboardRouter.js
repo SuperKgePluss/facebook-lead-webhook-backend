@@ -6,6 +6,10 @@ const { createDashboardAuth } = require("./dashboardAuth");
 const { readDashboardSheets } = require("./dashboardSheetsReader");
 const { buildDashboardReadModel } = require("./dashboardReadModel");
 const { shapeDashboardResponse } = require("./dashboardPrivacy");
+const {
+    readDashboardLeadParity,
+    shapeDashboardHealthResponse,
+} = require("./dashboardHealthReader");
 
 const OVERVIEW_FILTER_NAMES = Object.freeze([
     "dateFrom",
@@ -156,7 +160,9 @@ function createDashboardRouter(options = {}) {
     const config = loadDashboardConfig(env);
     const auth = createDashboardAuth({ config, sessions: options.sessions || new Map(), now });
     const dataProvider = options.dataProvider || createDefaultDataProvider(now);
+    const healthReader = options.healthReader || readDashboardLeadParity;
     if (typeof dataProvider !== "function") throw new TypeError("Dashboard data provider must be a function.");
+    if (typeof healthReader !== "function") throw new TypeError("Dashboard health reader must be a function.");
 
     const router = express.Router();
     const cors = createDashboardCors(config);
@@ -172,6 +178,7 @@ function createDashboardRouter(options = {}) {
     router.options("/auth/session", cors, auth.requireConfigured, preflight(config, ["GET"]));
     router.options("/dashboard/overview", cors, auth.requireConfigured, preflight(config, ["GET"]));
     router.options("/dashboard/activity", cors, auth.requireConfigured, preflight(config, ["GET"]));
+    router.options("/dashboard/health", cors, auth.requireConfigured, preflight(config, ["GET"]));
 
     router.post("/auth/login", cors, auth.requireConfigured, requireOrigin, rateLimitLogin, auth.login);
     router.post("/auth/logout", cors, auth.requireConfigured, requireOrigin, auth.logout);
@@ -202,6 +209,16 @@ function createDashboardRouter(options = {}) {
         } catch {
             return res.status(503).json({ error: "dashboard_data_unavailable" });
         }
+    });
+
+    router.get("/dashboard/health", cors, auth.requireConfigured, auth.requireSession, async (req, res) => {
+        let snapshot = null;
+        try {
+            snapshot = await healthReader();
+        } catch {
+            // The health payload intentionally reports UNKNOWN without exposing source errors.
+        }
+        return res.status(200).json(shapeDashboardHealthResponse(snapshot));
     });
 
     return router;
