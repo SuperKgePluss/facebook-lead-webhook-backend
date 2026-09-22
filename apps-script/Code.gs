@@ -261,9 +261,8 @@ function setupRecentlyAppendedRows_() {
     }
   }
 
-  if (typeof syncRecentLeadsViewRows_ === 'function') {
-    syncRecentLeadsViewRows_(200);
-  }
+  // onChange intentionally stays limited to lightweight audit/UI work. The
+  // cursor-based LEADS materializer runs from its scheduled/manual entrypoint.
 }
 
 function getEditedHeader_(sheet, column) {

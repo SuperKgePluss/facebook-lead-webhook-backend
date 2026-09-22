@@ -3,6 +3,8 @@ const LEADS_VIEW_REFRESH_CURSOR_KEY = 'LEADS_VIEW_REFRESH_NEXT_ROW';
 const LEADS_VIEW_REFRESH_BATCH_SIZE = 70;
 const LEADS_VIEW_SCHEDULED_CURSOR_KEY = 'LEADS_VIEW_SCHEDULED_NEXT_ROW';
 const LEADS_VIEW_SCHEDULED_BATCH_SIZE = 20;
+const LEADS_VIEW_SCHEDULED_MAX_BATCH_SIZE = 20;
+const LEADS_VIEW_SCHEDULED_RUNTIME_BUDGET_MS = 180000;
 const LEADS_VIEW_MEMO_START_COLUMN = 16;
 const LEADS_DATE_AUDIT_SHEET_NAME = 'LEADS_DATE_AUDIT';
 const LEADS_DATE_APPLY_LOG_SHEET_NAME = 'LEADS_DATE_APPLY_LOG';
@@ -48,6 +50,14 @@ const LEADS_VIEW_MANUAL_FIELDS = {
   sales_note_history: true,
   follow_up_count: true,
   open_detail: true,
+};
+const LEADS_VIEW_MATERIALIZATION_STATUS = {
+  MATERIALIZED_SUCCESS: 'MATERIALIZED_SUCCESS',
+  ALREADY_MATERIALIZED: 'ALREADY_MATERIALIZED',
+  EMPTY_SOURCE_ROW_SKIPPED: 'EMPTY_SOURCE_ROW_SKIPPED',
+  INVALID_SOURCE_ROW_REPORTED: 'INVALID_SOURCE_ROW_REPORTED',
+  RETRYABLE_WRITE_FAILURE: 'RETRYABLE_WRITE_FAILURE',
+  AMBIGUOUS_TARGET_FAILURE: 'AMBIGUOUS_TARGET_FAILURE',
 };
 
 function setupLeadsViewUi() {
@@ -141,6 +151,7 @@ function withLeadsViewScriptLock_(source, waitMs, callback) {
       checked: 0,
       synced: 0,
       failed: 0,
+      status: LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE,
     };
     Logger.log(operation + ' stopped because another LEADS sync/repair operation is running.');
     return result;
@@ -273,12 +284,12 @@ function getLeadsViewSafeUserSummary_() {
 }
 
 function syncLeadsViewNow() {
-  const result = syncRecentLeadsViewRows_(200);
+  const result = syncLeadsViewScheduled();
   SpreadsheetApp.getActive().toast(result.schema_valid === false
     ? 'LEADS schema is invalid. Run Admin Repair LEADS View.'
-    : result.stopped
-      ? 'LEADS sync stopped: ' + (result.reason || 'unknown')
-      : 'Synced recent LEADS rows: ' + result.synced, 'Sync LEADS View', 5);
+      : result.stopped
+        ? 'LEADS sync stopped: ' + (result.reason || 'unknown')
+      : 'Synced LEADS batch: ' + result.synced, 'Sync LEADS View', 5);
   return result;
 }
 
@@ -375,9 +386,6 @@ function repairLeadsViewFromLeadMainAdmin_() {
   setupLeadsViewStatusConditionalFormatting_(leadsSheet);
   hideDeprecatedLeadsSalesNoteInputColumn_(leadsSheet);
   resetLeadsViewRefreshCursor();
-  PropertiesService
-    .getScriptProperties()
-    .setProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY, String(DATA_START_ROW));
 
   const result = {
     rebuilt: rebuiltRows.length,
@@ -416,7 +424,8 @@ function syncRecentLeadsViewRows_(limit) {
 }
 
 function syncRecentLeadsViewRowsUnlocked_(limit) {
-  const rowLimit = Math.max(1, Number(limit) || 200);
+  const requestedRowLimit = Math.max(1, Number(limit) || LEADS_VIEW_SCHEDULED_BATCH_SIZE);
+  const rowLimit = Math.min(requestedRowLimit, LEADS_VIEW_SCHEDULED_MAX_BATCH_SIZE);
   const ss = SpreadsheetApp.getActive();
   const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
   const leadsSheet = ss.getSheetByName('LEADS');
@@ -468,7 +477,9 @@ function syncLeadsViewCursorBatch_(limit) {
 }
 
 function syncLeadsViewCursorBatchUnlocked_(limit) {
-  const batchSize = Math.max(1, Number(limit) || LEADS_VIEW_SCHEDULED_BATCH_SIZE);
+  const requestedBatchSize = Math.max(1, Number(limit) || LEADS_VIEW_SCHEDULED_BATCH_SIZE);
+  const batchSize = Math.min(requestedBatchSize, LEADS_VIEW_SCHEDULED_MAX_BATCH_SIZE);
+  const startedAt = Date.now();
   const properties = PropertiesService.getScriptProperties();
   const ss = SpreadsheetApp.getActive();
   const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
@@ -478,15 +489,18 @@ function syncLeadsViewCursorBatchUnlocked_(limit) {
       checked: 0,
       synced: 0,
       failed: 0,
+      status: LEADS_VIEW_MATERIALIZATION_STATUS.MATERIALIZED_SUCCESS,
       task_completed: true,
     };
   }
 
   const schema = validateLeadsViewSchemaForNormalSync_(leadsSheet);
   if (!schema.valid) {
-    return stopLeadsViewSyncForInvalidSchema_('syncLeadsViewCursorBatch_', schema, {
+    const stoppedResult = stopLeadsViewSyncForInvalidSchema_('syncLeadsViewCursorBatch_', schema, {
       task_completed: false,
     });
+    stoppedResult.status = LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE;
+    return stoppedResult;
   }
 
   const lastRow = leadMainSheet.getLastRow();
@@ -496,25 +510,106 @@ function syncLeadsViewCursorBatchUnlocked_(limit) {
     : Math.max(DATA_START_ROW, lastRow - batchSize + 1);
   const endRow = Math.min(startRow + batchSize - 1, lastRow);
   const manualByLeadId = getLeadsViewManualDataByLeadId_(leadsSheet);
-  const rowByLeadId = getLeadsViewRowMapByLeadId_(leadsSheet);
+  const rowNumbersByLeadId = getLeadsViewRowNumbersByLeadId_(leadsSheet);
+  const rowByLeadId = Object.keys(rowNumbersByLeadId).reduce((result, leadId) => {
+    result[leadId] = rowNumbersByLeadId[leadId][0];
+    return result;
+  }, {});
   let checked = 0;
   let synced = 0;
   let failed = 0;
+  let alreadyMaterialized = 0;
+  let emptySourceRowCount = 0;
+  let invalidSourceRowCount = 0;
+  let firstInvalidSourceRow = null;
+  let retryableFailures = 0;
+  let ambiguousFailures = 0;
+  let stopped = false;
+  let reason = '';
+  let failureRow = 0;
+  let failureStatus = '';
+  let nextCursor = startRow;
 
   for (let row = startRow; row <= endRow; row++) {
+    if (Date.now() - startedAt >= LEADS_VIEW_SCHEDULED_RUNTIME_BUDGET_MS) {
+      stopped = true;
+      reason = 'runtime_budget';
+      break;
+    }
+
     checked++;
+    let materialization;
     try {
-      if (syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLeadId, rowByLeadId)) {
-        synced++;
+      materialization = materializeLeadsViewScheduledRow_(
+        leadMainSheet,
+        row,
+        leadsSheet,
+        manualByLeadId,
+        rowNumbersByLeadId,
+        rowByLeadId
+      );
+    } catch (err) {
+      materialization = {
+        status: err && err.leadsViewFailureStatus
+          ? err.leadsViewFailureStatus
+          : LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE,
+        reason: 'materialization_exception',
+      };
+      Logger.log('syncLeadsViewCursorBatch stopped at source row ' + row + ' with ' + materialization.status + '.');
+    }
+
+    const canAdvanceCursor = materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.MATERIALIZED_SUCCESS
+      || materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.ALREADY_MATERIALIZED
+      || materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.EMPTY_SOURCE_ROW_SKIPPED
+      || materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.INVALID_SOURCE_ROW_REPORTED;
+
+    if (!canAdvanceCursor) {
+      failed++;
+      failureRow = row;
+      failureStatus = materialization.status || LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE;
+      if (failureStatus === LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE) {
+        retryableFailures++;
+      } else {
+        ambiguousFailures++;
       }
+      stopped = true;
+      reason = materialization.reason || 'materialization_failed';
+      break;
+    }
+
+    if (materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.ALREADY_MATERIALIZED) {
+      alreadyMaterialized++;
+    } else if (materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.EMPTY_SOURCE_ROW_SKIPPED) {
+      emptySourceRowCount++;
+    } else if (materialization.status === LEADS_VIEW_MATERIALIZATION_STATUS.INVALID_SOURCE_ROW_REPORTED) {
+      invalidSourceRowCount++;
+      if (firstInvalidSourceRow === null) firstInvalidSourceRow = row;
+    } else {
+      synced++;
+    }
+
+    nextCursor = row + 1 > lastRow ? DATA_START_ROW : row + 1;
+    try {
+      // Persist progress only after the source row has been reconciled and
+      // its Lead ID has been read back from the target row.
+      properties.setProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY, String(nextCursor));
     } catch (err) {
       failed++;
-      Logger.log('syncLeadsViewCursorBatch skipped LEADS_MAIN row ' + row + ': ' + err.message);
+      ambiguousFailures++;
+      failureRow = row;
+      failureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE;
+      stopped = true;
+      reason = 'cursor_persist_failed';
+      Logger.log('syncLeadsViewCursorBatch stopped at source row ' + row + ' because cursor persistence was ambiguous.');
+      break;
+    }
+
+    if (Date.now() - startedAt >= LEADS_VIEW_SCHEDULED_RUNTIME_BUDGET_MS && nextCursor !== DATA_START_ROW) {
+      stopped = true;
+      reason = 'runtime_budget';
+      break;
     }
   }
-
-  const nextCursor = endRow + 1 > lastRow ? DATA_START_ROW : endRow + 1;
-  properties.setProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY, String(nextCursor));
 
   const result = {
     startRow: startRow,
@@ -522,10 +617,212 @@ function syncLeadsViewCursorBatchUnlocked_(limit) {
     nextCursor: nextCursor,
     checked: checked,
     synced: synced,
+    already_materialized: alreadyMaterialized,
+    emptySourceRowCount: emptySourceRowCount,
+    invalidSourceRowCount: invalidSourceRowCount,
+    firstInvalidSourceRow: firstInvalidSourceRow,
+    empty_source_row_count: emptySourceRowCount,
+    invalid_source_row_count: invalidSourceRowCount,
+    first_invalid_source_row: firstInvalidSourceRow,
     failed: failed,
-    task_completed: nextCursor === DATA_START_ROW,
+    retryable_failures: retryableFailures,
+    ambiguous_failures: ambiguousFailures,
+    failure_row: failureRow || null,
+    failure_status: failureStatus || null,
+    status: failed
+      ? failureStatus || LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE
+      : stopped && reason !== 'runtime_budget'
+        ? LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE
+        : invalidSourceRowCount
+          ? LEADS_VIEW_MATERIALIZATION_STATUS.INVALID_SOURCE_ROW_REPORTED
+          : emptySourceRowCount
+            ? LEADS_VIEW_MATERIALIZATION_STATUS.EMPTY_SOURCE_ROW_SKIPPED
+            : LEADS_VIEW_MATERIALIZATION_STATUS.MATERIALIZED_SUCCESS,
+    stopped: stopped,
+    reason: reason || null,
+    batch_size: batchSize,
+    runtime_budget_ms: LEADS_VIEW_SCHEDULED_RUNTIME_BUDGET_MS,
+    elapsed_ms: Date.now() - startedAt,
+    task_completed: !stopped && nextCursor === DATA_START_ROW,
   };
-  Logger.log('syncLeadsViewCursorBatch batch_size=' + batchSize + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' synced=' + synced + ' failed=' + failed + ' nextCursor=' + nextCursor);
+  Logger.log('syncLeadsViewCursorBatch batch_size=' + batchSize + ' startRow=' + startRow + ' endRow=' + endRow + ' lastRow=' + lastRow + ' checked=' + checked + ' synced=' + synced + ' already_materialized=' + alreadyMaterialized + ' failed=' + failed + ' nextCursor=' + nextCursor + ' status=' + result.status);
+  return result;
+}
+
+function materializeLeadsViewScheduledRow_(leadMainSheet, row, leadsSheet, manualByLeadId, rowNumbersByLeadId, rowByLeadId) {
+  const lead = getRowObject_(leadMainSheet, row);
+  const sourceClassification = classifyLeadsViewSourceRow_(lead);
+  if (sourceClassification !== 'MATERIALIZABLE') {
+    return {
+      status: sourceClassification === 'EMPTY_SOURCE_ROW'
+        ? LEADS_VIEW_MATERIALIZATION_STATUS.EMPTY_SOURCE_ROW_SKIPPED
+        : LEADS_VIEW_MATERIALIZATION_STATUS.INVALID_SOURCE_ROW_REPORTED,
+      reason: sourceClassification === 'EMPTY_SOURCE_ROW'
+        ? 'empty_source_row'
+        : 'invalid_source_row_no_lead_id',
+    };
+  }
+
+  const leadId = String(lead.lead_id || '').trim();
+
+  const existingRows = rowNumbersByLeadId[leadId] || [];
+  if (existingRows.length > 1) {
+    return {
+      status: LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE,
+      reason: 'duplicate_materialized_lead_id',
+    };
+  }
+
+  const existed = existingRows.length === 1;
+  const candidateRowMap = Object.assign({}, rowByLeadId);
+  const targetRow = existed
+    ? existingRows[0]
+    : Math.max(leadsSheet.getLastRow() + 1, DATA_START_ROW);
+  if (existed) candidateRowMap[leadId] = targetRow;
+  const synced = syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLeadId, candidateRowMap);
+  if (!synced) {
+    return {
+      status: LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE,
+      reason: 'source_row_not_materialized',
+    };
+  }
+
+  const headerMap = getHeaderMap_(leadsSheet);
+  const materializedLeadId = headerMap.lead_id
+    ? String(leadsSheet.getRange(targetRow, headerMap.lead_id).getValue() || '').trim()
+    : '';
+  if (materializedLeadId !== leadId) {
+    return {
+      status: LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE,
+      reason: 'lead_id_readback_mismatch',
+    };
+  }
+
+  rowByLeadId[leadId] = targetRow;
+  rowNumbersByLeadId[leadId] = [targetRow];
+  return {
+    status: existed
+      ? LEADS_VIEW_MATERIALIZATION_STATUS.ALREADY_MATERIALIZED
+      : LEADS_VIEW_MATERIALIZATION_STATUS.MATERIALIZED_SUCCESS,
+    targetRow: targetRow,
+  };
+}
+
+function classifyLeadsViewSourceRow_(lead) {
+  const leadId = String(lead && lead.lead_id || '').trim();
+  if (leadId) return 'MATERIALIZABLE';
+
+  const materializationFields = [
+    'customer_name',
+    'full_name',
+    'name',
+    'phone',
+    'facebook_created_time',
+    'created_at',
+    'lead_status',
+    'preferred_call_day',
+    'preferred_call_time',
+    'sales_owner',
+  ];
+  const hasMaterializationData = materializationFields.some(field => {
+    const value = lead && lead[field];
+    return value !== null && value !== undefined && String(value).trim() !== '';
+  });
+  return hasMaterializationData ? 'INVALID_SOURCE_ROW_NO_LEAD_ID' : 'EMPTY_SOURCE_ROW';
+}
+
+function getLeadsViewMaterializationLagDiagnostic() {
+  const ss = SpreadsheetApp.getActive();
+  const leadMainSheet = ss.getSheetByName('LEADS_MAIN');
+  const leadsSheet = ss.getSheetByName('LEADS');
+  const properties = PropertiesService.getScriptProperties();
+  const rawCursor = properties.getProperty(LEADS_VIEW_SCHEDULED_CURSOR_KEY);
+  const cursor = rawCursor === null || rawCursor === '' ? null : Number(rawCursor);
+  const result = {
+    source_sheet: 'LEADS_MAIN',
+    materialized_sheet: 'LEADS',
+    source_range: null,
+    source_row_count: 0,
+    source_lead_id_count: 0,
+    materialized_lead_id_count: 0,
+    missing_lead_id_count: 0,
+    duplicate_lead_id_count: 0,
+    empty_source_row_count: 0,
+    invalid_source_row_count: 0,
+    first_invalid_source_row: null,
+    cursor: Number.isFinite(cursor) ? cursor : null,
+    lag_detected: false,
+    oldest_unresolved_source_row: null,
+  };
+
+  if (!leadMainSheet || !leadsSheet) {
+    result.lag_detected = true;
+    result.reason = 'missing_required_sheet';
+    return result;
+  }
+
+  const sourceLastRow = leadMainSheet.getLastRow();
+  result.source_range = 'LEADS_MAIN!rows ' + DATA_START_ROW + '-' + sourceLastRow;
+  if (sourceLastRow < DATA_START_ROW) return result;
+
+  const sourceHeaderMap = getHeaderMap_(leadMainSheet);
+  const materializedHeaderMap = getHeaderMap_(leadsSheet);
+  if (!sourceHeaderMap.lead_id || !materializedHeaderMap.lead_id) {
+    result.lag_detected = true;
+    result.reason = 'missing_lead_id_column';
+    return result;
+  }
+
+  const sourceLastColumn = leadMainSheet.getLastColumn();
+  const sourceHeaders = leadMainSheet.getRange(HEADER_ROW, 1, 1, sourceLastColumn).getValues()[0];
+  const sourceValues = leadMainSheet
+    .getRange(DATA_START_ROW, 1, sourceLastRow - DATA_START_ROW + 1, sourceLastColumn)
+    .getValues();
+  const materializedRowsByLeadId = getLeadsViewRowNumbersByLeadId_(leadsSheet);
+  const sourceRowsByLeadId = {};
+  sourceValues.forEach((rowValues, index) => {
+    const sourceRow = DATA_START_ROW + index;
+    const lead = sourceHeaders.reduce((object, header, headerIndex) => {
+      const name = normalizeHeaderName_(header);
+      if (name) object[name] = rowValues[headerIndex];
+      return object;
+    }, {});
+    const classification = classifyLeadsViewSourceRow_(lead);
+    if (classification === 'EMPTY_SOURCE_ROW') {
+      result.empty_source_row_count++;
+      return;
+    }
+    if (classification === 'INVALID_SOURCE_ROW_NO_LEAD_ID') {
+      result.invalid_source_row_count++;
+      if (result.first_invalid_source_row === null) result.first_invalid_source_row = sourceRow;
+      return;
+    }
+
+    const leadId = String(lead.lead_id || '').trim();
+    if (!sourceRowsByLeadId[leadId]) sourceRowsByLeadId[leadId] = [];
+    sourceRowsByLeadId[leadId].push(sourceRow);
+  });
+
+  const sourceLeadIds = Object.keys(sourceRowsByLeadId);
+  result.source_lead_id_count = sourceLeadIds.length;
+  result.source_row_count = sourceValues.length;
+  result.materialized_lead_id_count = Object.keys(materializedRowsByLeadId).length;
+  result.duplicate_lead_id_count = Object.keys(materializedRowsByLeadId)
+    .filter(leadId => materializedRowsByLeadId[leadId].length > 1)
+    .length;
+
+  sourceLeadIds.forEach(leadId => {
+    if (materializedRowsByLeadId[leadId]) return;
+    result.missing_lead_id_count++;
+    const sourceRow = sourceRowsByLeadId[leadId][0];
+    if (result.oldest_unresolved_source_row === null || sourceRow < result.oldest_unresolved_source_row) {
+      result.oldest_unresolved_source_row = sourceRow;
+    }
+  });
+
+  result.lag_detected = result.missing_lead_id_count > 0
+    || result.duplicate_lead_id_count > 0
+    || result.invalid_source_row_count > 0;
   return result;
 }
 
@@ -555,24 +852,102 @@ function syncLeadMainRowToLeadsView_(leadMainSheet, row, leadsSheet, manualByLea
   if (!leadId) return false;
 
   const rowByLeadId = optionalRowByLeadId || getLeadsViewRowMapByLeadId_(leadsSheet);
+  const candidateRowByLeadId = Object.assign({}, rowByLeadId);
   const isExistingLeadsRow = !!rowByLeadId[leadId];
-  const targetRow = getOrCreateLeadsViewRowByLeadId_(leadsSheet, leadId, rowByLeadId);
-  const manual = manualByLeadId[leadId] || {};
+  const targetRow = getOrCreateLeadsViewRowByLeadId_(leadsSheet, leadId, candidateRowByLeadId);
+  const manual = (manualByLeadId || {})[leadId] || {};
   const object = sanitizeLeadsViewSyncObject_(buildLeadsViewObject_(lead, manual));
   prepareLeadsViewRowForSync_(leadsSheet, targetRow);
-  setLeadsViewSyncObjectValues_(leadsSheet, targetRow, object, {
-    skipSalesNoteHistory: isExistingLeadsRow,
-  });
+
+  if (!isExistingLeadsRow) {
+    try {
+      writeLeadsViewLeadIdAndVerify_(leadsSheet, targetRow, leadId);
+    } catch (err) {
+      if (err && typeof err === 'object' && !err.leadsViewFailureStatus) {
+        err.leadsViewFailureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE;
+      }
+      throw err;
+    }
+
+    try {
+      setLeadsViewSyncObjectValues_(leadsSheet, targetRow, object, {
+        skipLeadId: true,
+      });
+    } catch (err) {
+      if (err && typeof err === 'object' && !err.leadsViewFailureStatus) {
+        err.leadsViewFailureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE;
+      }
+      throw err;
+    }
+  } else {
+    try {
+      setLeadsViewSyncObjectValues_(leadsSheet, targetRow, object, {
+        skipSalesNoteHistory: true,
+      });
+    } catch (err) {
+      if (err && typeof err === 'object' && !err.leadsViewFailureStatus) {
+        err.leadsViewFailureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE;
+      }
+      throw err;
+    }
+  }
+
+  try {
+    verifyLeadsViewLeadId_(leadsSheet, targetRow, leadId);
+  } catch (err) {
+    if (err && typeof err === 'object' && !err.leadsViewFailureStatus) {
+      err.leadsViewFailureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE;
+    }
+    throw err;
+  }
+
+  if (optionalRowByLeadId) optionalRowByLeadId[leadId] = targetRow;
   setupLeadsViewRowUi(targetRow, leadsSheet);
+  return true;
+}
+
+function writeLeadsViewLeadIdAndVerify_(sheet, row, leadId) {
+  const headerMap = getHeaderMap_(sheet);
+  if (!headerMap.lead_id) throw new Error('LEADS view Lead ID column is missing.');
+
+  try {
+    sheet.getRange(row, headerMap.lead_id).setValue(leadId);
+  } catch (err) {
+    if (err && typeof err === 'object') {
+      err.leadsViewFailureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.RETRYABLE_WRITE_FAILURE;
+    }
+    throw err;
+  }
+  SpreadsheetApp.flush();
+  try {
+    verifyLeadsViewLeadId_(sheet, row, leadId);
+  } catch (err) {
+    if (err && typeof err === 'object') {
+      err.leadsViewFailureStatus = LEADS_VIEW_MATERIALIZATION_STATUS.AMBIGUOUS_TARGET_FAILURE;
+    }
+    throw err;
+  }
+}
+
+function verifyLeadsViewLeadId_(sheet, row, expectedLeadId) {
+  const headerMap = getHeaderMap_(sheet);
+  const actualLeadId = headerMap.lead_id
+    ? String(sheet.getRange(row, headerMap.lead_id).getValue() || '').trim()
+    : '';
+  if (actualLeadId !== String(expectedLeadId || '').trim()) {
+    throw new Error('LEADS view Lead ID readback mismatch.');
+  }
   return true;
 }
 
 function setLeadsViewSyncObjectValues_(sheet, row, object, options) {
   const headerMap = getHeaderMap_(sheet);
   const skipSalesNoteHistory = options && options.skipSalesNoteHistory;
+  const skipLeadId = options && options.skipLeadId;
   Object.keys(object).forEach(header => {
     const normalizedHeader = normalizeHeaderName_(header);
     if (skipSalesNoteHistory && normalizedHeader === 'sales_note_history') return;
+    if (skipLeadId && normalizedHeader === 'lead_id') return;
     if (headerMap[normalizedHeader]) {
       sheet.getRange(row, headerMap[normalizedHeader]).setValue(object[header]);
     }
@@ -1098,7 +1473,7 @@ function buildLeadsViewObject_(lead, manual) {
     sales_note_history: manual.sales_note_history || '',
     follow_up_count: manual.follow_up_count || '',
     facebook_search_name: customerName,
-    open_detail: false,
+    open_detail: manual.open_detail || false,
   };
 }
 
@@ -3738,6 +4113,25 @@ function getLeadsViewRowMapByLeadId_(sheet) {
   values.forEach((row, index) => {
     const leadId = String(row[0] || '').trim();
     if (leadId && !data[leadId]) data[leadId] = DATA_START_ROW + index;
+  });
+
+  return data;
+}
+
+function getLeadsViewRowNumbersByLeadId_(sheet) {
+  const data = {};
+  if (!sheet || sheet.getLastRow() < DATA_START_ROW) return data;
+
+  const headerMap = getHeaderMap_(sheet);
+  const leadIdColumn = headerMap.lead_id;
+  if (!leadIdColumn) return data;
+
+  const values = sheet.getRange(DATA_START_ROW, leadIdColumn, sheet.getLastRow() - DATA_START_ROW + 1, 1).getValues();
+  values.forEach((row, index) => {
+    const leadId = String(row[0] || '').trim();
+    if (!leadId) return;
+    if (!data[leadId]) data[leadId] = [];
+    data[leadId].push(DATA_START_ROW + index);
   });
 
   return data;
