@@ -1884,6 +1884,8 @@ app.post("/repair/lead-details", requireSyncSecretMiddleware, handleLeadDetailsR
 app.post("/repair/deals-phone", requireSyncSecretMiddleware, handleDealsPhoneRepair);
 app.post("/webhook/line", handleLineWebhook);
 
+app.use("/api", require("./services/dashboardRouter").createDashboardRouter());
+
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
