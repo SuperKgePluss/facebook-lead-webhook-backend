@@ -148,6 +148,116 @@ test("Facebook event dates use Bangkok day boundaries and never fall back to Cre
     assert.equal(model.warnings.find(item => item.code === "facebook_event_date_unavailable").count, 1);
 });
 
+test("Lead Trend matches New Leads date semantics, fills inclusive days, and preserves the invariant", () => {
+    const model = buildDashboardReadModel({
+        filters: { dateFrom: "2026-06-02", dateTo: "2026-06-04" },
+        leads: [
+            baseLead({ lead_id: "FB-BEFORE", facebook_created_time: "2026-06-01T16:59:59Z" }),
+            baseLead({ lead_id: "FB-FROM", facebook_created_time: "2026-06-01T17:00:00Z" }),
+            baseLead({ lead_id: "FB-MISSING", facebook_created_time: "", created_at: "2026-06-03T10:00:00+07:00" }),
+            baseLead({ lead_id: "FB-INVALID", facebook_created_time: "not-a-date", created_at: "2026-06-03T10:00:00+07:00" }),
+            baseLead({
+                lead_id: "MANUAL-TO",
+                source: "Manual",
+                facebook_leadgen_id: "",
+                facebook_created_time: "",
+                created_at: "2026-06-04T16:59:59Z",
+            }),
+            baseLead({
+                lead_id: "MANUAL-AFTER",
+                source: "Manual",
+                facebook_leadgen_id: "",
+                facebook_created_time: "",
+                created_at: "2026-06-04T17:00:00Z",
+            }),
+        ],
+    });
+
+    assert.deepEqual(model.overview.leads.lead_trend, [
+        { date: "2026-06-02", new_leads: 1 },
+        { date: "2026-06-03", new_leads: 0 },
+        { date: "2026-06-04", new_leads: 1 },
+    ]);
+    assert.equal(model.overview.leads.incomplete_event_date_count, 2);
+    assert.equal(model.warnings.find(item => item.code === "facebook_event_date_unavailable").count, 2);
+    assert.equal(
+        model.overview.leads.lead_trend.reduce((total, point) => total + point.new_leads, 0),
+        model.overview.leads.new_in_period
+    );
+});
+
+test("Lead Trend respects owner, lead status, and source filters", () => {
+    const model = buildDashboardReadModel({
+        filters: {
+            dateFrom: "2026-06-01",
+            dateTo: "2026-06-02",
+            salesOwner: "Owner B",
+            leadStatus: "New",
+            source: "Manual",
+        },
+        leads: [
+            baseLead({ lead_id: "MATCH", source: "Manual", facebook_leadgen_id: "", sales_owner: "Owner B", created_at: "2026-06-01" }),
+            baseLead({ lead_id: "OWNER", source: "Manual", facebook_leadgen_id: "", sales_owner: "Owner A", created_at: "2026-06-01" }),
+            baseLead({ lead_id: "STATUS", source: "Manual", facebook_leadgen_id: "", sales_owner: "Owner B", lead_status: "Done", created_at: "2026-06-02" }),
+            baseLead({ lead_id: "SOURCE", source: "Facebook", sales_owner: "Owner B", created_at: "2026-06-02" }),
+        ],
+    });
+
+    assert.deepEqual(model.overview.leads.lead_trend, [
+        { date: "2026-06-01", new_leads: 1 },
+        { date: "2026-06-02", new_leads: 0 },
+    ]);
+    assert.equal(model.overview.leads.new_in_period, 1);
+});
+
+test("Facebook Leadgen ID alone selects Facebook Created Time for Lead Trend", () => {
+    const model = buildDashboardReadModel({
+        filters: { dateFrom: "2026-06-02", dateTo: "2026-06-02" },
+        leads: [baseLead({
+            lead_id: "FB-ID-ONLY",
+            source: "Referral",
+            facebook_leadgen_id: "FB-IDENTITY",
+            facebook_created_time: "2026-06-01T17:00:00Z",
+            created_at: "2026-06-01T10:00:00+07:00",
+        })],
+    });
+
+    assert.deepEqual(model.overview.leads.lead_trend, [{ date: "2026-06-02", new_leads: 1 }]);
+    assert.equal(model.overview.leads.new_in_period, 1);
+});
+
+test("unbounded Lead Trend fills days between observed events and sums to New Leads", () => {
+    const model = buildDashboardReadModel({
+        leads: [
+            baseLead({ lead_id: "EARLY", facebook_created_time: "2026-06-01" }),
+            baseLead({ lead_id: "LATE", facebook_created_time: "2026-06-03" }),
+        ],
+    });
+
+    assert.deepEqual(model.overview.leads.lead_trend, [
+        { date: "2026-06-01", new_leads: 1 },
+        { date: "2026-06-02", new_leads: 0 },
+        { date: "2026-06-03", new_leads: 1 },
+    ]);
+    assert.equal(model.overview.leads.lead_trend.reduce((total, point) => total + point.new_leads, 0), 2);
+});
+
+test("Lead Trend zero-fill advances correctly across year boundaries", () => {
+    const model = buildDashboardReadModel({
+        filters: { dateFrom: "2026-12-31", dateTo: "2027-01-02" },
+        leads: [
+            baseLead({ lead_id: "YEAR-END", facebook_created_time: "2026-12-31" }),
+            baseLead({ lead_id: "NEW-YEAR", facebook_created_time: "2027-01-02" }),
+        ],
+    });
+
+    assert.deepEqual(model.overview.leads.lead_trend, [
+        { date: "2026-12-31", new_leads: 1 },
+        { date: "2027-01-01", new_leads: 0 },
+        { date: "2027-01-02", new_leads: 1 },
+    ]);
+});
+
 test("manual leads use Created At for the selected period", () => {
     const model = buildDashboardReadModel({
         filters: { dateFrom: "2026-06-02", dateTo: "2026-06-02" },
@@ -497,6 +607,64 @@ test("installation status distribution and upcoming workload use Preferred Insta
         "2026-06-05": 1,
         "2026-06-10": 1,
     });
+    assert.deepEqual(model.overview.installations.upcoming_installations, [
+        { date: "2026-06-05", customer_name: "Alice Customer", sales_owner: "Owner A", status: "Pending" },
+        { date: "2026-06-10", customer_name: "Alice Customer", sales_owner: "Owner A", status: "Scheduled" },
+    ]);
+});
+
+test("upcoming installations use Preferred Install Date only and share count/list/date eligibility", () => {
+    const model = buildDashboardReadModel({
+        asOf: "2026-06-01",
+        // Historical overview dates must not hide future preferred install dates.
+        filters: { dateFrom: "2026-05-01", dateTo: "2026-06-01" },
+        leads: [baseLead()],
+        installations: [
+            baseInstallation({ install_id: "FUTURE", install_status: "Scheduled", preferred_install_date: "2026-06-05" }),
+            baseInstallation({ install_id: "TODAY", install_status: "Pending", preferred_install_date: "2026-06-01" }),
+            baseInstallation({ install_id: "INSTALLED", install_status: "Installed", preferred_install_date: "2026-06-03" }),
+            baseInstallation({ install_id: "CANCELLED", install_status: "Cancelled", preferred_install_date: "2026-06-04" }),
+            baseInstallation({ install_id: "PAST", install_status: "Pending", preferred_install_date: "2026-05-31" }),
+            baseInstallation({ install_id: "BLANK", install_status: "Pending", preferred_install_date: "", install_date: "2026-06-06" }),
+            baseInstallation({ install_id: "INVALID", install_status: "Scheduled", preferred_install_date: "not-a-date", install_date: "2026-06-07" }),
+            baseInstallation({ install_id: "NO-LEAD", lead_id: "MISSING-LEAD", install_status: "Pending", preferred_install_date: "2026-06-08" }),
+        ],
+    });
+    const installations = model.overview.installations;
+    const summedByDate = Object.values(installations.upcoming_scheduled_by_date).reduce((sum, count) => sum + count, 0);
+
+    assert.deepEqual(installations.upcoming_installations, [
+        { date: "2026-06-01", customer_name: "Alice Customer", sales_owner: "Owner A", status: "Pending" },
+        { date: "2026-06-05", customer_name: "Alice Customer", sales_owner: "Owner A", status: "Scheduled" },
+    ]);
+    assert.equal(installations.upcoming_scheduled_count, installations.upcoming_installations.length);
+    assert.equal(installations.upcoming_scheduled_count, summedByDate);
+    assert.deepEqual(installations.upcoming_scheduled_by_date, {
+        "2026-06-01": 1,
+        "2026-06-05": 1,
+    });
+    assert.equal(model.warnings.find(item => item.code === "installation_date_unavailable").count, 2);
+    assert.equal(model.warnings.find(item => item.code === "upcoming_installation_lead_join_missing").count, 1);
+});
+
+test("upcoming installation owner/source filters join through Lead ID internally", () => {
+    const model = buildDashboardReadModel({
+        asOf: "2026-06-01",
+        filters: { dateFrom: "2026-06-01", dateTo: "2026-06-01", salesOwner: "Owner B", source: "Manual" },
+        leads: [
+            baseLead({ lead_id: "LEAD-A", sales_owner: "Owner A", source: "Facebook" }),
+            baseLead({ lead_id: "LEAD-B", customer_name: "Synthetic Customer B", sales_owner: "Owner B", source: "Manual", facebook_leadgen_id: "" }),
+        ],
+        installations: [
+            baseInstallation({ install_id: "INSTALL-A", lead_id: "LEAD-A", preferred_install_date: "2026-06-02" }),
+            baseInstallation({ install_id: "INSTALL-B", lead_id: "LEAD-B", preferred_install_date: "2026-06-03" }),
+        ],
+    });
+
+    assert.deepEqual(model.overview.installations.upcoming_installations, [
+        { date: "2026-06-03", customer_name: "Synthetic Customer B", sales_owner: "Owner B", status: "Scheduled" },
+    ]);
+    assert.equal(model.overview.installations.upcoming_scheduled_count, 1);
 });
 
 test("installation date serials support the existing Sheets representation", () => {
@@ -561,9 +729,32 @@ test("privacy shaping emits only the approved dashboard fields", () => {
         timezone: "Asia/Bangkok",
         filters: {},
         overview: {
-            leads: { total: 1, new_in_period: 1, incomplete_event_date_count: 0, by_status: {}, by_source: {}, by_sales_owner: {} },
+            leads: {
+                total: 1,
+                new_in_period: 1,
+                lead_trend: [{ date: "2026-06-01", new_leads: 1, lead_id: "PRIVATE-LEAD" }],
+                incomplete_event_date_count: 0,
+                by_status: {},
+                by_source: {},
+                by_sales_owner: {},
+            },
             financial: { deal_value: 1, paid: 1, outstanding: 0, open_deals: 0, payment_status_counts: {}, deals_in_scope: 1 },
-            installations: { by_status: {}, upcoming_scheduled_count: 0, upcoming_scheduled_by_date: {} },
+            installations: {
+                by_status: {},
+                upcoming_scheduled_count: 1,
+                upcoming_scheduled_by_date: { "2026-06-02": 1 },
+                upcoming_installations: [{
+                    date: "2026-06-02",
+                    customer_name: "Synthetic Customer",
+                    sales_owner: "Synthetic Owner",
+                    status: "Scheduled",
+                    lead_id: "PRIVATE-LEAD",
+                    install_id: "PRIVATE-INSTALL",
+                    phone: "private-phone-marker",
+                    note: "private-note-marker",
+                    location_url: "https://private.invalid/location",
+                }],
+            },
         },
         recent_activity: [{
             customer_name: "Alice",
@@ -590,6 +781,16 @@ test("privacy shaping emits only the approved dashboard fields", () => {
         sales_owner: "Owner A",
         timestamp: "2026-06-01T00:00:00.000Z",
     });
+    assert.deepEqual(shaped.overview.leads.lead_trend, [{ date: "2026-06-01", new_leads: 1 }]);
+    assert.deepEqual(shaped.overview.installations.upcoming_installations, [{
+        date: "2026-06-02",
+        customer_name: "Synthetic Customer",
+        sales_owner: "Synthetic Owner",
+        status: "Scheduled",
+    }]);
+    for (const privateMarker of ["PRIVATE-LEAD", "PRIVATE-INSTALL", "private-phone-marker", "private-note-marker", "private.invalid/location"]) {
+        assert.equal(serialized.includes(privateMarker), false, privateMarker);
+    }
 });
 
 test("dashboard reader does not reference or invoke write helpers", async () => {

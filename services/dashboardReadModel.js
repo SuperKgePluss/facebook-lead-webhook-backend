@@ -220,6 +220,26 @@ function dateKeyInRange(dateKey, filters) {
     return true;
 }
 
+function nextDateKey(dateKey) {
+    const [year, month, day] = dateKey.split("-").map(Number);
+    return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+}
+
+function buildLeadTrend(dailyCounts, filters) {
+    const observedDates = Object.keys(dailyCounts).sort();
+    const startDate = filters.dateFrom || observedDates[0] || null;
+    const endDate = filters.dateTo || observedDates[observedDates.length - 1] || null;
+    if (!startDate || !endDate || startDate > endDate) return [];
+
+    const trend = [];
+    for (let date = startDate; date <= endDate;) {
+        trend.push({ date, new_leads: dailyCounts[date] || 0 });
+        if (date === endDate) break;
+        date = nextDateKey(date);
+    }
+    return trend;
+}
+
 function increment(map, key, amount = 1) {
     map[key] = (map[key] || 0) + amount;
 }
@@ -315,7 +335,7 @@ function matchesDownstreamRelationship(record, leadById, filters, warnings) {
 }
 
 function getInstallationDate(installation) {
-    const parsed = parseDateValue(installation?.preferred_install_date ?? installation?.install_date);
+    const parsed = parseDateValue(installation?.preferred_install_date);
     return parsed.date
         ? { ...parsed, dateKey: formatBangkokDateKey(parsed.date) }
         : { date: null, dateKey: "", kind: parsed.kind };
@@ -356,6 +376,7 @@ function buildLeadMetrics(leads, filters, warnings) {
     const statusCounts = statusMap(KNOWN_LEAD_STATUSES);
     const sourceCounts = {};
     const ownerCounts = {};
+    const leadTrendCounts = {};
     let newInPeriod = 0;
     let incompleteEventDateCount = 0;
     let total = 0;
@@ -376,12 +397,16 @@ function buildLeadMetrics(leads, filters, warnings) {
             continue;
         }
 
-        if (dateKeyInRange(eventDate.dateKey, filters)) newInPeriod++;
+        if (dateKeyInRange(eventDate.dateKey, filters)) {
+            newInPeriod++;
+            increment(leadTrendCounts, eventDate.dateKey);
+        }
     }
 
     return {
         total,
         new_in_period: newInPeriod,
+        lead_trend: buildLeadTrend(leadTrendCounts, filters),
         incomplete_event_date_count: incompleteEventDateCount,
         by_status: statusCounts,
         by_source: sourceCounts,
@@ -482,8 +507,8 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
     const upcomingByDate = {};
     const asOfDate = parseDateValue(asOf).date || new Date();
     const asOfKey = formatBangkokDateKey(asOfDate);
-    const lowerBound = filters.dateFrom && filters.dateFrom > asOfKey ? filters.dateFrom : asOfKey;
     let upcomingScheduled = 0;
+    const upcomingInstallations = [];
 
     for (const installation of dedupeById(installations, "install_id", warnings, "duplicate_installation_id")) {
         if (!matchesDownstreamRelationship(installation, leadById, filters, warnings)) continue;
@@ -492,20 +517,39 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
         increment(statusCounts, status);
         if (!UPCOMING_INSTALLATION_STATUSES.has(status)) continue;
 
-        const installationDate = getInstallationDate(installation);
-        if (!installationDate.dateKey || installationDate.dateKey < lowerBound || (filters.dateTo && installationDate.dateKey > filters.dateTo)) {
-            if (!installationDate.dateKey) warnings.add("installation_date_unavailable");
+        const lead = leadById.get(text(installation.lead_id));
+        if (!lead) {
+            warnings.add(
+                "upcoming_installation_lead_join_missing",
+                "An upcoming installation could not be matched to a lead."
+            );
             continue;
         }
 
+        const installationDate = getInstallationDate(installation);
+        if (!installationDate.dateKey) {
+            warnings.add("installation_date_unavailable");
+            continue;
+        }
+        if (installationDate.dateKey < asOfKey) continue;
+
         upcomingScheduled++;
         increment(upcomingByDate, installationDate.dateKey);
+        upcomingInstallations.push({
+            date: installationDate.dateKey,
+            customer_name: text(lead.customer_name),
+            sales_owner: text(lead.sales_owner),
+            status,
+        });
     }
+
+    upcomingInstallations.sort((a, b) => a.date.localeCompare(b.date));
 
     return {
         by_status: statusCounts,
         upcoming_scheduled_count: upcomingScheduled,
         upcoming_scheduled_by_date: upcomingByDate,
+        upcoming_installations: upcomingInstallations,
     };
 }
 

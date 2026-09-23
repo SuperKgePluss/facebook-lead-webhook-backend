@@ -41,6 +41,14 @@ function shapeDashboardResponse(model) {
             leads: {
                 total: Number(leads.total) || 0,
                 new_in_period: Number(leads.new_in_period) || 0,
+                lead_trend: Array.isArray(leads.lead_trend)
+                    ? leads.lead_trend.map(point => ({
+                        date: String(point?.date || ""),
+                        new_leads: Number.isFinite(Number(point?.new_leads))
+                            ? Math.max(0, Math.floor(Number(point.new_leads)))
+                            : 0,
+                    }))
+                    : [],
                 incomplete_event_date_count: Number(leads.incomplete_event_date_count) || 0,
                 by_status: copyMap(leads.by_status),
                 by_source: copyMap(leads.by_source),
@@ -58,6 +66,14 @@ function shapeDashboardResponse(model) {
                 by_status: copyMap(installations.by_status),
                 upcoming_scheduled_count: Number(installations.upcoming_scheduled_count) || 0,
                 upcoming_scheduled_by_date: copyMap(installations.upcoming_scheduled_by_date),
+                upcoming_installations: Array.isArray(installations.upcoming_installations)
+                    ? installations.upcoming_installations.map(installation => ({
+                        date: String(installation?.date || ""),
+                        customer_name: String(installation?.customer_name || ""),
+                        sales_owner: String(installation?.sales_owner || ""),
+                        status: String(installation?.status || ""),
+                    }))
+                    : [],
             },
         },
         recent_activity: Array.isArray(model?.recent_activity)
