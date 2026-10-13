@@ -15,10 +15,12 @@ function fixture({ complete = true } = {}) {
     return {
         LEADS: [
             ["Lead ID", "Facebook Created Time", "Customer Name", "Phone", "Lead Status", "Sales Owner"],
+            ["รหัสลูกค้า", "เวลาสร้างลีดจาก Facebook", "ชื่อลูกค้า", "เบอร์โทร", "สถานะลูกค้า", "ผู้รับผิดชอบ"],
             ["L-1", "2026-10-01", "Synthetic One", "0812345678", "New", "Owner A"],
         ],
         LEADS_MAIN: [
             ["Lead ID", "Customer Name", "Phone", "Lead Status", "Sales Owner", "Source", "Customer Type"],
+            ["รหัสลูกค้า", "ชื่อลูกค้า", "เบอร์โทร", "สถานะลูกค้า", "ผู้ดูแล", "แหล่งที่มา", "ประเภทลูกค้า"],
             ["L-1", "Synthetic One", "0812345678", "New", "Owner A", "Facebook", "VIP"],
             ["L-2", "Synthetic Two", "0898765432", "Ongoing", "Owner B", "Referral", "B2B"],
         ],
@@ -72,6 +74,8 @@ test("audio sheet plan is bounded to CRM4 LEADS rows and remains dry-run only", 
     assert.equal(plan.writesEnabled, false);
     assert.equal(plan.audioIndexComplete, true);
     assert.equal(plan.rowUpdates.length, 1);
+    assert.equal(plan.rowUpdates[0].rowNumber, 3);
+    assert.equal(plan.headerPlan.columns[0].firstDataRow, 3);
     assert.deepEqual(plan.rowUpdates[0].cells.map(cell => cell.value), [1, "2026-10-01T03:00:00.000Z", "https://drive.google.com/file/d/drive_file_00001/view"]);
     assert.equal(plan.headerPlan.columns.some(column => column.key === "sales_follow_up_status"), true);
 });

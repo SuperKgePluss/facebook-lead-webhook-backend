@@ -62,18 +62,20 @@ function buildCrm4AudioSheetPlan(sheets, options = {}) {
         filenameTimestampVerified: options.filenameTimestampVerified === true,
         filenameTimeZone: options.filenameTimeZone,
     });
-    const headerPlan = buildAdditiveSchemaPlan([leadsGrid[leadsHeaderRow]], leadsHeaderRow + 2);
-    const outputColumns = {};
-    for (const column of CRM4_ADD_ON_COLUMNS) {
-        const matching = (leadsGrid[leadsHeaderRow] || []).findIndex(header => (column.aliases || [column.header]).map(normalizeHeader).includes(normalizeHeader(header)));
-        outputColumns[column.key] = matching >= 0 ? matching + 1 : headerPlan.columns.find(item => item.key === column.key)?.columnIndex ?? null;
-    }
     const leadRows = new Map();
     for (let rowIndex = leadsHeaderRow + 1; rowIndex < leadsGrid.length; rowIndex++) {
         const row = leadsGrid[rowIndex];
         if (!Array.isArray(row)) continue;
         const leadId = String(row[leadsHeaderMap.lead_id] ?? "").trim();
         if (leadId) leadRows.set(leadId, rowIndex + 1);
+    }
+    const primaryDataRows = leads.map(lead => leadRows.get(lead.lead_id)).filter(Number.isSafeInteger);
+    const firstDataRow = primaryDataRows.length ? Math.min(...primaryDataRows) : leadsHeaderRow + 2;
+    const headerPlan = buildAdditiveSchemaPlan([leadsGrid[leadsHeaderRow]], firstDataRow);
+    const outputColumns = {};
+    for (const column of CRM4_ADD_ON_COLUMNS) {
+        const matching = (leadsGrid[leadsHeaderRow] || []).findIndex(header => (column.aliases || [column.header]).map(normalizeHeader).includes(normalizeHeader(header)));
+        outputColumns[column.key] = matching >= 0 ? matching + 1 : headerPlan.columns.find(item => item.key === column.key)?.columnIndex ?? null;
     }
     const rowUpdates = [];
     if (complete) {
