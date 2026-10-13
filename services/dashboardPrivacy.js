@@ -1,7 +1,7 @@
 "use strict";
 
+// Phone and full Sales Note history are exposed only through the explicit, authenticated operational_leads projection.
 const FORBIDDEN_DASHBOARD_FIELDS = Object.freeze([
-    "phone",
     "raw_phone",
     "lead_id",
     "facebook_leadgen_id",
@@ -16,6 +16,11 @@ const FORBIDDEN_DASHBOARD_FIELDS = Object.freeze([
     "sync_secret",
     "diagnostic_secret",
 ]);
+
+
+function safeCount(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
 
 function copyMap(value) {
     return value && typeof value === "object" ? { ...value } : {};
@@ -36,6 +41,8 @@ function shapeDashboardResponse(model) {
             salesOwner: model?.filters?.salesOwner || null,
             leadStatus: model?.filters?.leadStatus || null,
             source: model?.filters?.source || null,
+            customerTypeCode: model?.filters?.customerTypeCode || null,
+            salesFollowUpStatus: model?.filters?.salesFollowUpStatus || null,
         },
         overview: {
             leads: {
@@ -53,6 +60,8 @@ function shapeDashboardResponse(model) {
                 by_status: copyMap(leads.by_status),
                 by_source: copyMap(leads.by_source),
                 by_sales_owner: copyMap(leads.by_sales_owner),
+                by_customer_type_code: copyMap(leads.by_customer_type_code),
+                by_sales_follow_up_status: copyMap(leads.by_sales_follow_up_status),
             },
             financial: {
                 deal_value: Number(financial.deal_value) || 0,
@@ -76,6 +85,35 @@ function shapeDashboardResponse(model) {
                     : [],
             },
         },
+        operational_leads: {
+            items: Array.isArray(model?.operational_leads?.items)
+                ? model.operational_leads.items.map(lead => ({
+                    customer_name: String(lead?.customer_name || ""),
+                    phone: String(lead?.phone || ""),
+                    additional_phone: String(lead?.additional_phone || ""),
+                    lead_status: lead?.lead_status || null,
+                    preferred_call_day: String(lead?.preferred_call_day || ""),
+                    preferred_call_time: String(lead?.preferred_call_time || ""),
+                    customer_type_code: lead?.customer_type_code || null,
+                    sales_follow_up_status: lead?.sales_follow_up_status || null,
+                    sales_owner: String(lead?.sales_owner || ""),
+                    latest_follow_up_at: lead?.latest_follow_up_at || null,
+                    last_successful_contact_at: lead?.last_successful_contact_at || null,
+                    sales_note_history: Array.isArray(lead?.sales_note_history)
+                        ? lead.sales_note_history.map(note => ({ at: note?.at || null, text: String(note?.text || "") }))
+                        : [],
+                    audio_follow_up_count: lead?.audio_follow_up_count === null ? null : (Number.isInteger(lead?.audio_follow_up_count) && lead.audio_follow_up_count >= 0 ? lead.audio_follow_up_count : null),
+                    audio_recording_count: lead?.audio_recording_count === null ? null : (Number.isInteger(lead?.audio_recording_count) && lead.audio_recording_count >= 0 ? lead.audio_recording_count : null),
+                    latest_recording_at: typeof lead?.latest_recording_at === "string" && !Number.isNaN(Date.parse(lead.latest_recording_at)) ? new Date(lead.latest_recording_at).toISOString() : null,
+                    latest_recording_link: typeof lead?.latest_recording_link === "string" && /^https:\/\/drive\.google\.com\/file\/d\/[A-Za-z0-9_-]{10,}\/view$/.test(lead.latest_recording_link) ? lead.latest_recording_link : null,
+                    wants_installation: typeof lead?.wants_installation === "boolean" ? lead.wants_installation : null,
+                }))
+                : [],
+            total: Number(model?.operational_leads?.total) || 0,
+            offset: Number.isSafeInteger(model?.operational_leads?.offset) && model.operational_leads.offset >= 0 ? model.operational_leads.offset : 0,
+            limit: Number.isSafeInteger(model?.operational_leads?.limit) && model.operational_leads.limit > 0 ? model.operational_leads.limit : 100,
+            has_more: Boolean(model?.operational_leads?.has_more),
+        },
         recent_activity: Array.isArray(model?.recent_activity)
             ? model.recent_activity.map(activity => ({
                 customer_name: String(activity?.customer_name || ""),
@@ -84,6 +122,21 @@ function shapeDashboardResponse(model) {
                 timestamp: String(activity?.timestamp || ""),
             }))
             : [],
+        audio_index: {
+            complete: Boolean(model?.audio_index?.complete),
+            counts: {
+                matched: safeCount(model?.audio_index?.stats?.matched),
+                missing_phone: safeCount(model?.audio_index?.stats?.missingPhone),
+                malformed: safeCount(model?.audio_index?.stats?.malformed),
+                ambiguous: safeCount(model?.audio_index?.stats?.ambiguous),
+                unmatched: safeCount(model?.audio_index?.stats?.unmatched),
+                duplicate_files: safeCount(model?.audio_index?.stats?.duplicateFiles),
+                unverified_timestamp: safeCount(model?.audio_index?.stats?.unverifiedTimestamp),
+            },
+        },
+        crm4_reconciliation: {
+            main_only_lead_count: safeCount(model?.crm4_reconciliation?.main_only_lead_count),
+        },
         warnings: Array.isArray(model?.warnings)
             ? model.warnings.map(warning => ({
                 code: String(warning?.code || ""),

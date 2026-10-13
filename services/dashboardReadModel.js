@@ -4,6 +4,15 @@ const TIMEZONE = "Asia/Bangkok";
 const SHEETS_EPOCH_MS = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const MAX_RECENT_ACTIVITY = 20;
+const MAX_OPERATIONAL_LEADS = 100;
+
+const CUSTOMER_TYPE_CODES = ["B2C", "B2B", "ETC"];
+const SALES_FOLLOW_UP_STATUSES = [
+    "รอติดต่อ", "โทรติดต่อได้", "โทรติดต่อไม่ได้", "ส่งรายละเอียดทางข้อความ",
+    "ส่งรายละเอียดทาง FB / Line", "ไม่สนใจไม่ต้องติดตาม", "อาจจะสนใจในอนาคต", "กำลังพิจารณา",
+    "นัดสำรวจหน้างาน", "นัดหมายวันติดตั้งแล้ว", "ติดตั้งแล้วจ่ายครบ", "ติดตั้งแล้วทดลองใช้ 30 วัน",
+    "ติดตั้งแล้วทดลองใช้ 60 วัน", "ยกเลิกติดตั้งและคืนเงิน", "ยกเลิกติดตั้งและไม่คืนเงิน",
+];
 
 const KNOWN_LEAD_STATUSES = ["New", "Installed", "Cancelled", "Ongoing", "Done"];
 const KNOWN_PAYMENT_STATUSES = ["Unpaid", "Paid", "Cancelled"];
@@ -205,6 +214,8 @@ function normalizeFilters(input = {}, warnings = new WarningCollector()) {
         salesOwner: hasValue(input.salesOwner) ? text(input.salesOwner) : null,
         leadStatus: hasValue(input.leadStatus) ? text(input.leadStatus) : null,
         source: hasValue(input.source) ? text(input.source) : null,
+        customerTypeCode: hasValue(input.customerTypeCode) ? text(input.customerTypeCode) : null,
+        salesFollowUpStatus: hasValue(input.salesFollowUpStatus) ? text(input.salesFollowUpStatus) : null,
     };
 }
 
@@ -316,6 +327,8 @@ function matchesLeadFilters(lead, filters) {
     if (filters.salesOwner && lower(lead.sales_owner) !== lower(filters.salesOwner)) return false;
     if (filters.source && lower(lead.source) !== lower(filters.source)) return false;
     if (filters.leadStatus && lower(lead.lead_status) !== lower(filters.leadStatus)) return false;
+    if (filters.customerTypeCode && lower(lead.customer_type_code) !== lower(filters.customerTypeCode)) return false;
+    if (filters.salesFollowUpStatus && text(lead.sales_follow_up_status) !== filters.salesFollowUpStatus) return false;
     return true;
 }
 
@@ -376,6 +389,8 @@ function buildLeadMetrics(leads, filters, warnings) {
     const statusCounts = statusMap(KNOWN_LEAD_STATUSES);
     const sourceCounts = {};
     const ownerCounts = {};
+    const customerTypeCounts = Object.fromEntries([...CUSTOMER_TYPE_CODES, "Unknown"].map(value => [value, 0]));
+    const salesFollowUpStatusCounts = Object.fromEntries([...SALES_FOLLOW_UP_STATUSES, "Unknown"].map(value => [value, 0]));
     const leadTrendCounts = {};
     let newInPeriod = 0;
     let incompleteEventDateCount = 0;
@@ -389,6 +404,8 @@ function buildLeadMetrics(leads, filters, warnings) {
         increment(statusCounts, status);
         increment(sourceCounts, text(lead.source) || "Unknown");
         increment(ownerCounts, text(lead.sales_owner) || "Unassigned");
+        increment(customerTypeCounts, CUSTOMER_TYPE_CODES.includes(text(lead.customer_type_code)) ? text(lead.customer_type_code) : "Unknown");
+        increment(salesFollowUpStatusCounts, SALES_FOLLOW_UP_STATUSES.includes(text(lead.sales_follow_up_status)) ? text(lead.sales_follow_up_status) : "Unknown");
 
         const eventDate = getLeadEventDate(lead);
         if (!eventDate.date) {
@@ -411,6 +428,8 @@ function buildLeadMetrics(leads, filters, warnings) {
         by_status: statusCounts,
         by_source: sourceCounts,
         by_sales_owner: ownerCounts,
+        by_customer_type_code: customerTypeCounts,
+        by_sales_follow_up_status: salesFollowUpStatusCounts,
     };
 }
 
@@ -555,6 +574,7 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
 
 function buildRecentActivity(activities, leadById, filters, warnings) {
     const items = [];
+    const hiddenClientActivityTypes = new Set(["facebook repeat submission", "legacy follow-up"]);
 
     for (const activity of Array.isArray(activities) ? activities : []) {
         const activityDate = getActivityDate(activity);
@@ -565,13 +585,15 @@ function buildRecentActivity(activities, leadById, filters, warnings) {
         if (!dateKeyInRange(activityDate.dateKey, filters)) continue;
 
         const lead = leadById.get(text(activity.lead_id));
+        const activityType = text(activity.action_type || activity.activity_type);
+        if (hiddenClientActivityTypes.has(activityType.toLowerCase())) continue;
         if (filters.salesOwner || filters.source) {
             if (!lead || !matchesDownstreamRelationship(activity, leadById, filters, warnings)) continue;
         }
 
         items.push({
             customer_name: text(lead?.customer_name),
-            activity_type: text(activity.action_type || activity.activity_type),
+            activity_type: activityType,
             sales_owner: text(lead?.sales_owner || activity.sales_owner || activity.created_by),
             timestamp: formatTimestamp(activityDate.date),
             _sort_id: text(activity.activity_id || activity.id),
@@ -591,12 +613,174 @@ function buildRecentActivity(activities, leadById, filters, warnings) {
     }));
 }
 
+function driveFileIdFromAudioUrl(value) {
+    const raw = text(value);
+    const match = raw.match(/(?:\/d\/|[?&]id=)([A-Za-z0-9_-]{10,})/);
+    return match ? match[1] : "";
+}
+
+function buildAudioFollowUpCountIndex(activities, warnings) {
+    const fileOwners = new Map();
+    const leadFiles = new Map();
+    let unresolved = 0;
+    for (const activity of Array.isArray(activities) ? activities : []) {
+        const action = lower(activity?.action_type || activity?.activity_type);
+        const isConflict = action === "audio mapping conflict";
+        if (!isConflict && !["audio sync", "follow-up"].includes(action)) continue;
+        const leadId = text(activity?.lead_id);
+        const fileName = text(activity?.audio_file_name);
+        const fileId = driveFileIdFromAudioUrl(activity?.audio_url);
+        if (!leadId || !fileId || !/\.(?:mp3|m4a|wav|ogg|mp4|aac)$/i.test(fileName)) {
+            unresolved++;
+            continue;
+        }
+        if (!fileOwners.has(fileId)) fileOwners.set(fileId, new Set());
+        fileOwners.get(fileId).add(leadId);
+        if (!isConflict) {
+            if (!leadFiles.has(leadId)) leadFiles.set(leadId, new Set());
+            leadFiles.get(leadId).add(fileId);
+        }
+    }
+    if (unresolved) warnings.add("audio_follow_up_identity_unavailable", "Some Audio Sync rows lacked a stable Lead ID, supported recording filename, or Drive file ID.", unresolved);
+    let ambiguous = 0;
+    for (const owners of fileOwners.values()) if (owners.size > 1) ambiguous++;
+    if (ambiguous) warnings.add("audio_follow_up_cross_lead_ambiguous", "Physical audio files associated with multiple Leads were excluded.", ambiguous);
+    const counts = {};
+    for (const [leadId, fileIds] of leadFiles) {
+        counts[leadId] = [...fileIds].filter(fileId => fileOwners.get(fileId)?.size === 1).length;
+    }
+    return counts;
+}
+
+function buildOperationalLeads(leads, activities, filters, warnings, audioCountAvailable = true, pagination = {}, deals = []) {
+    const audioCounts = buildAudioFollowUpCountIndex(activities, warnings);
+    const noteEvents = new Map();
+    const latestFollowUp = new Map();
+    for (const activity of Array.isArray(activities) ? activities : []) {
+        const leadId = text(activity?.lead_id);
+        if (!leadId) continue;
+        const action = lower(activity?.action_type || activity?.activity_type);
+        const parsed = getActivityDate(activity);
+        if ((action === "sales note" || action === "sales note save") && hasValue(activity?.note)) {
+            if (!noteEvents.has(leadId)) noteEvents.set(leadId, []);
+            noteEvents.get(leadId).push({ at: parsed.date ? formatTimestamp(parsed.date) : null, text: text(activity.note) });
+        }
+        if (action === "follow-up" && parsed.date) {
+            const previous = latestFollowUp.get(leadId);
+            if (!previous || parsed.date.getTime() > previous.getTime()) latestFollowUp.set(leadId, parsed.date);
+        }
+    }
+
+    const rows = [];
+    const installationInterestByLeadId = new Map();
+    for (const deal of Array.isArray(deals) ? deals : []) {
+        const leadId = text(deal?.lead_id);
+        if (!leadId) continue;
+        const raw = deal?.open_installation;
+        const explicit = typeof raw === "boolean"
+            ? raw
+            : ["true", "false"].includes(text(raw).toLowerCase())
+                ? text(raw).toLowerCase() === "true"
+                : null;
+        if (explicit === null) continue;
+        const values = installationInterestByLeadId.get(leadId) || new Set();
+        values.add(explicit);
+        installationInterestByLeadId.set(leadId, values);
+    }
+    for (const lead of leads) {
+        const leadId = text(lead?.lead_id);
+        if (!leadId || !matchesLeadFilters(lead, filters)) continue;
+        const eventDate = getLeadEventDate(lead);
+        if (hasDateFilter(filters) && (!eventDate.date || !dateKeyInRange(eventDate.dateKey, filters))) continue;
+        const sourceHistory = parseSalesNoteHistory(lead?.sales_note_history);
+        const history = noteEvents.get(leadId) || [];
+        if (!history.length) history.push(...sourceHistory);
+        else sourceHistory.forEach(item => { if (!history.some(existing => existing.text === item.text)) history.push(item); });
+        history.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
+        const explicitLatest = parseDateValue(lead?.latest_follow_up_at).date;
+        const successful = parseDateValue(lead?.last_successful_contact_at).date;
+        const activityLatest = latestFollowUp.get(leadId) || null;
+        const latest = explicitLatest && activityLatest
+            ? (explicitLatest.getTime() >= activityLatest.getTime() ? explicitLatest : activityLatest)
+            : explicitLatest || activityLatest;
+        rows.push({
+            customer_name: text(lead?.customer_name || lead?.full_name || lead?.name),
+            phone: text(lead?.phone),
+            additional_phone: text(lead?.additional_phone),
+            lead_status: KNOWN_LEAD_STATUSES.includes(text(lead?.lead_status)) ? text(lead.lead_status) : null,
+            preferred_call_day: text(lead?.preferred_call_day),
+            preferred_call_time: text(lead?.preferred_call_time),
+            customer_type_code: CUSTOMER_TYPE_CODES.includes(text(lead?.customer_type_code)) ? text(lead.customer_type_code) : null,
+            sales_follow_up_status: SALES_FOLLOW_UP_STATUSES.includes(text(lead?.sales_follow_up_status)) ? text(lead.sales_follow_up_status) : null,
+            sales_owner: text(lead?.sales_owner),
+            latest_follow_up_at: latest ? formatTimestamp(latest) : null,
+            last_successful_contact_at: successful ? formatTimestamp(successful) : null,
+            sales_note_history: history,
+            wants_installation: installationInterestByLeadId.has(leadId)
+                ? (installationInterestByLeadId.get(leadId).has(true) ? true : false)
+                : null,
+            audio_follow_up_count: audioCountAvailable ? (audioCounts[leadId] || 0) : null,
+            audio_recording_count: Number.isInteger(lead?.audio_recording_count) && lead.audio_recording_count >= 0 ? lead.audio_recording_count : null,
+            latest_recording_at: text(lead?.latest_recording_at) || null,
+            latest_recording_link: text(lead?.latest_recording_link) || null,
+            _sort: eventDate.date ? eventDate.date.getTime() : 0,
+            _tie: leadId,
+        });
+    }
+    rows.sort((a, b) => b._sort - a._sort || a.customer_name.localeCompare(b.customer_name) || a._tie.localeCompare(b._tie));
+    const offset = Number.isSafeInteger(pagination.offset) && pagination.offset >= 0 ? pagination.offset : 0;
+    const requestedLimit = Number.isSafeInteger(pagination.limit) && pagination.limit > 0 ? pagination.limit : MAX_OPERATIONAL_LEADS;
+    const limit = Math.min(requestedLimit, MAX_OPERATIONAL_LEADS);
+    const items = rows.slice(offset, offset + limit).map(({ _sort, _tie, ...row }) => row);
+    return { items, total: rows.length, offset, limit, has_more: offset + items.length < rows.length };
+}
+
+function mergeLeadViewFields(leads, leadsView, warnings) {
+    const viewById = new Map();
+    for (const view of Array.isArray(leadsView) ? leadsView : []) {
+        const leadId = text(view?.lead_id);
+        if (!leadId) continue;
+        if (viewById.has(leadId)) {
+            warnings.add("duplicate_leads_view_id");
+            continue;
+        }
+        viewById.set(leadId, view);
+    }
+    return (Array.isArray(leads) ? leads : []).map(lead => {
+        const view = viewById.get(text(lead?.lead_id));
+        if (!view) return lead;
+        const result = { ...lead };
+        for (const field of ["customer_type_code", "sales_follow_up_status", "last_successful_contact_at"]) {
+            if (!Object.prototype.hasOwnProperty.call(result, field) && Object.prototype.hasOwnProperty.call(view, field)) {
+                result[field] = view[field];
+            }
+        }
+        if (!hasValue(result.sales_note_history) && hasValue(view.sales_note_history)) result.sales_note_history = view.sales_note_history;
+        if (!hasValue(result.sales_owner) && hasValue(view.sales_owner)) result.sales_owner = view.sales_owner;
+        return result;
+    });
+}
+
+function parseSalesNoteHistory(value) {
+    const raw = text(value);
+    if (!raw) return [];
+    const entries = raw.split(/\n\s*\n(?=\[\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\])/);
+    return entries.map(entry => {
+        const match = entry.match(/^\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\]\s*([\s\S]*)$/);
+        if (!match) return { at: null, text: entry.trim() };
+        const parsed = parseDateValue(match[1]);
+        return { at: parsed.date ? formatTimestamp(parsed.date) : null, text: match[2].trim() };
+    }).filter(item => item.text);
+}
+
 function buildDashboardReadModel({
     leads = [],
     deals = [],
     installations = [],
     activities = [],
+    leads_view: leadsView = [],
     filters: filterInput = {},
+    operational_lead_pagination: operationalLeadPagination = {},
     asOf = new Date(),
     source_warnings: sourceWarnings = [],
 } = {}) {
@@ -611,7 +795,9 @@ function buildDashboardReadModel({
     }
 
     const filters = normalizeFilters(filterInput, warnings);
-    const uniqueLeads = dedupeById(leads, "lead_id", warnings, "duplicate_lead_id");
+    const audioCountAvailable = !(Array.isArray(sourceWarnings) && sourceWarnings.some(warning => text(warning?.code) === 'dashboard_audio_count_unavailable'));
+    const mergedLeads = mergeLeadViewFields(leads, leadsView, warnings);
+    const uniqueLeads = dedupeById(mergedLeads, "lead_id", warnings, "duplicate_lead_id");
     const leadById = new Map(
         uniqueLeads
             .map(lead => [text(lead.lead_id), lead])
@@ -626,6 +812,7 @@ function buildDashboardReadModel({
             financial: buildFinancialMetrics(deals, leadById, filters, warnings),
             installations: buildInstallationMetrics(installations, leadById, filters, warnings, asOf),
         },
+        operational_leads: buildOperationalLeads(uniqueLeads.filter(lead => text(lead.lead_id)), activities, filters, warnings, audioCountAvailable, operationalLeadPagination, deals),
         recent_activity: buildRecentActivity(activities, leadById, filters, warnings),
         warnings: warnings.toArray(),
     };
@@ -634,6 +821,13 @@ function buildDashboardReadModel({
 module.exports = {
     TIMEZONE,
     MAX_RECENT_ACTIVITY,
+    MAX_OPERATIONAL_LEADS,
+    CUSTOMER_TYPE_CODES,
+    SALES_FOLLOW_UP_STATUSES,
+    buildAudioFollowUpCountIndex,
+    buildOperationalLeads,
+    mergeLeadViewFields,
+    parseSalesNoteHistory,
     KNOWN_LEAD_STATUSES,
     KNOWN_PAYMENT_STATUSES,
     KNOWN_INSTALLATION_STATUSES,

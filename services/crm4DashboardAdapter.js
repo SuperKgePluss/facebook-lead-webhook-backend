@@ -262,6 +262,9 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date())
             }] : []),
         ],
     });
+    // CRM 4 does not derive historical audio counts from ACTIVITY_LOG; only
+    // the verified AUDIO_LIBRARY_INDEX supplies recording counts and links.
+    for (const lead of model.operational_leads?.items || []) lead.audio_follow_up_count = null;
     model.audio_index = { complete: audioCoverageComplete, stats: audio.stats };
     model.crm4_reconciliation = { main_only_lead_count: mainOnlyLeadCount };
     return model;

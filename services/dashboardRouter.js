@@ -17,7 +17,12 @@ const OVERVIEW_FILTER_NAMES = Object.freeze([
     "salesOwner",
     "leadStatus",
     "source",
+    "customerTypeCode",
+    "salesFollowUpStatus",
 ]);
+const DEFAULT_OPERATIONAL_LEAD_LIMIT = 100;
+const MAX_OPERATIONAL_LEAD_LIMIT = 100;
+const MAX_OPERATIONAL_LEAD_OFFSET = 1000000;
 
 function parseFilterDate(value) {
     if (value === undefined || value === "") return { ok: true, value: null };
@@ -34,7 +39,7 @@ function parseFilterDate(value) {
 }
 
 function parseOverviewFilters(query = {}) {
-    const allowed = new Set(OVERVIEW_FILTER_NAMES);
+    const allowed = new Set([...OVERVIEW_FILTER_NAMES, "leadOffset", "leadLimit"]);
     if (Object.keys(query).some(key => !allowed.has(key))) return { ok: false };
 
     const filters = {};
@@ -60,22 +65,41 @@ function parseOverviewFilters(query = {}) {
     if (filters.dateFrom && filters.dateTo && filters.dateFrom > filters.dateTo) {
         return { ok: false };
     }
-    return { ok: true, filters };
+    const pagination = {};
+    if (query.leadOffset !== undefined) {
+        if (typeof query.leadOffset !== "string" || !/^(?:0|[1-9]\d*)$/.test(query.leadOffset)) return { ok: false };
+        const offset = Number(query.leadOffset);
+        if (!Number.isSafeInteger(offset) || offset > MAX_OPERATIONAL_LEAD_OFFSET) return { ok: false };
+        pagination.offset = offset;
+    } else {
+        pagination.offset = 0;
+    }
+    if (query.leadLimit !== undefined) {
+        if (typeof query.leadLimit !== "string" || !/^[1-9]\d*$/.test(query.leadLimit)) return { ok: false };
+        const limit = Number(query.leadLimit);
+        if (!Number.isSafeInteger(limit) || limit > MAX_OPERATIONAL_LEAD_LIMIT) return { ok: false };
+        pagination.limit = limit;
+    } else {
+        pagination.limit = DEFAULT_OPERATIONAL_LEAD_LIMIT;
+    }
+    return { ok: true, filters, pagination };
 }
 
 function parseActivityLimit(query = {}) {
-    if (Object.keys(query).some(key => key !== "limit")) return null;
-    if (query.limit === undefined) return 20;
-    if (typeof query.limit !== "string" || !/^(?:[1-9]|1\d|20)$/.test(query.limit)) return null;
-    return Number(query.limit);
+    if (Object.keys(query).some(key => !["limit", "dateFrom", "dateTo"].includes(key))) return null;
+    if (query.limit !== undefined && (typeof query.limit !== "string" || !/^(?:[1-9]|1\d|20)$/.test(query.limit))) return null;
+    const filters = parseOverviewFilters({ dateFrom: query.dateFrom, dateTo: query.dateTo });
+    if (!filters.ok) return null;
+    return query.limit === undefined ? 20 : Number(query.limit);
 }
 
 function createDefaultDataProvider(now) {
-    return async ({ filters }) => {
+    return async ({ filters, pagination }) => {
         const sheets = await readDashboardSheets();
         return buildDashboardReadModel({
             ...sheets,
             filters,
+            operational_lead_pagination: pagination,
             asOf: new Date(now()),
         });
     };
@@ -189,7 +213,7 @@ function createDashboardRouter(options = {}) {
         if (!parsed.ok) return res.status(400).json({ error: "invalid_filter" });
 
         try {
-            const model = await dataProvider({ filters: parsed.filters, asOf: new Date(now()) });
+            const model = await dataProvider({ filters: parsed.filters, pagination: parsed.pagination, asOf: new Date(now()) });
             if (!model || typeof model !== "object") throw new TypeError("Dashboard model unavailable.");
             return res.status(200).json(shapeDashboardResponse(model));
         } catch {
@@ -202,7 +226,9 @@ function createDashboardRouter(options = {}) {
         if (limit === null) return res.status(400).json({ error: "invalid_limit" });
 
         try {
-            const model = await dataProvider({ filters: {}, asOf: new Date(now()) });
+            const parsedFilters = parseOverviewFilters({ dateFrom: req.query.dateFrom, dateTo: req.query.dateTo });
+            if (!parsedFilters.ok) return res.status(400).json({ error: "invalid_filter" });
+            const model = await dataProvider({ filters: parsedFilters.filters, asOf: new Date(now()) });
             if (!model || typeof model !== "object") throw new TypeError("Dashboard model unavailable.");
             const shaped = shapeDashboardResponse(model);
             return res.status(200).json({ recent_activity: shaped.recent_activity.slice(0, limit) });
