@@ -1884,7 +1884,15 @@ app.post("/repair/lead-details", requireSyncSecretMiddleware, handleLeadDetailsR
 app.post("/repair/deals-phone", requireSyncSecretMiddleware, handleDealsPhoneRepair);
 app.post("/webhook/line", handleLineWebhook);
 
-app.use("/api", require("./services/dashboardRouter").createDashboardRouter());
+const crm4DashboardMode = String(process.env.CRM4_DASHBOARD_MODE || "").toLowerCase() === "true";
+const dashboardRouterOptions = crm4DashboardMode
+    ? {
+        dataProvider: require("./services/crm4DashboardAdapter").createCrm4DashboardDataProvider(),
+        // CRM 4 does not depend on the legacy CRM parity source.
+        healthReader: async () => null,
+    }
+    : {};
+app.use("/api", require("./services/dashboardRouter").createDashboardRouter(dashboardRouterOptions));
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
