@@ -574,7 +574,7 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
 
 function buildRecentActivity(activities, leadById, filters, warnings) {
     const items = [];
-    const hiddenClientActivityTypes = new Set(["facebook repeat submission", "legacy follow-up"]);
+        const hiddenClientActivityTypes = new Set(["facebook repeat submission", "legacy follow-up"]);
 
     for (const activity of Array.isArray(activities) ? activities : []) {
         const activityDate = getActivityDate(activity);
@@ -586,7 +586,7 @@ function buildRecentActivity(activities, leadById, filters, warnings) {
 
         const lead = leadById.get(text(activity.lead_id));
         const activityType = text(activity.action_type || activity.activity_type);
-        if (hiddenClientActivityTypes.has(activityType.toLowerCase())) continue;
+        if (hiddenClientActivityTypes.has(activityType.toLowerCase()) || activityType.toLowerCase().includes("audio")) continue;
         if (filters.salesOwner || filters.source) {
             if (!lead || !matchesDownstreamRelationship(activity, leadById, filters, warnings)) continue;
         }
@@ -652,8 +652,7 @@ function buildAudioFollowUpCountIndex(activities, warnings) {
     return counts;
 }
 
-function buildOperationalLeads(leads, activities, filters, warnings, audioCountAvailable = true, pagination = {}, deals = []) {
-    const audioCounts = buildAudioFollowUpCountIndex(activities, warnings);
+function buildOperationalLeads(leads, activities, filters, warnings, pagination = {}, deals = []) {
     const noteEvents = new Map();
     const latestFollowUp = new Map();
     for (const activity of Array.isArray(activities) ? activities : []) {
@@ -719,10 +718,6 @@ function buildOperationalLeads(leads, activities, filters, warnings, audioCountA
             wants_installation: installationInterestByLeadId.has(leadId)
                 ? (installationInterestByLeadId.get(leadId).has(true) ? true : false)
                 : null,
-            audio_follow_up_count: audioCountAvailable ? (audioCounts[leadId] || 0) : null,
-            audio_recording_count: Number.isInteger(lead?.audio_recording_count) && lead.audio_recording_count >= 0 ? lead.audio_recording_count : null,
-            latest_recording_at: text(lead?.latest_recording_at) || null,
-            latest_recording_link: text(lead?.latest_recording_link) || null,
             _sort: eventDate.date ? eventDate.date.getTime() : 0,
             _tie: leadId,
         });
@@ -795,7 +790,6 @@ function buildDashboardReadModel({
     }
 
     const filters = normalizeFilters(filterInput, warnings);
-    const audioCountAvailable = !(Array.isArray(sourceWarnings) && sourceWarnings.some(warning => text(warning?.code) === 'dashboard_audio_count_unavailable'));
     const mergedLeads = mergeLeadViewFields(leads, leadsView, warnings);
     const uniqueLeads = dedupeById(mergedLeads, "lead_id", warnings, "duplicate_lead_id");
     const leadById = new Map(
@@ -812,7 +806,7 @@ function buildDashboardReadModel({
             financial: buildFinancialMetrics(deals, leadById, filters, warnings),
             installations: buildInstallationMetrics(installations, leadById, filters, warnings, asOf),
         },
-        operational_leads: buildOperationalLeads(uniqueLeads.filter(lead => text(lead.lead_id)), activities, filters, warnings, audioCountAvailable, operationalLeadPagination, deals),
+        operational_leads: buildOperationalLeads(uniqueLeads.filter(lead => text(lead.lead_id)), activities, filters, warnings, operationalLeadPagination, deals),
         recent_activity: buildRecentActivity(activities, leadById, filters, warnings),
         warnings: warnings.toArray(),
     };

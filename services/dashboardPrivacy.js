@@ -17,10 +17,10 @@ const FORBIDDEN_DASHBOARD_FIELDS = Object.freeze([
     "diagnostic_secret",
 ]);
 
-
 function safeCount(value) {
     return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
+
 
 function copyMap(value) {
     return value && typeof value === "object" ? { ...value } : {};
@@ -102,10 +102,6 @@ function shapeDashboardResponse(model) {
                     sales_note_history: Array.isArray(lead?.sales_note_history)
                         ? lead.sales_note_history.map(note => ({ at: note?.at || null, text: String(note?.text || "") }))
                         : [],
-                    audio_follow_up_count: lead?.audio_follow_up_count === null ? null : (Number.isInteger(lead?.audio_follow_up_count) && lead.audio_follow_up_count >= 0 ? lead.audio_follow_up_count : null),
-                    audio_recording_count: lead?.audio_recording_count === null ? null : (Number.isInteger(lead?.audio_recording_count) && lead.audio_recording_count >= 0 ? lead.audio_recording_count : null),
-                    latest_recording_at: typeof lead?.latest_recording_at === "string" && !Number.isNaN(Date.parse(lead.latest_recording_at)) ? new Date(lead.latest_recording_at).toISOString() : null,
-                    latest_recording_link: typeof lead?.latest_recording_link === "string" && /^https:\/\/drive\.google\.com\/file\/d\/[A-Za-z0-9_-]{10,}\/view$/.test(lead.latest_recording_link) ? lead.latest_recording_link : null,
                     wants_installation: typeof lead?.wants_installation === "boolean" ? lead.wants_installation : null,
                 }))
                 : [],
@@ -122,18 +118,6 @@ function shapeDashboardResponse(model) {
                 timestamp: String(activity?.timestamp || ""),
             }))
             : [],
-        audio_index: {
-            complete: Boolean(model?.audio_index?.complete),
-            counts: {
-                matched: safeCount(model?.audio_index?.stats?.matched),
-                missing_phone: safeCount(model?.audio_index?.stats?.missingPhone),
-                malformed: safeCount(model?.audio_index?.stats?.malformed),
-                ambiguous: safeCount(model?.audio_index?.stats?.ambiguous),
-                unmatched: safeCount(model?.audio_index?.stats?.unmatched),
-                duplicate_files: safeCount(model?.audio_index?.stats?.duplicateFiles),
-                unverified_timestamp: safeCount(model?.audio_index?.stats?.unverifiedTimestamp),
-            },
-        },
         crm4_reconciliation: {
             main_only_lead_count: safeCount(model?.crm4_reconciliation?.main_only_lead_count),
         },

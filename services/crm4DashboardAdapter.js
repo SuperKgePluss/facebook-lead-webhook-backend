@@ -1,10 +1,9 @@
 "use strict";
 
 const { buildDashboardReadModel } = require("./dashboardReadModel");
-const { classifyAudioIndexRecords } = require("./crm4AudioAutomation");
 
 const CRM4_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly";
-const SHEET_NAMES = Object.freeze(["LEADS", "LEADS_MAIN", "DEALS", "INSTALLATIONS", "ACTIVITY_LOG", "AUDIO_LIBRARY_INDEX", "AUDIO_INDEX_STATE"]);
+const SHEET_NAMES = Object.freeze(["LEADS", "LEADS_MAIN", "DEALS", "INSTALLATIONS", "ACTIVITY_LOG"]);
 const FIELD_ALIASES = Object.freeze({
     lead_id: ["Lead ID", "ID", "รหัสลูกค้า", "รหัส Lead"],
     facebook_created_time: ["Facebook Created Time", "เวลาสร้างลีดจาก Facebook", "วันที่สร้างลีดจาก Facebook"],
@@ -57,7 +56,7 @@ const REQUIRED_FIELDS = Object.freeze({
     LEADS_MAIN: ["lead_id", "customer_name", "phone", "lead_status", "sales_owner", "source", "customer_type_code"],
     DEALS: ["deal_id", "lead_id", "full_amount", "paid_amount", "payment_status", "payment_date"],
     INSTALLATIONS: ["install_id", "lead_id", "install_status", "preferred_install_date"],
-    ACTIVITY_LOG: ["activity_id", "lead_id", "action_type", "created_at", "audio_file_name", "audio_url"],
+    ACTIVITY_LOG: ["activity_id", "lead_id", "action_type", "created_at"],
     AUDIO_LIBRARY_INDEX: ["drive_file_id", "detected_phone", "matched_lead_id", "match_status", "file_name"],
     AUDIO_INDEX_STATE: ["state_key", "state_value"],
 });
@@ -121,7 +120,6 @@ function recordsFromGrid(grid, sheetName, requiredFields = REQUIRED_FIELDS[sheet
         const idField = sheetName === "DEALS" ? "deal_id" : sheetName === "INSTALLATIONS" ? "install_id" : sheetName === "ACTIVITY_LOG" ? "activity_id" : sheetName === "AUDIO_LIBRARY_INDEX" ? "drive_file_id" : sheetName === "AUDIO_INDEX_STATE" ? "state_key" : "lead_id";
         const id = String(record[idField] ?? "").trim();
         if (!id) continue;
-        // Audio rows are deduplicated by stable Drive file ID in the classifier below.
         if (seenIds.has(id) && sheetName !== "AUDIO_LIBRARY_INDEX") throw new Error(`${sheetName} contains duplicate ${idField} values.`);
         seenIds.add(id);
         records.push(record);
@@ -202,8 +200,6 @@ function mapActivity(record) {
         lead_id: record.lead_id,
         action_type: record.action_type,
         note: record.note,
-        audio_url: record.audio_url,
-        audio_file_name: record.audio_file_name,
         created_by: record.created_by,
         created_at: record.created_at,
         lead_status: record.lead_status,
@@ -229,18 +225,6 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date())
     for (const name of SHEET_NAMES) parsed[name] = recordsFromGrid(sheets[name], name);
     const leads = buildPrimaryLeads(parsed.LEADS, parsed.LEADS_MAIN);
     const mainOnlyLeadCount = countMainOnlyLeads(parsed.LEADS, parsed.LEADS_MAIN);
-    const audioCoverageComplete = audioIndexIsComplete(parsed.AUDIO_INDEX_STATE);
-    const audio = classifyAudioIndexRecords(leads, parsed.AUDIO_LIBRARY_INDEX, {
-        indexComplete: audioCoverageComplete,
-        filenameTimestampVerified: false,
-    });
-    const audioRecordsByLead = audio.summaries;
-    for (const lead of leads) {
-        const summary = audioRecordsByLead.get(lead.lead_id);
-        lead.audio_recording_count = audioCoverageComplete ? (summary?.recording_count ?? 0) : null;
-        lead.latest_recording_at = audioCoverageComplete ? (summary?.latest_recording_at ?? null) : null;
-        lead.latest_recording_link = audioCoverageComplete ? (summary?.latest_recording_link ?? null) : null;
-    }
     const model = buildDashboardReadModel({
         leads,
         deals: parsed.DEALS.map(mapDeal),
@@ -255,17 +239,8 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date())
                 count: mainOnlyLeadCount,
                 message: "LEADS_MAIN-only IDs are reconciliation exceptions and are excluded from the primary LEADS population.",
             }] : []),
-            ...(!audioCoverageComplete ? [{
-                code: "crm4_audio_index_incomplete",
-                count: 1,
-                message: "Audio totals remain unavailable until the source audio index reports a complete scan.",
-            }] : []),
         ],
     });
-    // CRM 4 does not derive historical audio counts from ACTIVITY_LOG; only
-    // the verified AUDIO_LIBRARY_INDEX supplies recording counts and links.
-    for (const lead of model.operational_leads?.items || []) lead.audio_follow_up_count = null;
-    model.audio_index = { complete: audioCoverageComplete, stats: audio.stats };
     model.crm4_reconciliation = { main_only_lead_count: mainOnlyLeadCount };
     return model;
 }
@@ -281,28 +256,73 @@ function columnLetters(number) {
     return result;
 }
 
-function createCrm4SheetsReader(env = process.env) {
+const ACTIVITY_LOG_FIELDS = Object.freeze(["activity_id", "lead_id", "action_type", "note", "created_by", "created_at", "lead_status"]);
+
+async function readActivityLogWithoutAudio(sheets, spreadsheetId, columnCount, frozenRowCount) {
+    const endColumn = columnLetters(Math.max(1, Number(columnCount) || 1));
+    const headerRowCount = Math.min(8, Math.max(1, Number(frozenRowCount) || 1));
+    const headerResponse = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'ACTIVITY_LOG'!A1:${endColumn}${headerRowCount}`,
+        valueRenderOption: "UNFORMATTED_VALUE",
+    });
+    const headerGrid = headerResponse.data.values || [];
+    const headerRowIndex = locateHeaderRow(headerGrid, REQUIRED_FIELDS.ACTIVITY_LOG, "ACTIVITY_LOG");
+    const headerMap = buildHeaderMap(headerGrid[headerRowIndex], "ACTIVITY_LOG");
+    const selectedFields = ACTIVITY_LOG_FIELDS.filter(field => headerMap[field] !== undefined);
+    const selectedIndexes = selectedFields.map(field => headerMap[field]);
+    const ranges = selectedIndexes.map(index => {
+        const column = columnLetters(index + 1);
+        return `'ACTIVITY_LOG'!${column}:${column}`;
+    });
+    const response = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId,
+        ranges,
+        valueRenderOption: "UNFORMATTED_VALUE",
+    });
+    const values = response.data.valueRanges || [];
+    const rowCount = Math.max(0, ...values.map(range => (range.values || []).length));
+    const width = Math.max(0, ...selectedIndexes.map(index => index + 1));
+    const grid = Array.from({ length: rowCount }, () => Array(width).fill(""));
+    selectedIndexes.forEach((columnIndex, fieldIndex) => {
+        (values[fieldIndex]?.values || []).forEach((row, rowIndex) => {
+            grid[rowIndex][columnIndex] = row?.[0] ?? "";
+        });
+    });
+    return grid;
+}
+
+function createCrm4SheetsReader(env = process.env, sheetsClientFactory = null) {
     return async function readCrm4Sheets() {
         const spreadsheetId = String(env.CRM4_SPREADSHEET_ID || "").trim();
         const clientEmail = String(env.CRM4_GOOGLE_CLIENT_EMAIL || "").trim();
         const privateKey = String(env.CRM4_GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
         if (!spreadsheetId || !clientEmail || !privateKey) throw new Error("CRM4 read-only Google Sheets configuration is incomplete.");
-        const { google } = require("googleapis");
-        const auth = new google.auth.GoogleAuth({
-            credentials: { client_email: clientEmail, private_key: privateKey },
-            scopes: [CRM4_SHEETS_SCOPE],
-        });
-        const sheets = google.sheets({ version: "v4", auth });
-        const metadata = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets(properties(title,gridProperties(columnCount)))" });
+        let sheets;
+        if (sheetsClientFactory) {
+            sheets = sheetsClientFactory();
+        } else {
+            const { google } = require("googleapis");
+            const auth = new google.auth.GoogleAuth({
+                credentials: { client_email: clientEmail, private_key: privateKey },
+                scopes: [CRM4_SHEETS_SCOPE],
+            });
+            sheets = google.sheets({ version: "v4", auth });
+        }
+        const metadata = await sheets.spreadsheets.get({ spreadsheetId, fields: "sheets(properties(title,gridProperties(columnCount,frozenRowCount)))" });
         const properties = new Map((metadata.data.sheets || []).map(sheet => [sheet.properties.title, sheet.properties.gridProperties || {}]));
-        const ranges = SHEET_NAMES.map(name => {
+        const ranges = SHEET_NAMES.filter(name => name !== "ACTIVITY_LOG").map(name => {
             const grid = properties.get(name);
             if (!grid) throw new Error(`CRM4 is missing required sheet ${name}.`);
             const endColumn = columnLetters(Math.max(1, Number(grid.columnCount) || 1));
             return `'${name.replace(/'/g, "''")}'!A1:${endColumn}`;
         });
         const response = await sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges, valueRenderOption: "UNFORMATTED_VALUE" });
-        return Object.fromEntries(SHEET_NAMES.map((name, index) => [name, response.data.valueRanges?.[index]?.values || []]));
+        const data = Object.fromEntries(SHEET_NAMES.filter(name => name !== "ACTIVITY_LOG").map((name, index) => [name, response.data.valueRanges?.[index]?.values || []]));
+        const activityProperties = properties.get("ACTIVITY_LOG");
+        if (!activityProperties) throw new Error("CRM4 is missing required sheet ACTIVITY_LOG.");
+        data.ACTIVITY_LOG = await readActivityLogWithoutAudio(sheets, spreadsheetId, activityProperties.columnCount, activityProperties.frozenRowCount);
+        return data;
     };
 }
 
@@ -323,9 +343,9 @@ module.exports = {
     buildHeaderMap,
     recordsFromGrid,
     customerTypeForDashboard,
+    audioIndexIsComplete,
     buildPrimaryLeads,
     countMainOnlyLeads,
-    audioIndexIsComplete,
     buildCrm4DashboardModel,
     createCrm4SheetsReader,
     createCrm4DashboardDataProvider,
