@@ -375,7 +375,7 @@ test("authenticated overview returns only privacy-shaped data and applies valida
         });
         assert.equal(result.body.overview.financial.paid, 25);
         assert.equal(result.body.recent_activity.length, 22);
-        for (const forbidden of ["phone", "lead_id", "facebook_leadgen_id", "note", "audio_url", "payment_url", "location_url", "drive_url", "raw_rows", "internal_secret"]) {
+        for (const forbidden of ["phone", "facebook_leadgen_id", "note", "audio_url", "payment_url", "location_url", "drive_url", "raw_rows", "internal_secret"]) {
             assert.equal(serialized.includes(`"${forbidden}"`), false, forbidden);
         }
         assert.equal(serialized.includes("synthetic-private"), false);
@@ -410,9 +410,9 @@ test("activity endpoint returns only approved fields and enforces a bounded limi
 
         assert.equal(result.response.status, 200);
         assert.equal(entries.length, 2);
-        assert.deepEqual(Object.keys(entries[0]).sort(), ["activity_type", "customer_name", "sales_owner", "timestamp"].sort());
+        assert.deepEqual(Object.keys(entries[0]).sort(), ["activity_type", "customer_name", "lead_id", "sales_owner", "timestamp"].sort());
         assert.equal(JSON.stringify(entries).includes("synthetic-private"), false);
-        assert.equal(JSON.stringify(entries).includes("SYNTHETIC-LEAD-ID"), false);
+        assert.equal(entries[0].lead_id, "SYNTHETIC-LEAD-ID");
     });
 });
 

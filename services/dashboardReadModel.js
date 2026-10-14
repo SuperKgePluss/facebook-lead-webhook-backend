@@ -216,6 +216,7 @@ function normalizeFilters(input = {}, warnings = new WarningCollector()) {
         source: hasValue(input.source) ? text(input.source) : null,
         customerTypeCode: hasValue(input.customerTypeCode) ? text(input.customerTypeCode) : null,
         salesFollowUpStatus: hasValue(input.salesFollowUpStatus) ? text(input.salesFollowUpStatus) : null,
+        leadSearch: hasValue(input.leadSearch) ? text(input.leadSearch) : null,
     };
 }
 
@@ -528,15 +529,25 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
     const asOfKey = formatBangkokDateKey(asOfDate);
     let upcomingScheduled = 0;
     const upcomingInstallations = [];
+    const records = [];
 
     for (const installation of dedupeById(installations, "install_id", warnings, "duplicate_installation_id")) {
         if (!matchesDownstreamRelationship(installation, leadById, filters, warnings)) continue;
 
         const status = canonicalStatus(installation.install_status || installation.installation_status, KNOWN_INSTALLATION_STATUSES);
         increment(statusCounts, status);
+        const lead = leadById.get(text(installation.lead_id));
+        const installationDate = getInstallationDate(installation);
+        if (dateKeyInRange(installationDate.dateKey, filters)) records.push({
+            install_id: text(installation.install_id),
+            lead_id: text(installation.lead_id),
+            date: installationDate.dateKey || null,
+            customer_name: text(lead?.customer_name),
+            sales_owner: text(lead?.sales_owner),
+            status,
+        });
         if (!UPCOMING_INSTALLATION_STATUSES.has(status)) continue;
 
-        const lead = leadById.get(text(installation.lead_id));
         if (!lead) {
             warnings.add(
                 "upcoming_installation_lead_join_missing",
@@ -545,7 +556,6 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
             continue;
         }
 
-        const installationDate = getInstallationDate(installation);
         if (!installationDate.dateKey) {
             warnings.add("installation_date_unavailable");
             continue;
@@ -563,9 +573,12 @@ function buildInstallationMetrics(installations, leadById, filters, warnings, as
     }
 
     upcomingInstallations.sort((a, b) => a.date.localeCompare(b.date));
+    records.sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")) || a.install_id.localeCompare(b.install_id));
 
     return {
         by_status: statusCounts,
+        records: records.slice(0, 100),
+        records_total: records.length,
         upcoming_scheduled_count: upcomingScheduled,
         upcoming_scheduled_by_date: upcomingByDate,
         upcoming_installations: upcomingInstallations,
@@ -592,6 +605,7 @@ function buildRecentActivity(activities, leadById, filters, warnings) {
         }
 
         items.push({
+            lead_id: text(activity.lead_id),
             customer_name: text(lead?.customer_name),
             activity_type: activityType,
             sales_owner: text(lead?.sales_owner || activity.sales_owner || activity.created_by),
@@ -606,6 +620,7 @@ function buildRecentActivity(activities, leadById, filters, warnings) {
     });
 
     return items.slice(0, MAX_RECENT_ACTIVITY).map(item => ({
+        lead_id: item.lead_id,
         customer_name: item.customer_name,
         activity_type: item.activity_type,
         sales_owner: item.sales_owner,
@@ -689,6 +704,8 @@ function buildOperationalLeads(leads, activities, filters, warnings, pagination 
     for (const lead of leads) {
         const leadId = text(lead?.lead_id);
         if (!leadId || !matchesLeadFilters(lead, filters)) continue;
+        if (filters.leadSearch && ![leadId, lead.customer_name, lead.phone, lead.additional_phone]
+            .some(value => lower(value).includes(lower(filters.leadSearch)))) continue;
         const eventDate = getLeadEventDate(lead);
         if (hasDateFilter(filters) && (!eventDate.date || !dateKeyInRange(eventDate.dateKey, filters))) continue;
         const sourceHistory = parseSalesNoteHistory(lead?.sales_note_history);
@@ -703,6 +720,7 @@ function buildOperationalLeads(leads, activities, filters, warnings, pagination 
             ? (explicitLatest.getTime() >= activityLatest.getTime() ? explicitLatest : activityLatest)
             : explicitLatest || activityLatest;
         rows.push({
+            lead_id: leadId,
             customer_name: text(lead?.customer_name || lead?.full_name || lead?.name),
             phone: text(lead?.phone),
             additional_phone: text(lead?.additional_phone),

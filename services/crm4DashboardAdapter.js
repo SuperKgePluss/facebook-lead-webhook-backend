@@ -38,7 +38,7 @@ const FIELD_ALIASES = Object.freeze({
     audio_file_name: ["Audio File Name", "ชื่อไฟล์เสียง"],
     file_name: ["File Name", "Filename", "ชื่อไฟล์", "ชื่อไฟล์เสียง"],
     created_by: ["Created By", "ผู้บันทึก"],
-    created_at: ["Created At", "วันที่บันทึก"],
+    created_at: ["Created At", "วันที่สร้าง", "วันที่บันทึก"],
     drive_file_id: ["Drive File ID", "File ID"],
     detected_phone: ["Detected Phone", "Phone", "Filename Phone"],
     matched_lead_id: ["Matched Lead ID", "Lead ID"],
@@ -120,7 +120,7 @@ function recordsFromGrid(grid, sheetName, requiredFields = REQUIRED_FIELDS[sheet
         const idField = sheetName === "DEALS" ? "deal_id" : sheetName === "INSTALLATIONS" ? "install_id" : sheetName === "ACTIVITY_LOG" ? "activity_id" : sheetName === "AUDIO_LIBRARY_INDEX" ? "drive_file_id" : sheetName === "AUDIO_INDEX_STATE" ? "state_key" : "lead_id";
         const id = String(record[idField] ?? "").trim();
         if (!id) continue;
-        if (seenIds.has(id) && sheetName !== "AUDIO_LIBRARY_INDEX") throw new Error(`${sheetName} contains duplicate ${idField} values.`);
+        if (seenIds.has(id) && sheetName !== "AUDIO_LIBRARY_INDEX" && sheetName !== "DEALS") throw new Error(`${sheetName} contains duplicate ${idField} values.`);
         seenIds.add(id);
         records.push(record);
     }
@@ -148,6 +148,7 @@ function buildPrimaryLeads(leadsRows, mainRows) {
         result.push({
             lead_id: id,
             facebook_created_time: value(lead, main, "facebook_created_time"),
+            created_at: value(lead, main, "created_at"),
             customer_name: value(lead, main, "customer_name"),
             phone: value(lead, main, "phone"),
             additional_phone: value(lead, main, "additional_phone"),
@@ -179,6 +180,28 @@ function mapDeal(record) {
         payment_status: record.payment_status,
         payment_date: record.payment_date,
         open_installation: record.open_installation,
+    };
+}
+
+function reconcileDealRows(records) {
+    const byId = new Map();
+    const conflicted = new Set();
+    let identicalDuplicates = 0;
+    for (const record of records) {
+        const deal = mapDeal(record);
+        const id = String(deal.deal_id).trim();
+        if (!byId.has(id)) {
+            byId.set(id, deal);
+        } else if (JSON.stringify(byId.get(id)) === JSON.stringify(deal)) {
+            identicalDuplicates++;
+        } else {
+            conflicted.add(id);
+        }
+    }
+    return {
+        deals: [...byId].filter(([id]) => !conflicted.has(id)).map(([, deal]) => deal),
+        identicalDuplicates,
+        conflictingIds: conflicted.size,
     };
 }
 
@@ -223,17 +246,46 @@ function audioIndexIsComplete(stateRows) {
 function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date()) {
     const parsed = {};
     for (const name of SHEET_NAMES) parsed[name] = recordsFromGrid(sheets[name], name);
+    const mainHeader = sheets.LEADS_MAIN[locateHeaderRow(sheets.LEADS_MAIN, REQUIRED_FIELDS.LEADS_MAIN, "LEADS_MAIN")];
+    const leadsHeader = sheets.LEADS[locateHeaderRow(sheets.LEADS, REQUIRED_FIELDS.LEADS, "LEADS")];
+    const sourceCapabilities = {
+        sales_follow_up_status: matchingIndexes(mainHeader, "sales_follow_up_status").length === 1
+            || matchingIndexes(leadsHeader, "sales_follow_up_status").length === 1,
+        customer_type_code: matchingIndexes(mainHeader, "customer_type_code").length === 1
+            || matchingIndexes(leadsHeader, "customer_type_code").length === 1,
+    };
     const leads = buildPrimaryLeads(parsed.LEADS, parsed.LEADS_MAIN);
     const mainOnlyLeadCount = countMainOnlyLeads(parsed.LEADS, parsed.LEADS_MAIN);
+    const dealReconciliation = reconcileDealRows(parsed.DEALS);
     const model = buildDashboardReadModel({
         leads,
-        deals: parsed.DEALS.map(mapDeal),
+        deals: dealReconciliation.deals,
         installations: parsed.INSTALLATIONS.map(mapInstallation),
         activities: parsed.ACTIVITY_LOG.map(mapActivity),
         filters,
         operational_lead_pagination: pagination,
         asOf,
         source_warnings: [
+            ...(dealReconciliation.identicalDuplicates ? [{
+                code: "crm4_duplicate_deal_rows_collapsed",
+                count: dealReconciliation.identicalDuplicates,
+                message: "Identical duplicate Deal rows were counted once.",
+            }] : []),
+            ...(dealReconciliation.conflictingIds ? [{
+                code: "crm4_conflicting_deal_ids_excluded",
+                count: dealReconciliation.conflictingIds,
+                message: "Conflicting Deal IDs were excluded; financial totals are unavailable until source reconciliation.",
+            }] : []),
+            ...(!sourceCapabilities.sales_follow_up_status ? [{
+                code: "crm4_sales_follow_up_status_column_missing",
+                count: 1,
+                message: "Sales Follow-up Status column is absent from LEADS and LEADS_MAIN.",
+            }] : []),
+            ...(!sourceCapabilities.customer_type_code ? [{
+                code: "crm4_customer_type_column_missing",
+                count: 1,
+                message: "Customer Type column is absent from LEADS and LEADS_MAIN.",
+            }] : []),
             ...(mainOnlyLeadCount ? [{
                 code: "crm4_main_only_id_exception",
                 count: mainOnlyLeadCount,
@@ -242,6 +294,7 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date())
         ],
     });
     model.crm4_reconciliation = { main_only_lead_count: mainOnlyLeadCount };
+    model.crm4_source_capabilities = { ...sourceCapabilities, financial_complete: dealReconciliation.conflictingIds === 0 };
     return model;
 }
 

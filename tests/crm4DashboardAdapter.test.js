@@ -59,6 +59,25 @@ test("Release 1 maps CRM4 leads without audio tabs and excludes MAIN-only IDs", 
     assert.equal(model.overview.leads.by_customer_type_code.ETC, 1);
 });
 
+test("duplicate Deal IDs do not double count or invent financial totals", () => {
+    const headers = ["Deal ID", "Lead ID", "Full Amount", "Paid Amount", "Payment Status", "Payment Date"];
+    const deal = ["D-1", "L-1", 1000, 200, "Partial", "2026-10-01"];
+    const identical = fixture();
+    identical.DEALS = [headers, deal, [...deal]];
+    const valid = shapeDashboardResponse(buildCrm4DashboardModel(identical, {}, {}, new Date("2026-10-14T00:00:00Z")));
+    assert.equal(valid.overview.financial.deal_value, 1000);
+    assert.equal(valid.crm4_source_capabilities.financial_complete, true);
+    assert.equal(valid.warnings.some(warning => warning.code === "crm4_duplicate_deal_rows_collapsed"), true);
+
+    const conflicting = fixture();
+    conflicting.DEALS = [headers, deal, ["D-1", "L-1", 2000, 200, "Partial", "2026-10-01"]];
+    const unavailable = shapeDashboardResponse(buildCrm4DashboardModel(conflicting, {}, {}, new Date("2026-10-14T00:00:00Z")));
+    assert.equal(unavailable.overview.leads.total, 1);
+    assert.equal(unavailable.overview.financial.deal_value, null);
+    assert.equal(unavailable.crm4_source_capabilities.financial_complete, false);
+    assert.equal(unavailable.warnings.some(warning => warning.code === "crm4_conflicting_deal_ids_excluded" && warning.count === 1), true);
+});
+
 test("Release 1 Sheet reader requires no audio tabs or recording data columns", async () => {
     const requestedRanges = [];
     const headers = ["Activity ID", "Lead ID", "Sheet Name", "Action Type", "Old Value", "New Value", "Lead Status", "Note", "Audio URL", "Audio File Name", "Payment URL", "Payment File Name", "Location URL", "Location File Name", "Created By", "Created At"];

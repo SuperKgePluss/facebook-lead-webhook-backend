@@ -19,10 +19,24 @@ const OVERVIEW_FILTER_NAMES = Object.freeze([
     "source",
     "customerTypeCode",
     "salesFollowUpStatus",
+    "leadSearch",
 ]);
 const DEFAULT_OPERATIONAL_LEAD_LIMIT = 100;
 const MAX_OPERATIONAL_LEAD_LIMIT = 100;
 const MAX_OPERATIONAL_LEAD_OFFSET = 1000000;
+
+function safeCrm4ReadFailure(error) {
+    const message = String(error?.message || "");
+    const status = Number(error?.response?.status || error?.code || 0);
+    if (message.includes("configuration is incomplete")) return "crm4_config_incomplete";
+    if (message.includes("missing required sheet")) return "crm4_tab_missing";
+    if (message.includes("missing required headers")) return "crm4_required_identity_header_missing";
+    if (/duplicate|conflicting headers/i.test(message)) return "crm4_duplicate_identity_or_header";
+    if (status === 401 || status === 403) return "crm4_sheets_access_denied";
+    if (status === 404) return "crm4_spreadsheet_not_found";
+    if (status === 429) return "crm4_sheets_rate_limited";
+    return "crm4_read_failed";
+}
 
 function parseFilterDate(value) {
     if (value === undefined || value === "") return { ok: true, value: null };
@@ -216,8 +230,11 @@ function createDashboardRouter(options = {}) {
             const model = await dataProvider({ filters: parsed.filters, pagination: parsed.pagination, asOf: new Date(now()) });
             if (!model || typeof model !== "object") throw new TypeError("Dashboard model unavailable.");
             return res.status(200).json(shapeDashboardResponse(model));
-        } catch {
-            return res.status(503).json({ error: "dashboard_data_unavailable" });
+        } catch (error) {
+            return res.status(503).json({
+                error: "dashboard_data_unavailable",
+                ...(String(env.CRM4_DASHBOARD_MODE || "").toLowerCase() === "true" ? { reason: safeCrm4ReadFailure(error) } : {}),
+            });
         }
     });
 
@@ -232,8 +249,11 @@ function createDashboardRouter(options = {}) {
             if (!model || typeof model !== "object") throw new TypeError("Dashboard model unavailable.");
             const shaped = shapeDashboardResponse(model);
             return res.status(200).json({ recent_activity: shaped.recent_activity.slice(0, limit) });
-        } catch {
-            return res.status(503).json({ error: "dashboard_data_unavailable" });
+        } catch (error) {
+            return res.status(503).json({
+                error: "dashboard_data_unavailable",
+                ...(String(env.CRM4_DASHBOARD_MODE || "").toLowerCase() === "true" ? { reason: safeCrm4ReadFailure(error) } : {}),
+            });
         }
     });
 

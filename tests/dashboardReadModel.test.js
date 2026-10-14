@@ -776,6 +776,7 @@ test("privacy shaping emits only the approved dashboard fields", () => {
         assert.equal(serialized.includes(`"${forbiddenField}"`), false, forbiddenField);
     }
     assert.deepEqual(shaped.recent_activity[0], {
+        lead_id: "LEAD-1",
         customer_name: "Alice",
         activity_type: "Follow-up",
         sales_owner: "Owner A",
@@ -815,4 +816,21 @@ test("dashboard reader does not reference or invoke write helpers", async () => 
         return [["Lead ID"], ["รหัสลูกค้า"], ["L-1"]];
     });
     assert.deepEqual(calls.sort(), Object.values(DASHBOARD_SHEET_NAMES).sort());
+});
+
+test("Lead search is bounded to operational rows and installations keep explicit IDs", () => {
+    const model = buildDashboardReadModel({
+        leads: [
+            { lead_id: "LEAD-A", customer_name: "Synthetic Alpha", phone: "0001", facebook_created_time: "2026-06-01", source: "Facebook" },
+            { lead_id: "LEAD-B", customer_name: "Synthetic Beta", phone: "0002", facebook_created_time: "2026-06-01", source: "Facebook" },
+        ],
+        installations: [{ install_id: "INST-1", lead_id: "LEAD-A", install_status: "Scheduled", preferred_install_date: "2026-06-02" }],
+        filters: { leadSearch: "LEAD-A" },
+        asOf: new Date("2026-06-01T00:00:00Z"),
+    });
+    assert.equal(model.overview.leads.total, 2);
+    assert.equal(model.operational_leads.total, 1);
+    assert.equal(model.operational_leads.items[0].lead_id, "LEAD-A");
+    assert.equal(model.overview.installations.records_total, 1);
+    assert.deepEqual(model.overview.installations.records.map(({ install_id, lead_id }) => [install_id, lead_id]), [["INST-1", "LEAD-A"]]);
 });
