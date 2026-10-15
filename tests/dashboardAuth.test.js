@@ -383,6 +383,20 @@ test("authenticated overview returns only privacy-shaped data and applies valida
     });
 });
 
+test("authenticated manual refresh forces a fresh source snapshot for overview and activity", async () => {
+    const calls = [];
+    await withApp({ dataProvider: async input => { calls.push(input); return testModel(); } }, async app => {
+        const loginResult = await login(app);
+        const headers = { Cookie: cookiePair(loginResult.response) };
+        const overview = await request(app, "/api/dashboard/overview?refresh=1", { headers });
+        const activity = await request(app, "/api/dashboard/activity?refresh=1", { headers });
+
+        assert.equal(overview.response.status, 200);
+        assert.equal(activity.response.status, 200);
+        assert.deepEqual(calls.map(call => call.forceRefresh), [true, true]);
+    });
+});
+
 test("malformed, duplicate, unsupported, and reversed overview filters return 400", async () => {
     await withApp({}, async app => {
         const loginResult = await login(app);

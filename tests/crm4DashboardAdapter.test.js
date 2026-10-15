@@ -6,6 +6,7 @@ const {
     buildCrm4DashboardModel,
     customerTypeForDashboard,
     createCrm4SheetsReader,
+    createCrm4DashboardDataProvider,
     recordsFromGrid,
     SHEET_NAMES,
 } = require("../services/crm4DashboardAdapter");
@@ -40,6 +41,79 @@ function fixture({ complete = true } = {}) {
         AUDIO_INDEX_STATE: [["State Key", "State Value"], ["CURRENT_SCAN", JSON.stringify({ status: complete ? "COMPLETE" : "IN_PROGRESS", scan_version: "synthetic-v1" })]],
     };
 }
+
+test("CRM4 provider caches source sheets for 45 seconds and rebuilds filtered pages per request", async () => {
+    let currentTime = 1_000;
+    let readCount = 0;
+    const sheets = fixture();
+    sheets.LEADS.push(["L-2", "2026-10-02", "Synthetic Two", "0898765432", "Ongoing", "Owner B"]);
+    const provider = createCrm4DashboardDataProvider({
+        readSheets: async () => { readCount++; return sheets; },
+        now: () => currentTime,
+    });
+
+    const first = await provider({ filters: {}, pagination: { offset: 0, limit: 1 } });
+    const filtered = await provider({ filters: { salesOwner: "Owner B" }, pagination: { offset: 0, limit: 1 } });
+    const secondPage = await provider({ filters: {}, pagination: { offset: 1, limit: 1 } });
+
+    assert.equal(readCount, 1);
+    assert.equal(first.operational_leads.items.length, 1);
+    assert.equal(filtered.operational_leads.items[0].sales_owner, "Owner B");
+    assert.equal(secondPage.operational_leads.items.length, 1);
+    assert.notEqual(first, filtered);
+
+    currentTime += 45_000;
+    await provider({ filters: {}, pagination: { offset: 0, limit: 1 } });
+    assert.equal(readCount, 2);
+});
+
+test("CRM4 provider coalesces concurrent source reads and force refresh bypasses the cache", async () => {
+    let readCount = 0;
+    let releaseRead;
+    const pendingSheets = new Promise(resolve => { releaseRead = resolve; });
+    const provider = createCrm4DashboardDataProvider({
+        readSheets: () => { readCount++; return pendingSheets; },
+    });
+
+    const first = provider();
+    const second = provider({ forceRefresh: true });
+    await Promise.resolve();
+    assert.equal(readCount, 1);
+    releaseRead(fixture());
+    await Promise.all([first, second]);
+    await provider({ forceRefresh: true });
+    assert.equal(readCount, 2);
+});
+
+test("CRM4 provider clears its snapshot and surfaces refresh failures", async () => {
+    let readCount = 0;
+    const provider = createCrm4DashboardDataProvider({
+        readSheets: async () => {
+            readCount++;
+            if (readCount > 1) throw new Error("synthetic CRM4 read failure");
+            return fixture();
+        },
+    });
+
+    await provider();
+    await assert.rejects(provider({ forceRefresh: true }), /synthetic CRM4 read failure/);
+    await assert.rejects(provider(), /synthetic CRM4 read failure/);
+    assert.equal(readCount, 3);
+});
+
+test("CRM4 provider does not cache a source snapshot that fails model validation", async () => {
+    let readCount = 0;
+    const provider = createCrm4DashboardDataProvider({
+        readSheets: async () => {
+            readCount++;
+            return { LEADS: [] };
+        },
+    });
+
+    await assert.rejects(provider());
+    await assert.rejects(provider());
+    assert.equal(readCount, 2);
+});
 
 test("Release 1 maps CRM4 leads without audio tabs and excludes MAIN-only IDs", () => {
     const sheets = fixture();

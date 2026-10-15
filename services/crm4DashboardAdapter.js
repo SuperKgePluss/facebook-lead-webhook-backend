@@ -381,9 +381,46 @@ function createCrm4SheetsReader(env = process.env, sheetsClientFactory = null) {
     };
 }
 
-function createCrm4DashboardDataProvider({ env = process.env, readSheets = createCrm4SheetsReader(env) } = {}) {
-    return async ({ filters = {}, pagination = {}, asOf = new Date() } = {}) => {
-        const sheets = await readSheets();
+const CRM4_SNAPSHOT_CACHE_TTL_MS = 45_000;
+
+function createCrm4DashboardDataProvider({ env = process.env, readSheets = createCrm4SheetsReader(env), now = Date.now } = {}) {
+    let cachedSheets = null;
+    let cachedAt = 0;
+    let readInFlight = null;
+
+    async function getSheets(forceRefresh) {
+        if (readInFlight) return readInFlight;
+
+        const currentTime = now();
+        if (!forceRefresh && cachedSheets && currentTime >= cachedAt
+            && currentTime - cachedAt < CRM4_SNAPSHOT_CACHE_TTL_MS) {
+            return cachedSheets;
+        }
+
+        const pendingRead = Promise.resolve().then(readSheets);
+        readInFlight = pendingRead;
+        try {
+            const sheets = await pendingRead;
+            // Validate the source before placing it in the cache. This prevents
+            // malformed reads from becoming a reusable failed snapshot.
+            buildCrm4DashboardModel(sheets, {}, { offset: 0, limit: 1 }, new Date(now()));
+            cachedSheets = sheets;
+            cachedAt = now();
+            return sheets;
+        } catch (error) {
+            // Never serve an older snapshot after a failed source refresh.
+            cachedSheets = null;
+            cachedAt = 0;
+            throw error;
+        } finally {
+            if (readInFlight === pendingRead) readInFlight = null;
+        }
+    }
+
+    return async ({ filters = {}, pagination = {}, asOf = new Date(), forceRefresh = false } = {}) => {
+        const sheets = await getSheets(forceRefresh === true);
+        // Rebuild the response model for each request so filters and pagination
+        // remain request-local and no authenticated response is shared.
         return buildCrm4DashboardModel(sheets, filters, pagination, asOf);
     };
 }

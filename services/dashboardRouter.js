@@ -53,8 +53,9 @@ function parseFilterDate(value) {
 }
 
 function parseOverviewFilters(query = {}) {
-    const allowed = new Set([...OVERVIEW_FILTER_NAMES, "leadOffset", "leadLimit"]);
+    const allowed = new Set([...OVERVIEW_FILTER_NAMES, "leadOffset", "leadLimit", "refresh"]);
     if (Object.keys(query).some(key => !allowed.has(key))) return { ok: false };
+    if (query.refresh !== undefined && query.refresh !== "1") return { ok: false };
 
     const filters = {};
     for (const name of OVERVIEW_FILTER_NAMES) {
@@ -100,8 +101,9 @@ function parseOverviewFilters(query = {}) {
 }
 
 function parseActivityLimit(query = {}) {
-    if (Object.keys(query).some(key => !["limit", "dateFrom", "dateTo"].includes(key))) return null;
+    if (Object.keys(query).some(key => !["limit", "dateFrom", "dateTo", "refresh"].includes(key))) return null;
     if (query.limit !== undefined && (typeof query.limit !== "string" || !/^(?:[1-9]|1\d|20)$/.test(query.limit))) return null;
+    if (query.refresh !== undefined && query.refresh !== "1") return null;
     const filters = parseOverviewFilters({ dateFrom: query.dateFrom, dateTo: query.dateTo });
     if (!filters.ok) return null;
     return query.limit === undefined ? 20 : Number(query.limit);
@@ -227,7 +229,12 @@ function createDashboardRouter(options = {}) {
         if (!parsed.ok) return res.status(400).json({ error: "invalid_filter" });
 
         try {
-            const model = await dataProvider({ filters: parsed.filters, pagination: parsed.pagination, asOf: new Date(now()) });
+            const model = await dataProvider({
+                filters: parsed.filters,
+                pagination: parsed.pagination,
+                asOf: new Date(now()),
+                forceRefresh: req.query.refresh === "1",
+            });
             if (!model || typeof model !== "object") throw new TypeError("Dashboard model unavailable.");
             return res.status(200).json(shapeDashboardResponse(model));
         } catch (error) {
@@ -243,9 +250,13 @@ function createDashboardRouter(options = {}) {
         if (limit === null) return res.status(400).json({ error: "invalid_limit" });
 
         try {
-            const parsedFilters = parseOverviewFilters({ dateFrom: req.query.dateFrom, dateTo: req.query.dateTo });
+            const parsedFilters = parseOverviewFilters({ dateFrom: req.query.dateFrom, dateTo: req.query.dateTo, refresh: req.query.refresh });
             if (!parsedFilters.ok) return res.status(400).json({ error: "invalid_filter" });
-            const model = await dataProvider({ filters: parsedFilters.filters, asOf: new Date(now()) });
+            const model = await dataProvider({
+                filters: parsedFilters.filters,
+                asOf: new Date(now()),
+                forceRefresh: req.query.refresh === "1",
+            });
             if (!model || typeof model !== "object") throw new TypeError("Dashboard model unavailable.");
             const shaped = shapeDashboardResponse(model);
             return res.status(200).json({ recent_activity: shaped.recent_activity.slice(0, limit) });
