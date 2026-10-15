@@ -7,6 +7,7 @@ const {
     buildDashboardReadModel,
     formatBangkokDateKey,
     parseDateValue,
+    UNASSIGNED_SALES_OWNER_FILTER,
 } = require("../services/dashboardReadModel");
 const {
     DASHBOARD_SHEET_NAMES,
@@ -133,6 +134,33 @@ test("total leads counts unique canonical Lead IDs and excludes blank IDs", () =
     assert.equal(model.warnings.find(item => item.code === "duplicate_lead_id").count, 1);
 });
 
+test("Sales Owner filters preserve distinct identities and select genuinely unassigned Leads", () => {
+    const owners = ["Owner A", "owner a", "Owner B, Owner C", "Owner With Spaces", "Unknown", "Unassigned", "  Owner Trim  ", ""];
+    const model = buildDashboardReadModel({
+        leads: owners.map((sales_owner, index) => baseLead({ lead_id: `OWNER-${index + 1}`, sales_owner })),
+        operational_lead_pagination: { offset: 0, limit: 100 },
+    });
+    assert.deepEqual(Object.keys(model.overview.leads.by_sales_owner).sort(), [
+        "Owner A", "Owner B, Owner C", "Owner With Spaces", "Owner Trim", "Unknown", "Unassigned", UNASSIGNED_SALES_OWNER_FILTER, "owner a",
+    ].sort());
+    assert.deepEqual(new Set(model.overview.leads.sales_owner_options), new Set([
+        "Owner A", "Owner B, Owner C", "Owner With Spaces", "Owner Trim", "Unknown", "Unassigned", UNASSIGNED_SALES_OWNER_FILTER, "owner a",
+    ]));
+    assert.equal(model.overview.leads.by_sales_owner[UNASSIGNED_SALES_OWNER_FILTER], 1);
+
+    for (let index = 0; index < owners.length; index++) {
+        const filter = owners[index].trim() === "" ? UNASSIGNED_SALES_OWNER_FILTER : owners[index].trim();
+        const filtered = buildDashboardReadModel({
+            leads: owners.map((sales_owner, rowIndex) => baseLead({ lead_id: `OWNER-${rowIndex + 1}`, sales_owner })),
+            filters: { salesOwner: filter },
+            operational_lead_pagination: { offset: 0, limit: 100 },
+        });
+        assert.deepEqual(filtered.operational_leads.items.map(lead => lead.lead_id), [`OWNER-${index + 1}`]);
+        assert.equal(filtered.overview.leads.total, 1);
+        assert.deepEqual(new Set(filtered.overview.leads.sales_owner_options), new Set(model.overview.leads.sales_owner_options));
+    }
+});
+
 test("Facebook event dates use Bangkok day boundaries and never fall back to Created At", () => {
     const model = buildDashboardReadModel({
         filters: { dateFrom: "2026-06-02", dateTo: "2026-06-02" },
@@ -208,6 +236,24 @@ test("Lead Trend respects owner, lead status, and source filters", () => {
         { date: "2026-06-02", new_leads: 0 },
     ]);
     assert.equal(model.overview.leads.new_in_period, 1);
+});
+
+test("date filters change New Leads while Total Leads and lifecycle distribution stay complete", () => {
+    const leads = [
+        baseLead({ lead_id: "IN-PERIOD", facebook_created_time: "2026-10-14", lead_status: "New" }),
+        baseLead({ lead_id: "OUTSIDE-PERIOD", facebook_created_time: "2026-09-01", lead_status: "Installed" }),
+        baseLead({ lead_id: "UNKNOWN-UNDATED", facebook_created_time: "", lead_status: "Future Lifecycle" }),
+    ];
+    const model = buildDashboardReadModel({
+        leads,
+        filters: { dateFrom: "2026-10-01", dateTo: "2026-10-15" },
+        asOf: new Date("2026-10-15T00:00:00Z"),
+    });
+
+    assert.equal(model.overview.leads.total, 3);
+    assert.equal(model.overview.leads.new_in_period, 1);
+    assert.equal(model.overview.leads.by_status["Unknown/Unmapped"], 1);
+    assert.equal(Object.values(model.overview.leads.by_status).reduce((sum, count) => sum + count, 0), 3);
 });
 
 test("Facebook Leadgen ID alone selects Facebook Created Time for Lead Trend", () => {

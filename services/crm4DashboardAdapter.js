@@ -110,16 +110,18 @@ function buildHeaderMap(headerRow, sheetName) {
 function recordsFromGrid(grid, sheetName, requiredFields = REQUIRED_FIELDS[sheetName] || ["lead_id"]) {
     const headerRowIndex = locateHeaderRow(grid, requiredFields, sheetName);
     const headerMap = buildHeaderMap(grid[headerRowIndex], sheetName);
+    const idField = sheetName === "DEALS" ? "deal_id" : sheetName === "INSTALLATIONS" ? "install_id" : sheetName === "ACTIVITY_LOG" ? "activity_id" : sheetName === "AUDIO_LIBRARY_INDEX" ? "drive_file_id" : sheetName === "AUDIO_INDEX_STATE" ? "state_key" : "lead_id";
+    const idHeaderAliases = NORMALIZED_ALIASES[idField] || [];
     const records = [];
     const seenIds = new Set();
     for (let rowIndex = headerRowIndex + 1; rowIndex < grid.length; rowIndex++) {
         const row = grid[rowIndex];
-        if (!Array.isArray(row) || isHeaderLikeRow(row)) continue;
+        if (!Array.isArray(row)) continue;
         const record = {};
         for (const [field, index] of Object.entries(headerMap)) record[field] = row[index] ?? "";
-        const idField = sheetName === "DEALS" ? "deal_id" : sheetName === "INSTALLATIONS" ? "install_id" : sheetName === "ACTIVITY_LOG" ? "activity_id" : sheetName === "AUDIO_LIBRARY_INDEX" ? "drive_file_id" : sheetName === "AUDIO_INDEX_STATE" ? "state_key" : "lead_id";
         const id = String(record[idField] ?? "").trim();
         if (!id) continue;
+        if (isHeaderLikeRow(row) && idHeaderAliases.includes(normalizeHeader(id))) continue;
         if (seenIds.has(id) && sheetName !== "AUDIO_LIBRARY_INDEX" && sheetName !== "DEALS") throw new Error(`${sheetName} contains duplicate ${idField} values.`);
         seenIds.add(id);
         records.push(record);

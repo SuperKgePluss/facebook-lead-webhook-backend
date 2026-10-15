@@ -15,6 +15,8 @@ const SALES_FOLLOW_UP_STATUSES = [
 ];
 
 const KNOWN_LEAD_STATUSES = ["New", "Installed", "Cancelled", "Ongoing", "Done"];
+const UNMAPPED_LEAD_STATUS = "Unknown/Unmapped";
+const UNASSIGNED_SALES_OWNER_FILTER = "__CRM4_UNASSIGNED_FILTER__";
 const KNOWN_PAYMENT_STATUSES = ["Unpaid", "Paid", "Cancelled"];
 const KNOWN_INSTALLATION_STATUSES = ["Pending", "Scheduled", "Installed", "Cancelled"];
 const UPCOMING_INSTALLATION_STATUSES = new Set(["Pending", "Scheduled"]);
@@ -262,8 +264,25 @@ function canonicalStatus(value, knownStatuses, unknownBucket = "Unknown") {
     return knownStatuses.find(status => status.toLowerCase() === raw.toLowerCase()) || raw;
 }
 
-function statusMap(knownStatuses) {
-    return Object.fromEntries([...knownStatuses, "Unknown"].map(status => [status, 0]));
+function canonicalLeadStatus(value) {
+    const raw = text(value);
+    return KNOWN_LEAD_STATUSES.find(status => status.toLowerCase() === raw.toLowerCase()) || UNMAPPED_LEAD_STATUS;
+}
+
+function isUnmappedLeadStatus(value) {
+    const raw = text(value);
+    return !KNOWN_LEAD_STATUSES.some(status => status.toLowerCase() === raw.toLowerCase());
+}
+
+function matchesSalesOwnerFilter(lead, salesOwner) {
+    if (!salesOwner) return true;
+    const owner = text(lead?.sales_owner);
+    if (salesOwner === UNASSIGNED_SALES_OWNER_FILTER) return owner === "";
+    return owner === salesOwner;
+}
+
+function statusMap(knownStatuses, unknownBucket = "Unknown") {
+    return Object.fromEntries([...knownStatuses, unknownBucket].map(status => [status, 0]));
 }
 
 function stableRecordKey(record) {
@@ -325,9 +344,11 @@ function getLeadEventDate(lead) {
 }
 
 function matchesLeadFilters(lead, filters) {
-    if (filters.salesOwner && lower(lead.sales_owner) !== lower(filters.salesOwner)) return false;
+    if (!matchesSalesOwnerFilter(lead, filters.salesOwner)) return false;
     if (filters.source && lower(lead.source) !== lower(filters.source)) return false;
-    if (filters.leadStatus && lower(lead.lead_status) !== lower(filters.leadStatus)) return false;
+    if (filters.leadStatus && (filters.leadStatus === UNMAPPED_LEAD_STATUS
+        ? !isUnmappedLeadStatus(lead.lead_status)
+        : lower(lead.lead_status) !== lower(filters.leadStatus))) return false;
     if (filters.customerTypeCode && lower(lead.customer_type_code) !== lower(filters.customerTypeCode)) return false;
     if (filters.salesFollowUpStatus && text(lead.sales_follow_up_status) !== filters.salesFollowUpStatus) return false;
     return true;
@@ -343,7 +364,7 @@ function matchesDownstreamRelationship(record, leadById, filters, warnings) {
         return false;
     }
 
-    if (filters.salesOwner && lower(lead.sales_owner) !== lower(filters.salesOwner)) return false;
+    if (!matchesSalesOwnerFilter(lead, filters.salesOwner)) return false;
     if (filters.source && lower(lead.source) !== lower(filters.source)) return false;
     return true;
 }
@@ -387,7 +408,7 @@ function isCancelledDeal(deal) {
 }
 
 function buildLeadMetrics(leads, filters, warnings) {
-    const statusCounts = statusMap(KNOWN_LEAD_STATUSES);
+    const statusCounts = statusMap(KNOWN_LEAD_STATUSES, UNMAPPED_LEAD_STATUS);
     const sourceCounts = {};
     const ownerCounts = {};
     const customerTypeCounts = Object.fromEntries([...CUSTOMER_TYPE_CODES, "Unknown"].map(value => [value, 0]));
@@ -396,15 +417,16 @@ function buildLeadMetrics(leads, filters, warnings) {
     let newInPeriod = 0;
     let incompleteEventDateCount = 0;
     let total = 0;
+    const salesOwnerOptionSet = new Set(leads.map(lead => text(lead.sales_owner) || UNASSIGNED_SALES_OWNER_FILTER));
 
     for (const lead of leads) {
         if (!matchesLeadFilters(lead, filters)) continue;
         total++;
 
-        const status = canonicalStatus(lead.lead_status, KNOWN_LEAD_STATUSES);
+        const status = canonicalLeadStatus(lead.lead_status);
         increment(statusCounts, status);
         increment(sourceCounts, text(lead.source) || "Unknown");
-        increment(ownerCounts, text(lead.sales_owner) || "Unassigned");
+        increment(ownerCounts, text(lead.sales_owner) || UNASSIGNED_SALES_OWNER_FILTER);
         increment(customerTypeCounts, CUSTOMER_TYPE_CODES.includes(text(lead.customer_type_code)) ? text(lead.customer_type_code) : "Unknown");
         increment(salesFollowUpStatusCounts, SALES_FOLLOW_UP_STATUSES.includes(text(lead.sales_follow_up_status)) ? text(lead.sales_follow_up_status) : "Unknown");
 
@@ -429,6 +451,7 @@ function buildLeadMetrics(leads, filters, warnings) {
         by_status: statusCounts,
         by_source: sourceCounts,
         by_sales_owner: ownerCounts,
+        sales_owner_options: [...salesOwnerOptionSet].sort((left, right) => left.localeCompare(right)),
         by_customer_type_code: customerTypeCounts,
         by_sales_follow_up_status: salesFollowUpStatusCounts,
     };
@@ -724,7 +747,7 @@ function buildOperationalLeads(leads, activities, filters, warnings, pagination 
             customer_name: text(lead?.customer_name || lead?.full_name || lead?.name),
             phone: text(lead?.phone),
             additional_phone: text(lead?.additional_phone),
-            lead_status: KNOWN_LEAD_STATUSES.includes(text(lead?.lead_status)) ? text(lead.lead_status) : null,
+            lead_status: canonicalLeadStatus(lead?.lead_status),
             preferred_call_day: text(lead?.preferred_call_day),
             preferred_call_time: text(lead?.preferred_call_time),
             customer_type_code: CUSTOMER_TYPE_CODES.includes(text(lead?.customer_type_code)) ? text(lead.customer_type_code) : null,
@@ -841,6 +864,8 @@ module.exports = {
     mergeLeadViewFields,
     parseSalesNoteHistory,
     KNOWN_LEAD_STATUSES,
+    UNMAPPED_LEAD_STATUS,
+    UNASSIGNED_SALES_OWNER_FILTER,
     KNOWN_PAYMENT_STATUSES,
     KNOWN_INSTALLATION_STATUSES,
     parseDateValue,

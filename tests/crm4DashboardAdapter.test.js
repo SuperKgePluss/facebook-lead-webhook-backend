@@ -59,6 +59,21 @@ test("Release 1 maps CRM4 leads without audio tabs and excludes MAIN-only IDs", 
     assert.equal(model.overview.leads.by_customer_type_code.ETC, 1);
 });
 
+test("valid CRM4 Lead IDs survive header-like cell values and unknown lifecycle status", () => {
+    const sheets = fixture();
+    sheets.LEADS.push(["L-UNMAPPED", "2026-10-02", "Owner", "Phone", "Future Lifecycle", "Owner A"]);
+    const model = buildCrm4DashboardModel(sheets, {}, { offset: 0, limit: 100 }, new Date("2026-10-14T00:00:00Z"));
+
+    assert.equal(model.overview.leads.total, 2);
+    assert.equal(model.operational_leads.total, 2);
+    assert.equal(model.operational_leads.items.some(item => item.lead_id === "L-UNMAPPED" && item.lead_status === "Unknown/Unmapped"), true);
+    assert.equal(model.overview.leads.by_status["Unknown/Unmapped"], 1);
+    assert.equal(Object.values(model.overview.leads.by_status).reduce((sum, count) => sum + count, 0), model.overview.leads.total);
+    const unknownOnly = buildCrm4DashboardModel(sheets, { leadStatus: "Unknown/Unmapped" }, { offset: 0, limit: 100 }, new Date("2026-10-14T00:00:00Z"));
+    assert.deepEqual(unknownOnly.operational_leads.items.map(item => item.lead_id), ["L-UNMAPPED"]);
+    assert.equal(unknownOnly.overview.leads.total, 1);
+});
+
 test("duplicate Deal IDs do not double count or invent financial totals", () => {
     const headers = ["Deal ID", "Lead ID", "Full Amount", "Paid Amount", "Payment Status", "Payment Date"];
     const deal = ["D-1", "L-1", 1000, 200, "Partial", "2026-10-01"];
@@ -145,6 +160,10 @@ test("Release 1 response shaping omits audio fields, counts, and links", () => {
     assert.equal(JSON.stringify(shaped).includes("private-id"), false);
     const reconciliation = shapeDashboardResponse({ crm4_reconciliation: { main_only_lead_count: 1 } });
     assert.equal(reconciliation.crm4_reconciliation.main_only_lead_count, 1);
+    const ownerOptions = shapeDashboardResponse({
+        overview: { leads: { sales_owner_options: ["Owner A", "__CRM4_UNASSIGNED_FILTER__", "Owner A"] } },
+    });
+    assert.deepEqual(ownerOptions.overview.leads.sales_owner_options, ["Owner A", "__CRM4_UNASSIGNED_FILTER__"]);
 });
 
 test("audio update gate remains disabled unless all explicit owner gates are enabled", async () => {

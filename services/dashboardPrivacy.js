@@ -60,6 +60,9 @@ function shapeDashboardResponse(model) {
                 by_status: copyMap(leads.by_status),
                 by_source: copyMap(leads.by_source),
                 by_sales_owner: copyMap(leads.by_sales_owner),
+                sales_owner_options: Array.isArray(leads.sales_owner_options)
+                    ? [...new Set(leads.sales_owner_options.map(value => String(value ?? "").trim()).filter(Boolean))]
+                    : [],
                 by_customer_type_code: copyMap(leads.by_customer_type_code),
                 by_sales_follow_up_status: copyMap(leads.by_sales_follow_up_status),
             },
