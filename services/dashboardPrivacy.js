@@ -115,6 +115,12 @@ function shapeDashboardResponse(model) {
                     sales_note_history: Array.isArray(lead?.sales_note_history)
                         ? lead.sales_note_history.map(note => ({ at: note?.at || null, text: String(note?.text || "") }))
                         : [],
+                    audio_recording_count: Number.isInteger(lead?.audio_recording_count) && lead.audio_recording_count > 0 ? lead.audio_recording_count : null,
+                    audio_latest_recording_at: typeof lead?.audio_latest_recording_at === "string"
+                        && Number.isFinite(Date.parse(lead.audio_latest_recording_at)) ? lead.audio_latest_recording_at : null,
+                    audio_latest_recording_url: typeof lead?.audio_latest_recording_url === "string"
+                        && /^https:\/\/drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/view$/.test(lead.audio_latest_recording_url)
+                        ? lead.audio_latest_recording_url : null,
                     wants_installation: typeof lead?.wants_installation === "boolean" ? lead.wants_installation : null,
                 }))
                 : [],

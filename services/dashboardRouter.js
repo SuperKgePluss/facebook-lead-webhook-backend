@@ -6,6 +6,7 @@ const { createDashboardAuth } = require("./dashboardAuth");
 const { readDashboardSheets } = require("./dashboardSheetsReader");
 const { buildDashboardReadModel } = require("./dashboardReadModel");
 const { shapeDashboardResponse } = require("./dashboardPrivacy");
+const { readAudioIndexSnapshot } = require("./audioIndexStore");
 const {
     readDashboardLeadParity,
     shapeDashboardHealthResponse,
@@ -109,13 +110,14 @@ function parseActivityLimit(query = {}) {
     return query.limit === undefined ? 20 : Number(query.limit);
 }
 
-function createDefaultDataProvider(now) {
+function createDefaultDataProvider(now, audioIndexReader) {
     return async ({ filters, pagination }) => {
-        const sheets = await readDashboardSheets();
+        const [sheets, audioIndex] = await Promise.all([readDashboardSheets(), audioIndexReader()]);
         return buildDashboardReadModel({
             ...sheets,
             filters,
             operational_lead_pagination: pagination,
+            audio_index: audioIndex,
             asOf: new Date(now()),
         });
     };
@@ -199,7 +201,13 @@ function createDashboardRouter(options = {}) {
     const now = options.now || Date.now;
     const config = loadDashboardConfig(env);
     const auth = createDashboardAuth({ config, sessions: options.sessions || new Map(), now });
-    const dataProvider = options.dataProvider || createDefaultDataProvider(now);
+    const audioIndexReader = options.audioIndexReader || (() => readAudioIndexSnapshot({
+        filePath: env.AUDIO_INDEX_PATH,
+        filenamePatternVerified: env.AUDIO_FILENAME_PATTERN_CONFIRMED === "true",
+        timestampVerified: env.AUDIO_RECORDING_TIMESTAMP_CONFIRMED === "true",
+        linksAuthorized: env.AUDIO_DASHBOARD_LINKS_AUTHORIZED === "true",
+    }));
+    const dataProvider = options.dataProvider || createDefaultDataProvider(now, audioIndexReader);
     const healthReader = options.healthReader || readDashboardLeadParity;
     if (typeof dataProvider !== "function") throw new TypeError("Dashboard data provider must be a function.");
     if (typeof healthReader !== "function") throw new TypeError("Dashboard health reader must be a function.");

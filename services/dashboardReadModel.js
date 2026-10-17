@@ -5,6 +5,7 @@ const SHEETS_EPOCH_MS = Date.UTC(1899, 11, 30, 0, 0, 0, 0);
 const BANGKOK_OFFSET_MS = 7 * 60 * 60 * 1000;
 const MAX_RECENT_ACTIVITY = 20;
 const MAX_OPERATIONAL_LEADS = 100;
+const { summarizeAudioForLeads } = require("./audioMatching");
 
 const CUSTOMER_TYPE_CODES = ["B2C", "B2B", "ETC"];
 const SALES_FOLLOW_UP_STATUSES = [
@@ -690,7 +691,7 @@ function buildAudioFollowUpCountIndex(activities, warnings) {
     return counts;
 }
 
-function buildOperationalLeads(leads, activities, filters, warnings, pagination = {}, deals = []) {
+function buildOperationalLeads(leads, activities, filters, warnings, pagination = {}, deals = [], audioSummaries = {}) {
     const noteEvents = new Map();
     const latestFollowUp = new Map();
     for (const activity of Array.isArray(activities) ? activities : []) {
@@ -738,6 +739,7 @@ function buildOperationalLeads(leads, activities, filters, warnings, pagination 
         history.sort((a, b) => String(a.at || "").localeCompare(String(b.at || "")));
         const explicitLatest = parseDateValue(lead?.latest_follow_up_at).date;
         const successful = parseDateValue(lead?.last_successful_contact_at).date;
+        const audioSummary = audioSummaries[leadId] || null;
         const activityLatest = latestFollowUp.get(leadId) || null;
         const latest = explicitLatest && activityLatest
             ? (explicitLatest.getTime() >= activityLatest.getTime() ? explicitLatest : activityLatest)
@@ -759,6 +761,9 @@ function buildOperationalLeads(leads, activities, filters, warnings, pagination 
             wants_installation: installationInterestByLeadId.has(leadId)
                 ? (installationInterestByLeadId.get(leadId).has(true) ? true : false)
                 : null,
+            audio_recording_count: audioSummary?.count > 0 ? audioSummary.count : null,
+            audio_latest_recording_at: audioSummary?.latest_recording_at || null,
+            audio_latest_recording_url: audioSummary?.latest_recording_url || null,
             _sort: eventDate.date ? eventDate.date.getTime() : 0,
             _tie: leadId,
         });
@@ -819,6 +824,7 @@ function buildDashboardReadModel({
     operational_lead_pagination: operationalLeadPagination = {},
     asOf = new Date(),
     source_warnings: sourceWarnings = [],
+    audio_index: audioIndex = null,
 } = {}) {
     const warnings = new WarningCollector();
     for (const warning of Array.isArray(sourceWarnings) ? sourceWarnings : []) {
@@ -831,6 +837,13 @@ function buildDashboardReadModel({
     }
 
     const filters = normalizeFilters(filterInput, warnings);
+    if (audioIndex?.warning) warnings.add(audioIndex.warning, "Verified Audio Release 2 data is not available.");
+    const audioSummaries = audioIndex?.available === true
+        ? summarizeAudioForLeads(audioIndex.entries, {
+            timestampVerified: audioIndex.timestamp_verified === true,
+            linksAuthorized: audioIndex.links_authorized === true,
+        })
+        : {};
     const mergedLeads = mergeLeadViewFields(leads, leadsView, warnings);
     const uniqueLeads = dedupeById(mergedLeads, "lead_id", warnings, "duplicate_lead_id");
     const leadById = new Map(
@@ -847,7 +860,7 @@ function buildDashboardReadModel({
             financial: buildFinancialMetrics(deals, leadById, filters, warnings),
             installations: buildInstallationMetrics(installations, leadById, filters, warnings, asOf),
         },
-        operational_leads: buildOperationalLeads(uniqueLeads.filter(lead => text(lead.lead_id)), activities, filters, warnings, operationalLeadPagination, deals),
+        operational_leads: buildOperationalLeads(uniqueLeads.filter(lead => text(lead.lead_id)), activities, filters, warnings, operationalLeadPagination, deals, audioSummaries),
         recent_activity: buildRecentActivity(activities, leadById, filters, warnings),
         warnings: warnings.toArray(),
     };
