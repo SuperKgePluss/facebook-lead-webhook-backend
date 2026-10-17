@@ -63,7 +63,8 @@ function buildLeadPhoneIndex(leads) {
     for (const lead of Array.isArray(leads) ? leads : []) {
         const leadId = text(lead?.lead_id ?? lead?.leadId);
         if (!leadId) continue;
-        const phones = new Set([lead?.phone, lead?.additional_phone, lead?.additionalPhone]
+        const phones = new Set([lead?.phone, lead?.additional_phone, lead?.additionalPhone,
+            ...(Array.isArray(lead?.phones) ? lead.phones : [])]
             .map(normalizeThaiPhone).filter(Boolean));
         for (const phone of phones) {
             const owners = byPhone.get(phone) || new Set();

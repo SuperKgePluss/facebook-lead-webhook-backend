@@ -1,17 +1,16 @@
 "use strict";
 
-const { getSheetRows, rowToObject } = require("../services/googleSheets");
+const { getAudioLeadIdentityRows } = require("../services/googleSheets");
 const { createGoogleDriveMetadataAdapter } = require("../services/googleDriveMetadata");
 const { createJsonAudioIndexStore } = require("../services/audioIndexStore");
 const { runAudioIndexScan } = require("../services/audioIndexWorker");
 
 async function readDashboardLeads() {
-    const rows = await getSheetRows("LEADS_MAIN");
-    if (!Array.isArray(rows) || !Array.isArray(rows[0])) throw new Error("The read-only CRM4 Lead source was incomplete.");
-    return rows.slice(2).filter(Array.isArray).map(row => rowToObject(rows[0], row)).map(lead => ({
-        lead_id: String(lead.lead_id ?? ""),
-        phone: String(lead.phone ?? lead.raw_phone ?? ""),
-        additional_phone: String(lead.additional_phone ?? ""),
+    const leads = await getAudioLeadIdentityRows();
+    if (!Array.isArray(leads)) throw new Error("The read-only CRM4 Lead source was incomplete.");
+    return leads.map(lead => ({
+        lead_id: String(lead?.lead_id ?? ""),
+        phones: Array.isArray(lead?.phones) ? lead.phones.map(String) : [],
     }));
 }
 

@@ -31,7 +31,7 @@ test("matching counts unique Drive IDs and rejects ambiguous or unsafe phone mat
     const leads = [
         { lead_id: "SYN-001", phone: "0812345678" },
         { lead_id: "SYN-002", phone: "0812345678" },
-        { lead_id: "SYN-003", phone: "0899999999" },
+        { lead_id: "SYN-003", phone: "", phones: ["0899999999"] },
     ];
     const result = matchAudioFiles([
         { id: "drive-unique", name: "บันทึก_0899999999_261017_123456.m4a", webViewLink: "https://drive.google.com/file/d/drive-unique/view" },

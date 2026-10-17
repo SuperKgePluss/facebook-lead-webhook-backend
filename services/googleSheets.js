@@ -595,6 +595,45 @@ async function getSheetRows(sheetName) {
     return readSheet(sheets, spreadsheetId, `${sheetName}!A:ZZ`);
 }
 
+async function readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId) {
+    const headerResponse = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${SHEETS.LEADS_MAIN}!1:1`,
+        valueRenderOption: "FORMATTED_VALUE",
+    });
+    const headers = Array.isArray(headerResponse?.data?.values?.[0]) ? headerResponse.data.values[0] : [];
+    const normalizedHeaders = headers.map(normalizeHeaderName);
+    const leadIdIndexes = normalizedHeaders.flatMap((header, index) => header === "lead_id" ? [index] : []);
+    if (leadIdIndexes.length !== 1) throw new Error("The read-only CRM4 Lead ID header is missing or ambiguous.");
+    const phoneIndexes = normalizedHeaders.flatMap((header, index) => header.includes("phone") ? [index] : []);
+    const indexes = [leadIdIndexes[0], ...phoneIndexes];
+    const ranges = indexes.map(index => {
+        const column = columnToLetter(index + 1);
+        return `${SHEETS.LEADS_MAIN}!${column}${DATA_START_ROW}:${column}`;
+    });
+    const dataResponse = await sheets.spreadsheets.values.batchGet({
+        spreadsheetId,
+        ranges,
+        valueRenderOption: "FORMATTED_VALUE",
+        majorDimension: "ROWS",
+    });
+    const valueRanges = Array.isArray(dataResponse?.data?.valueRanges) ? dataResponse.data.valueRanges : [];
+    if (valueRanges.length !== ranges.length) throw new Error("The read-only CRM4 Lead identity read was incomplete.");
+    const columns = valueRanges.map(valueRange => Array.isArray(valueRange?.values)
+        ? valueRange.values.map(row => String(Array.isArray(row) ? row[0] ?? "" : ""))
+        : []);
+    const rowCount = Math.max(0, ...columns.map(column => column.length));
+    return Array.from({ length: rowCount }, (_, index) => ({
+        lead_id: String(columns[0][index] ?? "").trim(),
+        phones: columns.slice(1).map(column => String(column[index] ?? "").trim()).filter(Boolean),
+    }));
+}
+
+async function getAudioLeadIdentityRows() {
+    const { sheets, spreadsheetId } = await createSheetsClient();
+    return readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId);
+}
+
 async function getHeaders(sheetName) {
     const rows = await getSheetRows(sheetName);
     return rows[HEADER_ROW - 1] || [];
@@ -1983,6 +2022,8 @@ module.exports = {
     createSheetsClient,
     readSheet,
     getSheetRows,
+    getAudioLeadIdentityRows,
+    readAudioLeadIdentityRowsWithClient,
     getHeaders,
     headerIndex,
     rowToObject,
