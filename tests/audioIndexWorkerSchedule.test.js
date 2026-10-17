@@ -4,8 +4,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { parseIntervalMinutes, runScheduledAudioIndex } = require("../scripts/audio-index-worker");
 
-test("scheduler defaults to 20 minutes and accepts only the 15–30 minute window", () => {
-    assert.equal(parseIntervalMinutes(undefined), 20);
+test("scheduler defaults to 30 minutes and accepts only the 15–30 minute window", () => {
+    assert.equal(parseIntervalMinutes(undefined), 30);
     assert.equal(parseIntervalMinutes("15"), 15);
     assert.equal(parseIntervalMinutes("30"), 30);
     for (const value of ["14", "31", "15.5", "0", "bad"]) assert.throws(() => parseIntervalMinutes(value));

@@ -2,7 +2,7 @@
 
 const { main: runAudioIndexOnce } = require("./audio-index-once");
 
-const DEFAULT_INTERVAL_MINUTES = 20;
+const DEFAULT_INTERVAL_MINUTES = 30;
 const MIN_INTERVAL_MINUTES = 15;
 const MAX_INTERVAL_MINUTES = 30;
 
@@ -58,7 +58,7 @@ if (require.main === module) {
             intervalMinutes,
             shouldStop: () => stopping,
             onResult: result => process.stdout.write(`${JSON.stringify(result)}\n`),
-            onError: () => process.stderr.write("Audio index scan failed; checkpoint was not advanced. Review service logs without exposing file or Lead identifiers.\n"),
+            onError: () => process.stderr.write("Audio index scan failed; the in-memory snapshot is unavailable until a complete scan succeeds.\n"),
         }).catch(() => {
             process.stderr.write("Audio worker stopped unexpectedly.\n");
             process.exitCode = 1;

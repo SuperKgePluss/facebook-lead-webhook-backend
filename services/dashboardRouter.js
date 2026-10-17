@@ -202,7 +202,7 @@ function createDashboardRouter(options = {}) {
     const config = loadDashboardConfig(env);
     const auth = createDashboardAuth({ config, sessions: options.sessions || new Map(), now });
     const audioIndexReader = options.audioIndexReader || (() => readAudioIndexSnapshot({
-        filePath: env.AUDIO_INDEX_PATH,
+        store: options.audioIndexStore,
         filenamePatternVerified: env.AUDIO_FILENAME_PATTERN_CONFIRMED === "true",
         timestampVerified: env.AUDIO_RECORDING_TIMESTAMP_CONFIRMED === "true",
         linksAuthorized: env.AUDIO_DASHBOARD_LINKS_AUTHORIZED === "true",

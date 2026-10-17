@@ -1,76 +1,49 @@
 "use strict";
 
-const crypto = require("node:crypto");
-const fs = require("node:fs/promises");
+function clone(value) {
+    return value === null || value === undefined ? value : structuredClone(value);
+}
 
-function createJsonAudioIndexStore(filePath) {
-    const resolvedPath = String(filePath ?? "").trim();
-    if (!resolvedPath) throw new TypeError("A persistent AUDIO_INDEX_PATH is required.");
-    const lockPath = `${resolvedPath}.lock`;
+function createInMemoryAudioIndexStore() {
+    let state = null;
+    let lockHeld = false;
+    let unavailableWarning = "dashboard_audio_index_not_ready";
 
     async function withLock(operation) {
-        let lockHandle;
+        if (lockHeld) throw new Error("Audio index scan is already running.");
+        lockHeld = true;
         try {
-            lockHandle = await fs.open(lockPath, "wx", 0o600);
-        } catch (error) {
-            if (error?.code === "EEXIST") throw new Error("Audio index scan is already running or requires lock recovery.");
-            throw error;
-        }
-        try {
-            await lockHandle.writeFile(`${process.pid}\n`);
             return await operation();
         } finally {
-            await lockHandle.close();
-            await fs.rm(lockPath, { force: true });
+            lockHeld = false;
         }
     }
 
     async function read() {
-        try {
-            const state = JSON.parse(await fs.readFile(resolvedPath, "utf8"));
-            if (state?.schema_version !== 1 || !Array.isArray(state.folder_ids) || !Array.isArray(state.drive_files)
-                || !Array.isArray(state.entries) || !state.aggregate || typeof state.aggregate !== "object") {
-                throw new Error("Audio index state has an unsupported or incomplete schema.");
-            }
-            return state;
-        } catch (error) {
-            if (error?.code === "ENOENT") return null;
-            throw error;
-        }
+        return clone(state);
     }
 
-    async function write(state) {
-        const temporaryPath = `${resolvedPath}.${crypto.randomUUID()}.tmp`;
-        const handle = await fs.open(temporaryPath, "wx", 0o600);
-        try {
-            await handle.writeFile(`${JSON.stringify(state)}\n`, "utf8");
-            await handle.sync();
-        } finally {
-            await handle.close();
+    async function write(nextState) {
+        if (!nextState || nextState.schema_version !== 2 || !Array.isArray(nextState.entries)
+            || !Array.isArray(nextState.drive_files) || !Array.isArray(nextState.folder_ids)
+            || !nextState.aggregate || typeof nextState.aggregate !== "object") {
+            throw new Error("Audio index snapshot is incomplete.");
         }
-        try {
-            await fs.rename(temporaryPath, resolvedPath);
-        } catch (error) {
-            await fs.rm(temporaryPath, { force: true });
-            throw error;
-        }
+        state = clone(nextState);
+        unavailableWarning = "dashboard_audio_index_not_ready";
     }
 
-    return { withLock, read, write };
-}
-
-async function readAudioIndexSnapshot({ filePath, filenamePatternVerified = false, timestampVerified = false, linksAuthorized = false } = {}) {
-    if (!String(filePath ?? "").trim()) {
-        return { available: false, entries: [], warning: "dashboard_audio_index_not_configured" };
+    async function markUnavailable(warning = "dashboard_audio_index_unavailable") {
+        state = null;
+        unavailableWarning = warning;
     }
-    try {
-        const state = JSON.parse(await fs.readFile(String(filePath), "utf8"));
-        if (state?.schema_version !== 1 || !Array.isArray(state.entries) || !state.aggregate) {
-            return { available: false, entries: [], warning: "dashboard_audio_index_unavailable" };
-        }
+
+    async function readSnapshot({ filenamePatternVerified = false, timestampVerified = false, linksAuthorized = false } = {}) {
         if (filenamePatternVerified !== true) {
             return { available: false, entries: [], warning: "dashboard_audio_filename_pattern_unverified" };
         }
+        if (!state) return { available: false, entries: [], warning: unavailableWarning };
+
         const entries = state.entries.map(entry => ({
             file_id: String(entry?.file_id ?? ""),
             lead_id: String(entry?.lead_id ?? ""),
@@ -85,10 +58,18 @@ async function readAudioIndexSnapshot({ filePath, filenamePatternVerified = fals
             last_successful_scan_at: String(state.last_successful_scan_at ?? ""),
             aggregate: { ...state.aggregate },
         };
-    } catch (error) {
-        if (error?.code === "ENOENT") return { available: false, entries: [], warning: "dashboard_audio_index_not_ready" };
-        return { available: false, entries: [], warning: "dashboard_audio_index_unavailable" };
     }
+
+    return { withLock, read, write, markUnavailable, readSnapshot };
 }
 
-module.exports = { createJsonAudioIndexStore, readAudioIndexSnapshot };
+const defaultAudioIndexStore = createInMemoryAudioIndexStore();
+
+async function readAudioIndexSnapshot({ store = defaultAudioIndexStore, filenamePatternVerified = false, timestampVerified = false, linksAuthorized = false } = {}) {
+    if (!store || typeof store.readSnapshot !== "function") {
+        return { available: false, entries: [], warning: "dashboard_audio_index_not_configured" };
+    }
+    return store.readSnapshot({ filenamePatternVerified, timestampVerified, linksAuthorized });
+}
+
+module.exports = { createInMemoryAudioIndexStore, defaultAudioIndexStore, readAudioIndexSnapshot };

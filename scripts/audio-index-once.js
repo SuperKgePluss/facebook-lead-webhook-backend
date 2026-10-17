@@ -2,7 +2,7 @@
 
 const { getAudioLeadIdentityRows } = require("../services/googleSheets");
 const { createGoogleDriveMetadataAdapter } = require("../services/googleDriveMetadata");
-const { createJsonAudioIndexStore } = require("../services/audioIndexStore");
+const { defaultAudioIndexStore } = require("../services/audioIndexStore");
 const { runAudioIndexScan } = require("../services/audioIndexWorker");
 
 async function readDashboardLeads(env = process.env) {
@@ -14,13 +14,12 @@ async function readDashboardLeads(env = process.env) {
     }));
 }
 
-async function main(env = process.env) {
+async function main(env = process.env, { store = defaultAudioIndexStore } = {}) {
     const drive = createGoogleDriveMetadataAdapter({
         clientEmail: env.AUDIO_GOOGLE_CLIENT_EMAIL,
         privateKey: env.AUDIO_GOOGLE_PRIVATE_KEY,
         driveId: env.AUDIO_DRIVE_ID,
     });
-    const store = createJsonAudioIndexStore(env.AUDIO_INDEX_PATH);
     return runAudioIndexScan({
         drive,
         readLeads: () => readDashboardLeads(env),
@@ -35,7 +34,7 @@ if (require.main === module) {
     main().then(result => {
         process.stdout.write(`${JSON.stringify(result)}\n`);
     }).catch(() => {
-        process.stderr.write("Audio index scan failed; checkpoint was not advanced. Review service logs without exposing file or Lead identifiers.\n");
+        process.stderr.write("Audio index scan failed; the in-memory snapshot remains unavailable until a complete scan succeeds.\n");
         process.exitCode = 1;
     });
 }

@@ -7,9 +7,7 @@ const { REQUIRED_AUDIO_ENV, startAudioIndexWorker } = require("../services/audio
 function configuredEnv(overrides = {}) {
     return {
         AUDIO_WORKER_ENABLED: "true",
-        AUDIO_PERSISTENT_DIR: "/var/data",
-        AUDIO_INDEX_PATH: "/var/data/audio-index.json",
-        AUDIO_SCAN_INTERVAL_MINUTES: "20",
+        AUDIO_SCAN_INTERVAL_MINUTES: "30",
         AUDIO_GOOGLE_CLIENT_EMAIL: "service-account@example.invalid",
         AUDIO_GOOGLE_PRIVATE_KEY: "synthetic-private-key",
         AUDIO_DRIVE_FOLDER_ID: "synthetic-folder-id",
@@ -27,12 +25,12 @@ test("Web runtime leaves the recurring Audio worker disabled by default", () => 
     assert.equal(started, false);
 });
 
-test("enabled worker requires credentials and index state under the persistent mount", () => {
+test("enabled worker requires its authorized service credentials without any filesystem path", () => {
     const missingCredential = configuredEnv({ AUDIO_GOOGLE_PRIVATE_KEY: "" });
     assert.throws(() => startAudioIndexWorker(missingCredential, { runScheduledAudioIndex() {} }), /AUDIO_GOOGLE_PRIVATE_KEY/);
 
-    const ephemeralIndex = configuredEnv({ AUDIO_INDEX_PATH: "/tmp/audio-index.json" });
-    assert.throws(() => startAudioIndexWorker(ephemeralIndex, { runScheduledAudioIndex() {} }), /inside AUDIO_PERSISTENT_DIR/);
+    const handle = startAudioIndexWorker(configuredEnv(), { runScheduledAudioIndex() {} });
+    assert.equal(handle.enabled, true);
 });
 
 test("worker runtime configures one serial scan at the requested interval and supports shutdown", async () => {
@@ -46,7 +44,7 @@ test("worker runtime configures one serial scan at the requested interval and su
         },
     });
     assert.equal(handle.enabled, true);
-    assert.equal(scheduleOptions.intervalMinutes, 20);
+    assert.equal(scheduleOptions.intervalMinutes, 30);
     assert.equal(scheduleOptions.shouldStop(), false);
     handle.stop();
     assert.equal(scheduleOptions.shouldStop(), true);
