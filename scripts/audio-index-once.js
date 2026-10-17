@@ -19,6 +19,7 @@ async function main(env = process.env) {
     const drive = createGoogleDriveMetadataAdapter({
         clientEmail: env.AUDIO_GOOGLE_CLIENT_EMAIL,
         privateKey: env.AUDIO_GOOGLE_PRIVATE_KEY,
+        driveId: env.AUDIO_DRIVE_ID,
     });
     const store = createJsonAudioIndexStore(env.AUDIO_INDEX_PATH);
     return runAudioIndexScan({

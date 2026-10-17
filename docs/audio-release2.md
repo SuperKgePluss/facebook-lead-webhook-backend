@@ -17,6 +17,7 @@ The worker expects the existing read-only Sheets configuration plus:
 - `AUDIO_GOOGLE_CLIENT_EMAIL`
 - `AUDIO_GOOGLE_PRIVATE_KEY`
 - `AUDIO_DRIVE_FOLDER_ID`
+- `AUDIO_DRIVE_ID` (optional; set only when the approved folder is in a Shared Drive so listing and change tokens stay drive-scoped)
 - `AUDIO_INDEX_PATH`
 - `AUDIO_FILENAME_PATTERN_CONFIRMED`
 - `AUDIO_RECORDING_TIMESTAMP_CONFIRMED`
