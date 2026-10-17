@@ -421,9 +421,9 @@ async function createSheetsClient() {
 }
 
 async function createAudioReadOnlySheetsClient({
-    clientEmail = process.env.GOOGLE_CLIENT_EMAIL,
-    privateKey = process.env.GOOGLE_PRIVATE_KEY,
-    spreadsheetId = process.env.GOOGLE_SHEET_ID,
+    clientEmail = process.env.CRM4_GOOGLE_CLIENT_EMAIL,
+    privateKey = process.env.CRM4_GOOGLE_PRIVATE_KEY,
+    spreadsheetId = process.env.CRM4_SPREADSHEET_ID,
     googleApi = google,
 } = {}) {
     if (!clientEmail || !privateKey || !spreadsheetId) {
@@ -616,21 +616,33 @@ async function getSheetRows(sheetName) {
 }
 
 async function readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId) {
-    const headerResponse = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `${SHEETS.LEADS_MAIN}!1:1`,
-        valueRenderOption: "FORMATTED_VALUE",
-    });
-    const headers = Array.isArray(headerResponse?.data?.values?.[0]) ? headerResponse.data.values[0] : [];
+    const [mainHeaderResponse, primaryHeaderResponse] = await Promise.all([
+        sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: `${SHEETS.LEADS_MAIN}!1:1`,
+            valueRenderOption: "FORMATTED_VALUE",
+        }),
+        sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: "LEADS!1:1",
+            valueRenderOption: "FORMATTED_VALUE",
+        }),
+    ]);
+    const headers = Array.isArray(mainHeaderResponse?.data?.values?.[0]) ? mainHeaderResponse.data.values[0] : [];
     const normalizedHeaders = headers.map(normalizeHeaderName);
     const leadIdIndexes = normalizedHeaders.flatMap((header, index) => header === "lead_id" ? [index] : []);
     if (leadIdIndexes.length !== 1) throw new Error("The read-only CRM4 Lead ID header is missing or ambiguous.");
     const phoneIndexes = normalizedHeaders.flatMap((header, index) => header.includes("phone") ? [index] : []);
-    const indexes = [leadIdIndexes[0], ...phoneIndexes];
-    const ranges = indexes.map(index => {
+    const primaryHeaders = Array.isArray(primaryHeaderResponse?.data?.values?.[0]) ? primaryHeaderResponse.data.values[0] : [];
+    const primaryIdIndexes = primaryHeaders.map(normalizeHeaderName)
+        .flatMap((header, index) => header === "lead_id" ? [index] : []);
+    if (primaryIdIndexes.length !== 1) throw new Error("The canonical CRM4 Lead ID header is missing or ambiguous.");
+    const mainRanges = [leadIdIndexes[0], ...phoneIndexes].map(index => {
         const column = columnToLetter(index + 1);
         return `${SHEETS.LEADS_MAIN}!${column}${DATA_START_ROW}:${column}`;
     });
+    const primaryColumn = columnToLetter(primaryIdIndexes[0] + 1);
+    const ranges = [...mainRanges, `LEADS!${primaryColumn}${DATA_START_ROW}:${primaryColumn}`];
     const dataResponse = await sheets.spreadsheets.values.batchGet({
         spreadsheetId,
         ranges,
@@ -642,15 +654,22 @@ async function readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId) {
     const columns = valueRanges.map(valueRange => Array.isArray(valueRange?.values)
         ? valueRange.values.map(row => String(Array.isArray(row) ? row[0] ?? "" : ""))
         : []);
-    const rowCount = Math.max(0, ...columns.map(column => column.length));
+    const primaryIds = new Set(columns.at(-1).map(value => value.trim()).filter(Boolean));
+    const mainColumns = columns.slice(0, -1);
+    const rowCount = Math.max(0, ...mainColumns.map(column => column.length));
     return Array.from({ length: rowCount }, (_, index) => ({
-        lead_id: String(columns[0][index] ?? "").trim(),
-        phones: columns.slice(1).map(column => String(column[index] ?? "").trim()).filter(Boolean),
-    }));
+        lead_id: String(mainColumns[0][index] ?? "").trim(),
+        phones: mainColumns.slice(1).map(column => String(column[index] ?? "").trim()).filter(Boolean),
+    })).filter(lead => lead.lead_id && primaryIds.has(lead.lead_id));
 }
 
-async function getAudioLeadIdentityRows() {
-    const { sheets, spreadsheetId } = await createAudioReadOnlySheetsClient();
+async function getAudioLeadIdentityRows(env = process.env, googleApi = google) {
+    const { sheets, spreadsheetId } = await createAudioReadOnlySheetsClient({
+        clientEmail: env.CRM4_GOOGLE_CLIENT_EMAIL,
+        privateKey: env.CRM4_GOOGLE_PRIVATE_KEY,
+        spreadsheetId: env.CRM4_SPREADSHEET_ID,
+        googleApi,
+    });
     return readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId);
 }
 

@@ -13,9 +13,9 @@ function configuredEnv(overrides = {}) {
         AUDIO_GOOGLE_CLIENT_EMAIL: "service-account@example.invalid",
         AUDIO_GOOGLE_PRIVATE_KEY: "synthetic-private-key",
         AUDIO_DRIVE_FOLDER_ID: "synthetic-folder-id",
-        GOOGLE_CLIENT_EMAIL: "sheets-account@example.invalid",
-        GOOGLE_PRIVATE_KEY: "synthetic-sheets-key",
-        GOOGLE_SHEET_ID: "synthetic-sheet-id",
+        CRM4_GOOGLE_CLIENT_EMAIL: "sheets-account@example.invalid",
+        CRM4_GOOGLE_PRIVATE_KEY: "synthetic-sheets-key",
+        CRM4_SPREADSHEET_ID: "synthetic-sheet-id",
         ...overrides,
     };
 }
@@ -58,8 +58,8 @@ test("configuration check covers the dedicated Drive and read-only CRM identitie
         "AUDIO_GOOGLE_CLIENT_EMAIL",
         "AUDIO_GOOGLE_PRIVATE_KEY",
         "AUDIO_DRIVE_FOLDER_ID",
-        "GOOGLE_CLIENT_EMAIL",
-        "GOOGLE_PRIVATE_KEY",
-        "GOOGLE_SHEET_ID",
+        "CRM4_GOOGLE_CLIENT_EMAIL",
+        "CRM4_GOOGLE_PRIVATE_KEY",
+        "CRM4_SPREADSHEET_ID",
     ]);
 });

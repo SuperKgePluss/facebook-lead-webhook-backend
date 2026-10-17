@@ -5,8 +5,8 @@ const { createGoogleDriveMetadataAdapter } = require("../services/googleDriveMet
 const { createJsonAudioIndexStore } = require("../services/audioIndexStore");
 const { runAudioIndexScan } = require("../services/audioIndexWorker");
 
-async function readDashboardLeads() {
-    const leads = await getAudioLeadIdentityRows();
+async function readDashboardLeads(env = process.env) {
+    const leads = await getAudioLeadIdentityRows(env);
     if (!Array.isArray(leads)) throw new Error("The read-only CRM4 Lead source was incomplete.");
     return leads.map(lead => ({
         lead_id: String(lead?.lead_id ?? ""),
@@ -23,7 +23,7 @@ async function main(env = process.env) {
     const store = createJsonAudioIndexStore(env.AUDIO_INDEX_PATH);
     return runAudioIndexScan({
         drive,
-        readLeads: readDashboardLeads,
+        readLeads: () => readDashboardLeads(env),
         store,
         rootFolderId: env.AUDIO_DRIVE_FOLDER_ID,
         filenamePatternVerified: env.AUDIO_FILENAME_PATTERN_CONFIRMED === "true",

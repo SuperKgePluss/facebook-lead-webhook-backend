@@ -8,9 +8,9 @@ const REQUIRED_AUDIO_ENV = Object.freeze([
     "AUDIO_GOOGLE_CLIENT_EMAIL",
     "AUDIO_GOOGLE_PRIVATE_KEY",
     "AUDIO_DRIVE_FOLDER_ID",
-    "GOOGLE_CLIENT_EMAIL",
-    "GOOGLE_PRIVATE_KEY",
-    "GOOGLE_SHEET_ID",
+    "CRM4_GOOGLE_CLIENT_EMAIL",
+    "CRM4_GOOGLE_PRIVATE_KEY",
+    "CRM4_SPREADSHEET_ID",
 ]);
 
 function isWithinDirectory(directory, targetPath) {
