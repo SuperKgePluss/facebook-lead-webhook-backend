@@ -54,6 +54,60 @@ test("initial Drive crawl covers nested folders and subsequent change pages incr
     assert.equal(store.writes, 2);
 });
 
+test("replaying the same incremental file change does not increase recording counts", async () => {
+    const drive = fixtureDrive();
+    const store = memoryStore();
+    await runAudioIndexScan({ drive, readLeads: async () => leads, store, rootFolderId: "root", filenamePatternVerified: true });
+    const repeatedChange = { fileId: "audio-2", file: {
+        id: "audio-2", name: "บันทึก_0812345678_261017_123457.m4a", mimeType: "audio/mp4", parents: ["folder-child"],
+    } };
+    drive.setChanges([repeatedChange]);
+    const firstReplay = await runAudioIndexScan({ drive, readLeads: async () => leads, store, rootFolderId: "root", filenamePatternVerified: true });
+    drive.setChanges([repeatedChange]);
+    const secondReplay = await runAudioIndexScan({ drive, readLeads: async () => leads, store, rootFolderId: "root", filenamePatternVerified: true });
+
+    assert.equal(firstReplay.aggregate.unique_matched_files, 2);
+    assert.equal(secondReplay.aggregate.unique_matched_files, 2);
+    assert.equal(secondReplay.aggregate.drive_file_count, 2);
+    assert.equal(store.state().entries.length, 2);
+});
+
+test("overlapping scans using the same store fail before making a second Drive request", async () => {
+    let entered;
+    let release;
+    const enteredPromise = new Promise(resolve => { entered = resolve; });
+    const releasePromise = new Promise(resolve => { release = resolve; });
+    let tokenCalls = 0;
+    const drive = {
+        async getStartPageToken() { tokenCalls++; entered(); await releasePromise; return "token-0"; },
+        async listChildren() { return { files: [] }; },
+        async listChanges() { return { changes: [], newStartPageToken: "token-next" }; },
+    };
+    const store = memoryStore();
+    const firstScan = runAudioIndexScan({ drive, readLeads: async () => leads, store, rootFolderId: "root" });
+    await enteredPromise;
+
+    await assert.rejects(runAudioIndexScan({ drive, readLeads: async () => leads, store, rootFolderId: "root" }), /already running/);
+    release();
+    await firstScan;
+    assert.equal(tokenCalls, 1);
+    assert.equal(store.writes, 1);
+});
+
+test("Drive permission failure leaves the index checkpoint unchanged", async () => {
+    const store = memoryStore();
+    const denied = Object.assign(new Error("synthetic permission denial"), { response: { status: 403 } });
+    const drive = {
+        async getStartPageToken() { return "token-0"; },
+        async listChildren() { throw denied; },
+        async listChanges() { return { changes: [], newStartPageToken: "token-next" }; },
+    };
+
+    await assert.rejects(runAudioIndexScan({ drive, readLeads: async () => leads, store, rootFolderId: "root" }), /synthetic permission denial/);
+    assert.equal(store.state(), null);
+    assert.equal(store.writes, 0);
+});
+
 test("incomplete bounded Drive listing does not advance or write the checkpoint", async () => {
     const store = memoryStore();
     const drive = {
