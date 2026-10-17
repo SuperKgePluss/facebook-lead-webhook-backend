@@ -420,6 +420,26 @@ async function createSheetsClient() {
     return { sheets, spreadsheetId };
 }
 
+async function createAudioReadOnlySheetsClient({
+    clientEmail = process.env.GOOGLE_CLIENT_EMAIL,
+    privateKey = process.env.GOOGLE_PRIVATE_KEY,
+    spreadsheetId = process.env.GOOGLE_SHEET_ID,
+    googleApi = google,
+} = {}) {
+    if (!clientEmail || !privateKey || !spreadsheetId) {
+        throw new Error("The read-only CRM4 Lead identity configuration is incomplete.");
+    }
+    const auth = new googleApi.auth.GoogleAuth({
+        credentials: {
+            client_email: clientEmail,
+            private_key: String(privateKey).replace(/\\n/g, "\n"),
+        },
+        scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    });
+    const sheets = googleApi.sheets({ version: "v4", auth });
+    return { sheets, spreadsheetId };
+}
+
 async function readSheet(sheets, spreadsheetId, range) {
     const result = await sheets.spreadsheets.values.get({
         spreadsheetId,
@@ -630,7 +650,7 @@ async function readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId) {
 }
 
 async function getAudioLeadIdentityRows() {
-    const { sheets, spreadsheetId } = await createSheetsClient();
+    const { sheets, spreadsheetId } = await createAudioReadOnlySheetsClient();
     return readAudioLeadIdentityRowsWithClient(sheets, spreadsheetId);
 }
 
@@ -2020,6 +2040,7 @@ module.exports = {
     getExistingLeadgenIds,
     getExistingLeadgenIdsNarrow,
     createSheetsClient,
+    createAudioReadOnlySheetsClient,
     readSheet,
     getSheetRows,
     getAudioLeadIdentityRows,

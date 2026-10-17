@@ -2,7 +2,32 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { readAudioLeadIdentityRowsWithClient } = require("../services/googleSheets");
+const { createAudioReadOnlySheetsClient, readAudioLeadIdentityRowsWithClient } = require("../services/googleSheets");
+
+test("Audio Lead client uses the read-only Sheets OAuth scope", async () => {
+    let authOptions;
+    let sheetsOptions;
+    class GoogleAuth {
+        constructor(options) { authOptions = options; }
+    }
+    const googleApi = {
+        auth: { GoogleAuth },
+        sheets(options) { sheetsOptions = options; return { spreadsheets: {} }; },
+    };
+
+    const client = await createAudioReadOnlySheetsClient({
+        clientEmail: "synthetic@example.invalid",
+        privateKey: "synthetic\\nprivate-key",
+        spreadsheetId: "synthetic-sheet-id",
+        googleApi,
+    });
+
+    assert.deepEqual(authOptions.scopes, ["https://www.googleapis.com/auth/spreadsheets.readonly"]);
+    assert.equal(authOptions.credentials.private_key, "synthetic\nprivate-key");
+    assert.equal(sheetsOptions.version, "v4");
+    assert.ok(sheetsOptions.auth instanceof GoogleAuth);
+    assert.equal(client.spreadsheetId, "synthetic-sheet-id");
+});
 
 test("audio Lead reader fetches only the ID and phone columns as formatted strings", async () => {
     const calls = [];
