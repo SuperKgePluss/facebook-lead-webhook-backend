@@ -2,9 +2,9 @@
 
 ## Current local design
 
-- `scripts/audio-index-once.js` is an isolated, one-shot scan. `scripts/audio-index-worker.js` is a prepared 15–30 minute loop (20 minutes by default). The Dashboard refresh route does not call it, and this change does not register a hosted scheduler or change the existing Facebook Cron.
+- `scripts/audio-index-once.js` is an isolated, one-shot scan. `scripts/audio-index-worker.js` is a prepared 15–30 minute loop (20 minutes by default). The existing Web process can host that loop only when `AUDIO_WORKER_ENABLED=true`; it is disabled unless explicitly configured. The Dashboard refresh route never starts a scan, and the existing Facebook Cron is unchanged.
 - Drive access uses the `drive.metadata.readonly` scope. The worker lists the selected folder tree and Drive change feed; it never downloads or plays audio.
-- The Drive change token, folder tree, file-ID index, and aggregate scan state are saved in one atomic JSON snapshot. The configured path must be on durable private storage. A lock file prevents overlapping runs; a leftover lock after a process crash needs operator review.
+- The Drive change token, folder tree, file-ID index, and aggregate scan state are saved in one atomic JSON snapshot. The configured path must be on durable private storage and inside `AUDIO_PERSISTENT_DIR`; enabled Web startup fails closed when the index path is outside that mount. Keeping the scheduler and Dashboard reader on the same Web service lets both use the same JSON state. A lock file prevents overlapping runs; a leftover lock after a process crash needs operator review.
 - The worker reads only the LEADS_MAIN header row, Lead ID column, and columns whose normalized headers contain `phone`; it fetches those columns as formatted strings to preserve leading zeroes. Its dedicated client uses the `spreadsheets.readonly` OAuth scope and does not read the rest of the Lead row.
 - Pagination, total pages, and file count are bounded. The worker writes a new checkpoint only after the listing and CRM Lead read both complete.
 - Drive file ID is the canonical identity. Phone collisions fail closed. Matching is disabled by default until the filename pattern is confirmed against source metadata. Recording times stay unverified until confirmed separately.
@@ -19,7 +19,10 @@ The worker expects the existing read-only Sheets configuration plus:
 - `AUDIO_GOOGLE_PRIVATE_KEY`
 - `AUDIO_DRIVE_FOLDER_ID`
 - `AUDIO_DRIVE_ID` (optional; set only when the approved folder is in a Shared Drive so listing and change tokens stay drive-scoped)
+- `AUDIO_WORKER_ENABLED` (must be exactly `true` to start recurring scans; keep unset/false until explicit Production approval)
+- `AUDIO_PERSISTENT_DIR` (the mounted private disk directory)
 - `AUDIO_INDEX_PATH`
+- `AUDIO_SCAN_INTERVAL_MINUTES` (15–30; default 20)
 - `AUDIO_FILENAME_PATTERN_CONFIRMED`
 - `AUDIO_RECORDING_TIMESTAMP_CONFIRMED`
 
@@ -31,6 +34,6 @@ Only names are recorded here. Do not place credential values in source control. 
 
 ## Release and operations gate
 
-Before any real scan, verify the exact folder link/ID, service-account identity, applied Viewer share, API access, listing completeness, actual filename/date interpretation, and CRM Lead phone-field coverage. Report only aggregates. The worker should initially run as a manual, isolated job. A 15–30 minute schedule is a target for review, not an enabled setting; first confirm a durable private volume, host compatibility, cost, alerting, and rollback. Do not attach it to the Facebook Cron or trigger it from Dashboard refresh.
+Before any real scan, verify the exact folder link/ID, service-account identity, applied Viewer share, API access, listing completeness, actual filename/date interpretation, and CRM Lead phone-field coverage. Report only aggregates. A 15–30 minute schedule is a target for review, not an enabled setting; first confirm a durable private volume, host compatibility, cost, alerting, and rollback. Do not attach it to the Facebook Cron or trigger it from Dashboard refresh.
 
-After a verified initial index, confirm that the intended Dashboard users can open the Drive links without making files public. The JSON state requires durable storage. On Render, a Cron Job cannot attach a persistent disk; use a background worker with a disk or approve a separate durable data store before selecting a Cron Job design. Confirm the exact service plan and storage charge before creating a paid service. Then request one consolidated Production release approval for the minimum Web/API/Static/worker targets. Roll back by disabling the Dashboard gates and restoring the previous Web/Static revisions; retain a copy of the last valid private index snapshot before any worker-state format change.
+After a verified initial index, confirm that the intended Dashboard users can open the Drive links without making files public. The least incremental-cost Render candidate is a 1 GB persistent disk mounted on the existing single-instance Web service, with the JSON index and disabled-by-default in-process worker on that same service. Render lists disk storage at $0.25/GB/month; the current Web compute plan would remain unchanged. A disk cannot attach to a Cron Job, is private to one service instance, prevents scaling to multiple instances, and causes a brief interruption on deploy. Verify that tradeoff with the owner before adding the disk. A separate Background Worker with its own disk cannot share the JSON file with the Web API; it would require a shared datastore or an API handoff. Confirm actual workspace billing, service plan, monitoring, and rollback before any infrastructure change. Then request one consolidated Production release approval for Web/API, Static, and the selected storage/scheduler approach. Roll back by disabling the worker and Dashboard gates, retaining a private copy of the last valid index, and restoring the previous Web/Static revisions.

@@ -1894,6 +1894,20 @@ const dashboardRouterOptions = crm4DashboardMode
     : {};
 app.use("/api", require("./services/dashboardRouter").createDashboardRouter(dashboardRouterOptions));
 
-app.listen(PORT, () => {
+let audioWorkerHandle = null;
+const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    try {
+        audioWorkerHandle = require("./services/audioWorkerRuntime").startAudioIndexWorker(process.env);
+    } catch {
+        process.stderr.write("Audio worker configuration is invalid; scheduled scans were not started.\n");
+    }
 });
+
+function stopServer() {
+    audioWorkerHandle?.stop();
+    server.close();
+}
+
+process.once("SIGTERM", stopServer);
+process.once("SIGINT", stopServer);
