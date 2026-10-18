@@ -11,6 +11,8 @@ const {
     SHEET_NAMES,
 } = require("../services/crm4DashboardAdapter");
 const { createAudioUpdateGate, runAudioUpdate } = require("../services/crm4AudioAutomation");
+const { createInMemoryAudioIndexStore, readAudioIndexSnapshot } = require("../services/audioIndexStore");
+const { runAudioIndexScan } = require("../services/audioIndexWorker");
 const { buildAdditiveSchemaPlan, buildCrm4AudioSheetPlan } = require("../services/crm4SheetSchema");
 const { shapeDashboardResponse } = require("../services/dashboardPrivacy");
 
@@ -115,7 +117,131 @@ test("CRM4 provider does not cache a source snapshot that fails model validation
     assert.equal(readCount, 2);
 });
 
-test("Release 1 maps CRM4 leads without audio tabs and excludes MAIN-only IDs", () => {
+test("CRM4 provider projects a completed in-process Audio scan without admitting excluded files", async () => {
+    const sheets = fixture();
+    sheets.LEADS.push(
+        ["L-2", "2026-10-02", "Synthetic Two", "0898765432", "Ongoing", "Owner B"],
+        ["L-3", "2026-10-03", "Synthetic Three", "0822222222", "New", "Owner A"],
+        ["L-4", "2026-10-04", "Synthetic Four", "0822222222", "New", "Owner A"],
+    );
+    const store = createInMemoryAudioIndexStore();
+    const scan = await runAudioIndexScan({
+        drive: {
+            async listChildren() {
+                return { files: [
+                    { id: "matched-file", name: "Call_0812345678_261018_120000.m4a" },
+                    { id: "unmatched-file", name: "Call_0888888888_261018_120000.m4a" },
+                    { id: "ambiguous-file", name: "Call_0822222222_261018_120000.m4a" },
+                    { id: "invalid-file", name: "unparsed-recording.m4a" },
+                ] };
+            },
+        },
+        readLeads: async () => [
+            { lead_id: "L-1", phones: ["0812345678"] },
+            { lead_id: "L-2", phones: ["0898765432"] },
+            { lead_id: "L-3", phones: ["0822222222"] },
+            { lead_id: "L-4", phones: ["0822222222"] },
+        ],
+        store,
+        rootFolderId: "synthetic-folder",
+        filenamePatternVerified: true,
+        timestampVerified: true,
+    });
+
+    assert.equal(scan.aggregate.unique_matched_files, 1);
+    assert.equal(scan.aggregate.ambiguous_phone_files, 1);
+    assert.equal(scan.aggregate.phones_absent_from_leads, 1);
+    assert.equal(scan.aggregate.invalid_or_missing_phone_files, 1);
+
+    const env = {
+        AUDIO_FILENAME_PATTERN_CONFIRMED: "true",
+        AUDIO_RECORDING_TIMESTAMP_CONFIRMED: "true",
+        AUDIO_DASHBOARD_LINKS_AUTHORIZED: "true",
+    };
+    const provider = createCrm4DashboardDataProvider({
+        env,
+        readSheets: async () => sheets,
+        audioIndexReader: () => readAudioIndexSnapshot({
+            store,
+            filenamePatternVerified: env.AUDIO_FILENAME_PATTERN_CONFIRMED === "true",
+            timestampVerified: env.AUDIO_RECORDING_TIMESTAMP_CONFIRMED === "true",
+            linksAuthorized: env.AUDIO_DASHBOARD_LINKS_AUTHORIZED === "true",
+        }),
+    });
+    const model = shapeDashboardResponse(await provider({ filters: {}, pagination: { offset: 0, limit: 100 } }));
+    const byId = new Map(model.operational_leads.items.map(lead => [lead.lead_id, lead]));
+
+    assert.equal(model.operational_leads.total, 4);
+    assert.equal(byId.get("L-1").audio_recording_count, 1);
+    assert.equal(byId.get("L-1").audio_latest_recording_at, "2026-10-18T05:00:00.000Z");
+    assert.equal(byId.get("L-1").audio_latest_recording_url, "https://drive.google.com/file/d/matched-file/view");
+    for (const leadId of ["L-2", "L-3", "L-4"]) {
+        assert.equal(byId.get(leadId).audio_recording_count, null);
+        assert.equal(byId.get(leadId).audio_latest_recording_at, null);
+        assert.equal(byId.get(leadId).audio_latest_recording_url, null);
+    }
+});
+
+test("CRM4 Audio timestamp, link authorization, and incomplete snapshot gates fail closed", async () => {
+    const sheets = fixture();
+    const store = createInMemoryAudioIndexStore();
+    await store.write({
+        schema_version: 2,
+        root_folder_id: "synthetic-folder",
+        folder_ids: ["synthetic-folder"],
+        drive_files: [{ id: "verified-file", name: "Call_0812345678_261018_120000.m4a" }],
+        entries: [{
+            file_id: "verified-file",
+            lead_id: "L-1",
+            recording_at: "2026-10-18T05:00:00.000Z",
+            recording_at_verified: true,
+        }],
+        aggregate: { unique_matched_files: 1 },
+        last_successful_scan_at: "2026-10-18T05:01:00.000Z",
+    });
+    const env = {
+        AUDIO_FILENAME_PATTERN_CONFIRMED: "true",
+        AUDIO_RECORDING_TIMESTAMP_CONFIRMED: "false",
+        AUDIO_DASHBOARD_LINKS_AUTHORIZED: "true",
+    };
+    const provider = createCrm4DashboardDataProvider({
+        env,
+        readSheets: async () => sheets,
+        audioIndexReader: () => readAudioIndexSnapshot({
+            store,
+            filenamePatternVerified: env.AUDIO_FILENAME_PATTERN_CONFIRMED === "true",
+            timestampVerified: env.AUDIO_RECORDING_TIMESTAMP_CONFIRMED === "true",
+            linksAuthorized: env.AUDIO_DASHBOARD_LINKS_AUTHORIZED === "true",
+        }),
+    });
+
+    let lead = shapeDashboardResponse(await provider()).operational_leads.items[0];
+    assert.equal(lead.audio_recording_count, 1);
+    assert.equal(lead.audio_latest_recording_at, null);
+    assert.equal(lead.audio_latest_recording_url, null);
+
+    env.AUDIO_RECORDING_TIMESTAMP_CONFIRMED = "true";
+    env.AUDIO_DASHBOARD_LINKS_AUTHORIZED = "false";
+    lead = shapeDashboardResponse(await provider({ forceRefresh: true })).operational_leads.items[0];
+    assert.equal(lead.audio_recording_count, 1);
+    assert.equal(lead.audio_latest_recording_at, "2026-10-18T05:00:00.000Z");
+    assert.equal(lead.audio_latest_recording_url, null);
+
+    env.AUDIO_FILENAME_PATTERN_CONFIRMED = "false";
+    lead = shapeDashboardResponse(await provider({ forceRefresh: true })).operational_leads.items[0];
+    assert.equal(lead.audio_recording_count, null);
+    assert.equal(lead.audio_latest_recording_at, null);
+    assert.equal(lead.audio_latest_recording_url, null);
+
+    env.AUDIO_FILENAME_PATTERN_CONFIRMED = "true";
+    await store.markUnavailable("dashboard_audio_index_scan_incomplete");
+    lead = shapeDashboardResponse(await provider({ forceRefresh: true })).operational_leads.items[0];
+    assert.equal(lead.audio_recording_count, null);
+    assert.equal(lead.audio_latest_recording_at, null);
+    assert.equal(lead.audio_latest_recording_url, null);
+});
+
+test("CRM4 leads without an Audio snapshot show no fabricated associations", () => {
     const sheets = fixture();
     delete sheets.AUDIO_LIBRARY_INDEX;
     delete sheets.AUDIO_INDEX_STATE;
@@ -125,7 +251,9 @@ test("Release 1 maps CRM4 leads without audio tabs and excludes MAIN-only IDs", 
     assert.equal(model.overview.leads.total, 1);
     assert.equal(model.crm4_reconciliation.main_only_lead_count, 1);
     assert.equal(model.warnings.some(warning => warning.code === "crm4_main_only_id_exception" && warning.count === 1), true);
-    assert.equal(Object.keys(model.operational_leads.items[0]).some(key => /audio|recording/i.test(key)), false);
+    assert.equal(model.operational_leads.items[0].audio_recording_count, null);
+    assert.equal(model.operational_leads.items[0].audio_latest_recording_at, null);
+    assert.equal(model.operational_leads.items[0].audio_latest_recording_url, null);
     assert.equal(Object.hasOwn(model, "audio_index"), false);
     assert.equal(JSON.stringify(model.recent_activity).includes("Audio Sync"), false);
     assert.equal(JSON.stringify(model).includes("private-id"), false);
@@ -224,12 +352,15 @@ test("audio sheet plan is bounded to CRM4 LEADS rows and remains dry-run only", 
     assert.equal(plan.headerPlan.columns.some(column => column.key === "sales_follow_up_status"), true);
 });
 
-test("Release 1 response shaping omits audio fields, counts, and links", () => {
+test("Dashboard response shaping ignores legacy Audio link fields and raw index data", () => {
     const shaped = shapeDashboardResponse({
-        operational_leads: { items: [{ audio_follow_up_count: 4, latest_recording_link: "https://drive.google.com/file/d/private-id/view", audio_recording_count: 2, latest_recording_at: "2026-10-14" }] },
+        operational_leads: { items: [{ audio_follow_up_count: 4, latest_recording_link: "https://drive.google.com/file/d/private-id/view", audio_recording_count: null, latest_recording_at: "2026-10-14" }] },
         audio_index: { complete: true, stats: { matched: 2, missingPhone: 3 } },
     });
-    assert.equal(Object.keys(shaped.operational_leads.items[0]).some(key => /audio|recording/i.test(key)), false);
+    assert.equal(shaped.operational_leads.items[0].audio_recording_count, null);
+    assert.equal(shaped.operational_leads.items[0].audio_latest_recording_at, null);
+    assert.equal(shaped.operational_leads.items[0].audio_latest_recording_url, null);
+    assert.equal(Object.hasOwn(shaped.operational_leads.items[0], "latest_recording_link"), false);
     assert.equal(Object.hasOwn(shaped, "audio_index"), false);
     assert.equal(JSON.stringify(shaped).includes("private-id"), false);
     const reconciliation = shapeDashboardResponse({ crm4_reconciliation: { main_only_lead_count: 1 } });

@@ -245,7 +245,7 @@ function audioIndexIsComplete(stateRows) {
     });
 }
 
-function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date()) {
+function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(), audioIndex = null) {
     const parsed = {};
     for (const name of SHEET_NAMES) parsed[name] = recordsFromGrid(sheets[name], name);
     const mainHeader = sheets.LEADS_MAIN[locateHeaderRow(sheets.LEADS_MAIN, REQUIRED_FIELDS.LEADS_MAIN, "LEADS_MAIN")];
@@ -267,6 +267,7 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date())
         filters,
         operational_lead_pagination: pagination,
         asOf,
+        audio_index: audioIndex,
         source_warnings: [
             ...(dealReconciliation.identicalDuplicates ? [{
                 code: "crm4_duplicate_deal_rows_collapsed",
@@ -383,7 +384,12 @@ function createCrm4SheetsReader(env = process.env, sheetsClientFactory = null) {
 
 const CRM4_SNAPSHOT_CACHE_TTL_MS = 45_000;
 
-function createCrm4DashboardDataProvider({ env = process.env, readSheets = createCrm4SheetsReader(env), now = Date.now } = {}) {
+function createCrm4DashboardDataProvider({
+    env = process.env,
+    readSheets = createCrm4SheetsReader(env),
+    now = Date.now,
+    audioIndexReader = async () => null,
+} = {}) {
     let cachedSheets = null;
     let cachedAt = 0;
     let readInFlight = null;
@@ -418,10 +424,13 @@ function createCrm4DashboardDataProvider({ env = process.env, readSheets = creat
     }
 
     return async ({ filters = {}, pagination = {}, asOf = new Date(), forceRefresh = false } = {}) => {
-        const sheets = await getSheets(forceRefresh === true);
+        const [sheets, audioIndex] = await Promise.all([
+            getSheets(forceRefresh === true),
+            audioIndexReader(),
+        ]);
         // Rebuild the response model for each request so filters and pagination
         // remain request-local and no authenticated response is shared.
-        return buildCrm4DashboardModel(sheets, filters, pagination, asOf);
+        return buildCrm4DashboardModel(sheets, filters, pagination, asOf, audioIndex);
     };
 }
 

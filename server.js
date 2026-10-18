@@ -1885,9 +1885,16 @@ app.post("/repair/deals-phone", requireSyncSecretMiddleware, handleDealsPhoneRep
 app.post("/webhook/line", handleLineWebhook);
 
 const crm4DashboardMode = String(process.env.CRM4_DASHBOARD_MODE || "").toLowerCase() === "true";
+const { readAudioIndexSnapshot } = require("./services/audioIndexStore");
 const dashboardRouterOptions = crm4DashboardMode
     ? {
-        dataProvider: require("./services/crm4DashboardAdapter").createCrm4DashboardDataProvider(),
+        dataProvider: require("./services/crm4DashboardAdapter").createCrm4DashboardDataProvider({
+            audioIndexReader: () => readAudioIndexSnapshot({
+                filenamePatternVerified: process.env.AUDIO_FILENAME_PATTERN_CONFIRMED === "true",
+                timestampVerified: process.env.AUDIO_RECORDING_TIMESTAMP_CONFIRMED === "true",
+                linksAuthorized: process.env.AUDIO_DASHBOARD_LINKS_AUTHORIZED === "true",
+            }),
+        }),
         // CRM 4 does not depend on the legacy CRM parity source.
         healthReader: async () => null,
     }
