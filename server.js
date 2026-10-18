@@ -2,6 +2,7 @@ require("dotenv").config();
 
 const express = require("express");
 const axios = require("axios");
+const { hasValidSyncAuthorization } = require("./services/syncSecretAuth");
 const {
     fetchLeadDetail,
     fetchFormLeads,
@@ -432,9 +433,7 @@ function requireSyncSecret(req, res) {
         return false;
     }
 
-    const incomingSecret = String(req.query.secret || "").trim();
-
-    if (incomingSecret !== process.env.SYNC_SECRET) {
+    if (!hasValidSyncAuthorization(req, process.env.SYNC_SECRET)) {
         console.warn("⛔ Unauthorized attempt");
 
         res.status(401).json({
@@ -776,7 +775,8 @@ app.get("/sync/facebook-leads/backfill/step", async (req, res) => {
             return res.status(409).json({
                 success: false,
                 error: "No Facebook backfill job found. Start one first.",
-                start_url: "/sync/facebook-leads/backfill/start?secret=...",
+                start_url: "/sync/facebook-leads/backfill/start",
+                authentication: "Authorization: Bearer <SYNC_SECRET>",
             });
         }
 
