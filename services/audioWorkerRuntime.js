@@ -1,6 +1,6 @@
 "use strict";
 
-const { runAudioIndexOnce } = require("../scripts/audio-index-once");
+const { main: runAudioIndexOnce } = require("../scripts/audio-index-once");
 const { parseIntervalMinutes, runScheduledAudioIndex } = require("../scripts/audio-index-worker");
 
 const REQUIRED_AUDIO_ENV = Object.freeze([
