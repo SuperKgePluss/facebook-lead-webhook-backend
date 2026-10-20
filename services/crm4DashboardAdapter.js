@@ -297,7 +297,21 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(),
         ],
     });
     model.crm4_reconciliation = { main_only_lead_count: mainOnlyLeadCount };
-    model.crm4_source_capabilities = { ...sourceCapabilities, financial_complete: dealReconciliation.conflictingIds === 0 };
+    const financialIntegrityWarningCodes = new Set([
+        "dashboard_deals_projection_unavailable",
+        "full_amount_unavailable",
+        "paid_amount_unavailable",
+        "invalid_full_amount",
+        "invalid_paid_amount",
+        "negative_full_amount",
+        "negative_paid_amount",
+        "paid_exceeds_full_amount",
+        "outstanding_unavailable",
+        "payment_date_unavailable",
+    ]);
+    const financialComplete = dealReconciliation.conflictingIds === 0
+        && !model.warnings.some(warning => financialIntegrityWarningCodes.has(warning.code));
+    model.crm4_source_capabilities = { ...sourceCapabilities, financial_complete: financialComplete };
     return model;
 }
 

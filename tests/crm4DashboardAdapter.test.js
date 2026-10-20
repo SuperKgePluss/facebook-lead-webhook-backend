@@ -295,6 +295,55 @@ test("duplicate Deal IDs do not double count or invent financial totals", () => 
     assert.equal(unavailable.warnings.some(warning => warning.code === "crm4_conflicting_deal_ids_excluded" && warning.count === 1), true);
 });
 
+test("Deal IDs reused across different Leads fail the financial guard", () => {
+    const headers = ["Deal ID", "Lead ID", "Full Amount", "Paid Amount", "Payment Status", "Payment Date"];
+    const deal = ["D-1", "L-1", 1000, 200, "Partial", "2026-10-01"];
+    const sheets = fixture();
+    sheets.DEALS = [headers, deal, ["D-1", "L-2", 1000, 200, "Partial", "2026-10-01"]];
+
+    const response = shapeDashboardResponse(buildCrm4DashboardModel(sheets, {}, {}, new Date("2026-10-14T00:00:00Z")));
+
+    assert.equal(response.crm4_source_capabilities.financial_complete, false);
+    assert.equal(response.overview.financial.deal_value, null);
+    assert.equal(response.overview.financial.paid, null);
+    assert.equal(response.warnings.some(warning => warning.code === "crm4_conflicting_deal_ids_excluded"), true);
+});
+
+test("incomplete or contradictory financial fields make all financial metrics unavailable", () => {
+    const headers = ["Deal ID", "Lead ID", "Full Amount", "Paid Amount", "Payment Status", "Payment Date"];
+    const cases = [
+        ["missing full amount", "", 200],
+        ["missing paid amount", 1000, ""],
+        ["invalid full amount", "unknown", 0],
+        ["negative paid amount", 100, -1],
+        ["paid amount exceeds full amount", 100, 101],
+    ];
+
+    for (const [label, fullAmount, paidAmount] of cases) {
+        const sheets = fixture();
+        sheets.DEALS = [headers, ["D-1", "L-1", fullAmount, paidAmount, "Unpaid", "2026-10-01"]];
+        const response = shapeDashboardResponse(buildCrm4DashboardModel(sheets, {}, {}, new Date("2026-10-14T00:00:00Z")));
+
+        assert.equal(response.crm4_source_capabilities.financial_complete, false, label);
+        assert.equal(response.overview.financial.deal_value, null, label);
+        assert.equal(response.overview.financial.paid, null, label);
+        assert.equal(response.overview.financial.outstanding, null, label);
+        assert.equal(response.overview.financial.open_deals, null, label);
+        assert.deepEqual(response.overview.financial.payment_status_counts, {}, label);
+    }
+});
+
+test("explicit zero financial values remain distinct from missing amounts", () => {
+    const sheets = fixture();
+    sheets.DEALS = [["Deal ID", "Lead ID", "Full Amount", "Paid Amount", "Payment Status", "Payment Date"],
+        ["D-1", "L-1", 0, 0, "Unpaid", "2026-10-01"]];
+    const response = shapeDashboardResponse(buildCrm4DashboardModel(sheets, {}, {}, new Date("2026-10-14T00:00:00Z")));
+
+    assert.equal(response.crm4_source_capabilities.financial_complete, true);
+    assert.equal(response.overview.financial.deal_value, 0);
+    assert.equal(response.overview.financial.paid, 0);
+});
+
 test("Release 1 Sheet reader requires no audio tabs or recording data columns", async () => {
     const requestedRanges = [];
     const headers = ["Activity ID", "Lead ID", "Sheet Name", "Action Type", "Old Value", "New Value", "Lead Status", "Note", "Audio URL", "Audio File Name", "Payment URL", "Payment File Name", "Location URL", "Location File Name", "Created By", "Created At"];
