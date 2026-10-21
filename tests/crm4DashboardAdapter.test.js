@@ -89,22 +89,30 @@ test("CRM4 provider coalesces concurrent source reads and force refresh bypasses
 
 test("financial quality moves from partial to verified only after a source refresh", async () => {
     let readCount = 0;
+    let currentTime = 1_000;
     let sheets = fixture();
     sheets.DEALS = [["Deal ID", "Lead ID", "Full Amount", "Paid Amount", "Payment Status", "Payment Date"],
         ["D-1", "L-1", 1000, 250, "Unpaid", "2026-10-01"],
         ["D-2", "L-1", "", "", "Unpaid", ""]];
-    const provider = createCrm4DashboardDataProvider({ readSheets: async () => { readCount++; return sheets; } });
+    const provider = createCrm4DashboardDataProvider({
+        readSheets: async () => { readCount++; return sheets; },
+        now: () => currentTime,
+    });
 
     const partial = await provider();
     assert.equal(partial.overview.financial.metric_quality.deal_value.status, "PARTIAL");
+    assert.equal(partial.overview.financial.metric_quality.deal_value.sourceAsOf, "1970-01-01T00:00:01.000Z");
     sheets = structuredClone(sheets);
     sheets.DEALS[2] = ["D-2", "L-1", 500, 0, "Unpaid", "2026-10-14"];
     const cached = await provider();
     assert.equal(cached.overview.financial.metric_quality.deal_value.status, "PARTIAL");
+    assert.equal(cached.overview.financial.metric_quality.deal_value.sourceAsOf, "1970-01-01T00:00:01.000Z");
     assert.equal(readCount, 1);
+    currentTime = 2_000;
     const refreshed = await provider({ forceRefresh: true });
     assert.equal(refreshed.overview.financial.metric_quality.deal_value.status, "VERIFIED");
     assert.equal(refreshed.overview.financial.deal_value, 1500);
+    assert.equal(refreshed.overview.financial.metric_quality.deal_value.sourceAsOf, "1970-01-01T00:00:02.000Z");
     assert.equal(readCount, 2);
 });
 

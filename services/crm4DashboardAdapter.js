@@ -249,7 +249,7 @@ function audioIndexIsComplete(stateRows) {
     });
 }
 
-function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(), audioIndex = null) {
+function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(), audioIndex = null, sourceAsOf = asOf) {
     const parsed = {};
     for (const name of SHEET_NAMES) parsed[name] = recordsFromGrid(sheets[name], name);
     const mainHeader = sheets.LEADS_MAIN[locateHeaderRow(sheets.LEADS_MAIN, REQUIRED_FIELDS.LEADS_MAIN, "LEADS_MAIN")];
@@ -271,7 +271,7 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(),
         financial_source: {
             sourceDeals: dealReconciliation.sourceDeals,
             conflictingDealIds: dealReconciliation.conflictingDealIds,
-            sourceAsOf: asOf,
+            sourceAsOf,
         },
         filters,
         operational_lead_pagination: pagination,
@@ -441,7 +441,7 @@ function createCrm4DashboardDataProvider({
         ]);
         // Rebuild the response model for each request so filters and pagination
         // remain request-local and no authenticated response is shared.
-        return buildCrm4DashboardModel(sheets, filters, pagination, asOf, audioIndex);
+        return buildCrm4DashboardModel(sheets, filters, pagination, asOf, audioIndex, new Date(cachedAt));
     };
 }
 
