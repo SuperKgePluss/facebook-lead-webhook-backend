@@ -408,6 +408,13 @@ function isCancelledDeal(deal) {
         .some(value => lower(value) === "cancelled");
 }
 
+function openDealState(deal) {
+    const raw = lower(hasValue(deal?.deal_status) ? deal.deal_status : deal?.payment_status);
+    if (["open", "ongoing", "unpaid", "partial"].includes(raw)) return "OPEN";
+    if (["closed", "won", "done", "completed", "paid", "cancelled"].includes(raw)) return "CLOSED";
+    return "UNKNOWN";
+}
+
 function buildLeadMetrics(leads, filters, warnings) {
     const statusCounts = statusMap(KNOWN_LEAD_STATUSES, UNMAPPED_LEAD_STATUS);
     const sourceCounts = {};
@@ -458,9 +465,37 @@ function buildLeadMetrics(leads, filters, warnings) {
     };
 }
 
-function buildFinancialMetrics(deals, leadById, filters, warnings) {
+function metricQuality(value, totalCount, eligibleCount, reasons, unavailable = false) {
+    const total = Math.max(0, Number(totalCount) || 0);
+    const eligible = Math.max(0, Math.min(total, Number(eligibleCount) || 0));
+    const reasonCounts = {};
+    for (const reason of reasons) reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    const reasonCodes = Object.keys(reasonCounts);
+    const excludedCount = total - eligible;
+    const status = unavailable || (total > 0 && eligible === 0)
+        ? "UNAVAILABLE"
+        : excludedCount > 0 ? "PARTIAL" : "VERIFIED";
+    return {
+        value: status === "UNAVAILABLE" ? null : value,
+        status,
+        eligibleCount: eligible,
+        excludedCount,
+        totalCount: total,
+        reasonCodes,
+        reasonCounts,
+    };
+}
+
+function buildFinancialMetrics(deals, leadById, filters, warnings, source = {}) {
     const paymentStatusCounts = statusMap(KNOWN_PAYMENT_STATUSES);
     const scopedDeals = [];
+    const conflictIds = new Set(source.conflictingDealIds || []);
+    const rawDeals = Array.isArray(source.sourceDeals) ? source.sourceDeals : deals;
+    const scopedRawDeals = [];
+
+    for (const deal of rawDeals) {
+        if (matchesDownstreamRelationship(deal, leadById, filters, warnings)) scopedRawDeals.push(deal);
+    }
 
     if (hasDateFilter(filters)) {
         warnings.add(
@@ -487,9 +522,53 @@ function buildFinancialMetrics(deals, leadById, filters, warnings) {
     let paid = 0;
     let outstanding = 0;
     let openDeals = 0;
+    let dealValueEligible = 0;
+    let paidEligible = 0;
+    let outstandingEligible = 0;
+    let openDealsEligible = 0;
+    const reasonCodes = {
+        dealRecords: [], dealValue: [], paid: [], outstanding: [], openDeals: [], paymentStatus: [],
+    };
+    const rawTotalCount = scopedRawDeals.length;
+    const scopedConflictCount = scopedRawDeals.filter(deal => conflictIds.has(text(deal.deal_id))).length;
+    const duplicateCount = Math.max(0, rawTotalCount - scopedDeals.length - scopedConflictCount);
+    const rawCountsById = new Map();
+    for (const deal of scopedRawDeals) {
+        const id = text(deal.deal_id);
+        rawCountsById.set(id, (rawCountsById.get(id) || 0) + 1);
+    }
+    const duplicateIdentityGroups = [...rawCountsById].filter(([id, count]) => count > 1 && !conflictIds.has(id)).length;
+    const currentStateRawDeals = scopedRawDeals.filter(deal => !isCancelledDeal(deal));
+    const paidApplicableRawDeals = hasDateFilter(filters)
+        ? currentStateRawDeals.filter(deal => {
+            const parsedDate = parseDateValue(deal.payment_date);
+            return !parsedDate.date || dateKeyInRange(formatBangkokDateKey(parsedDate.date), filters);
+        })
+        : currentStateRawDeals;
+    if (scopedConflictCount) {
+        for (const reasons of Object.values(reasonCodes)) {
+            for (let index = 0; index < scopedConflictCount; index++) reasons.push("conflicting_deal_id");
+        }
+    }
+    if (duplicateCount) {
+        for (const reasons of Object.values(reasonCodes)) {
+            for (let index = 0; index < duplicateCount; index++) reasons.push("duplicate_deal_rows_collapsed");
+        }
+    }
 
     for (const deal of scopedDeals) {
-        if (isCancelledDeal(deal)) continue;
+        const status = canonicalStatus(deal.payment_status, KNOWN_PAYMENT_STATUSES);
+        const openState = openDealState(deal);
+        if (openState !== "UNKNOWN") {
+            openDealsEligible++;
+        } else {
+            reasonCodes.openDeals.push("open_status_unavailable");
+        }
+        if (status === "Unknown") reasonCodes.paymentStatus.push("payment_status_unavailable");
+        const cancelled = isCancelledDeal(deal);
+        if (cancelled) {
+            continue;
+        }
 
         const full = parseAmount(deal.full_amount);
         const paidAmount = parseAmount(getPaidAmount(deal));
@@ -500,11 +579,24 @@ function buildFinancialMetrics(deals, leadById, filters, warnings) {
         if (!full.present) warnings.add("full_amount_unavailable", "A deal has no explicit full_amount value.");
         if (!paidAmount.present) warnings.add("paid_amount_unavailable", "A deal has no explicit paid_amount value; price is not used as a fallback.");
 
+        const fullValid = full.present && !full.invalid && !full.negative;
+        const paidValid = paidAmount.present && !paidAmount.invalid && !paidAmount.negative;
+        if (!full.present) reasonCodes.dealValue.push("full_amount_missing");
+        if (full.invalid) reasonCodes.dealValue.push("full_amount_invalid");
+        if (full.negative) reasonCodes.dealValue.push("full_amount_negative");
+        if (!paidAmount.present) reasonCodes.paid.push("paid_amount_missing");
+        if (paidAmount.invalid) reasonCodes.paid.push("paid_amount_invalid");
+        if (paidAmount.negative) reasonCodes.paid.push("paid_amount_negative");
+
         const safeFull = full.invalid || full.value < 0 ? 0 : full.value;
         const safePaid = paidAmount.invalid || paidAmount.value < 0 ? 0 : paidAmount.value;
-        if (safePaid > safeFull) warnings.add("paid_exceeds_full_amount");
+        const overpaid = fullValid && paidValid && safePaid > safeFull;
+        if (overpaid) warnings.add("paid_exceeds_full_amount");
 
-        dealValue += safeFull;
+        if (fullValid) {
+            dealValue += safeFull;
+            dealValueEligible++;
+        }
 
         let paidAmountMatchesPeriod = true;
         if (hasDateFilter(filters)) {
@@ -512,37 +604,61 @@ function buildFinancialMetrics(deals, leadById, filters, warnings) {
             if (!paymentDate.date) {
                 paidAmountMatchesPeriod = false;
                 warnings.add("payment_date_unavailable", "Paid Amount cannot be period-filtered when Payment Date is blank or invalid.");
+                reasonCodes.paid.push("payment_date_unavailable");
             } else {
                 paidAmountMatchesPeriod = dateKeyInRange(formatBangkokDateKey(paymentDate.date), filters);
             }
         }
-        if (paidAmount.present && !paidAmount.invalid && !paidAmount.negative && paidAmountMatchesPeriod) {
+        if (paidValid && paidAmountMatchesPeriod) {
             paid += safePaid;
+            paidEligible++;
         }
 
-        const balanceIsKnown = full.present
-            && paidAmount.present
-            && !full.invalid
-            && !paidAmount.invalid
-            && !full.negative
-            && !paidAmount.negative;
+        const balanceIsKnown = fullValid && paidValid && !overpaid;
+        if (!fullValid || !paidValid || overpaid) {
+            if (overpaid) reasonCodes.outstanding.push("paid_exceeds_full_amount");
+            else reasonCodes.outstanding.push(!fullValid ? "full_amount_invalid_or_missing" : "paid_amount_invalid_or_missing");
+        }
         if (!balanceIsKnown) {
             warnings.add("outstanding_unavailable", "Outstanding and Open Deals omit deals without valid explicit full_amount and paid_amount values.");
-            continue;
+        } else {
+            const safeOutstanding = safeFull - safePaid;
+            outstanding += safeOutstanding;
+            outstandingEligible++;
         }
 
-        const safeOutstanding = Math.max(0, safeFull - safePaid);
-        outstanding += safeOutstanding;
-        if (safeOutstanding > 0) openDeals++;
+        if (openState === "OPEN") {
+            openDeals++;
+        }
     }
 
+    const sourceAvailable = source.available !== false;
+    const sourceAsOf = parseDateValue(source.sourceAsOf || new Date()).date;
+    const asOfText = sourceAsOf ? formatTimestamp(sourceAsOf) : null;
+    const totalCount = rawTotalCount;
+    const quality = {
+        deal_records: metricQuality(totalCount, totalCount, totalCount, reasonCodes.dealRecords, !sourceAvailable),
+        open_deals: metricQuality(openDeals, totalCount, openDealsEligible, reasonCodes.openDeals, !sourceAvailable),
+        deal_value: metricQuality(roundMoney(dealValue), currentStateRawDeals.length, dealValueEligible, reasonCodes.dealValue, !sourceAvailable),
+        paid: metricQuality(roundMoney(paid), paidApplicableRawDeals.length, paidEligible, reasonCodes.paid, !sourceAvailable),
+        outstanding: metricQuality(roundMoney(outstanding), currentStateRawDeals.length, outstandingEligible, reasonCodes.outstanding, !sourceAvailable),
+        payment_status_counts: metricQuality(paymentStatusCounts, totalCount, scopedDeals.length, reasonCodes.paymentStatus, !sourceAvailable),
+    };
+    for (const metric of Object.values(quality)) metric.sourceAsOf = asOfText;
+
     return {
-        deal_value: roundMoney(dealValue),
-        paid: roundMoney(paid),
-        outstanding: roundMoney(outstanding),
-        open_deals: openDeals,
+        deal_value: quality.deal_value.value,
+        paid: quality.paid.value,
+        outstanding: quality.outstanding.value,
+        open_deals: quality.open_deals.value,
         payment_status_counts: paymentStatusCounts,
-        deals_in_scope: scopedDeals.length,
+        deals_in_scope: totalCount,
+        source_records_total: totalCount,
+        unique_verified_deal_count: scopedDeals.length,
+        conflicting_identity_groups: new Set(scopedRawDeals.filter(deal => conflictIds.has(text(deal.deal_id))).map(deal => text(deal.deal_id))).size,
+        duplicate_identity_groups: duplicateIdentityGroups,
+        duplicate_rows_collapsed: duplicateCount,
+        metric_quality: quality,
     };
 }
 
@@ -825,6 +941,7 @@ function buildDashboardReadModel({
     asOf = new Date(),
     source_warnings: sourceWarnings = [],
     audio_index: audioIndex = null,
+    financial_source: financialSource = {},
 } = {}) {
     const warnings = new WarningCollector();
     for (const warning of Array.isArray(sourceWarnings) ? sourceWarnings : []) {
@@ -835,6 +952,8 @@ function buildDashboardReadModel({
         const count = Number.isInteger(suppliedCount) && suppliedCount > 0 ? suppliedCount : 1;
         warnings.add(code, text(warning?.message) || "A dashboard source projection is unavailable.", count);
     }
+    const financialSourceAvailable = financialSource.available !== false
+        && !(Array.isArray(sourceWarnings) && sourceWarnings.some(warning => text(warning?.code) === "dashboard_deals_projection_unavailable"));
 
     const filters = normalizeFilters(filterInput, warnings);
     if (audioIndex?.warning) warnings.add(audioIndex.warning, "Verified Audio Release 2 data is not available.");
@@ -857,7 +976,11 @@ function buildDashboardReadModel({
         filters,
         overview: {
             leads: buildLeadMetrics(uniqueLeads.filter(lead => text(lead.lead_id)), filters, warnings),
-            financial: buildFinancialMetrics(deals, leadById, filters, warnings),
+            financial: buildFinancialMetrics(deals, leadById, filters, warnings, {
+                ...financialSource,
+                available: financialSourceAvailable,
+                sourceAsOf: financialSource.sourceAsOf || asOf,
+            }),
             installations: buildInstallationMetrics(installations, leadById, filters, warnings, asOf),
         },
         operational_leads: buildOperationalLeads(uniqueLeads.filter(lead => text(lead.lead_id)), activities, filters, warnings, operationalLeadPagination, deals, audioSummaries),

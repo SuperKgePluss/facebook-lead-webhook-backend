@@ -346,14 +346,15 @@ test("financial totals exclude cancelled deals and preserve partial paid amounts
     assert.equal(model.overview.financial.open_deals, 1);
 });
 
-test("paid amounts above full amount are retained and surfaced as an anomaly", () => {
+test("paid amounts above full amount remain visible but make Outstanding unavailable", () => {
     const model = buildDashboardReadModel({
         leads: [baseLead()],
         deals: [baseDeal({ full_amount: "100", paid_amount: "150" })],
     });
 
     assert.equal(model.overview.financial.paid, 150);
-    assert.equal(model.overview.financial.outstanding, 0);
+    assert.equal(model.overview.financial.outstanding, null);
+    assert.equal(model.overview.financial.metric_quality.outstanding.status, "UNAVAILABLE");
     assert.equal(model.warnings.find(item => item.code === "paid_exceeds_full_amount").count, 1);
 });
 
@@ -363,9 +364,9 @@ test("negative financial amounts are excluded from totals and surfaced as anomal
         deals: [baseDeal({ full_amount: "-100", paid_amount: "-20" })],
     });
 
-    assert.equal(model.overview.financial.deal_value, 0);
-    assert.equal(model.overview.financial.paid, 0);
-    assert.equal(model.overview.financial.outstanding, 0);
+    assert.equal(model.overview.financial.deal_value, null);
+    assert.equal(model.overview.financial.paid, null);
+    assert.equal(model.overview.financial.outstanding, null);
     assert.equal(model.warnings.find(item => item.code === "negative_full_amount").count, 1);
     assert.equal(model.warnings.find(item => item.code === "negative_paid_amount").count, 1);
 });
@@ -412,6 +413,11 @@ test("financial metrics keep current-state totals separate from Payment Date fil
     assert.equal(model.overview.financial.outstanding, 450);
     assert.equal(model.overview.financial.open_deals, 3);
     assert.equal(model.overview.financial.deals_in_scope, 3);
+    assert.equal(model.overview.financial.metric_quality.deal_value.status, "VERIFIED");
+    assert.equal(model.overview.financial.metric_quality.paid.status, "PARTIAL");
+    assert.equal(model.overview.financial.metric_quality.paid.eligibleCount, 1);
+    assert.equal(model.overview.financial.metric_quality.paid.excludedCount, 1);
+    assert.equal(model.overview.financial.metric_quality.paid.totalCount, 2);
     assert.equal(model.warnings.find(item => item.code === "payment_date_unavailable").count, 1);
     assert.ok(model.warnings.some(item => item.code === "deal_value_period_filter_unsupported"));
     assert.ok(model.warnings.some(item => item.code === "outstanding_period_filter_unsupported"));
@@ -438,14 +444,14 @@ test("legacy price is not treated as explicit Paid Amount", () => {
     });
 
     assert.equal(model.overview.financial.deal_value, 1000);
-    assert.equal(model.overview.financial.paid, 0);
-    assert.equal(model.overview.financial.outstanding, 0);
-    assert.equal(model.overview.financial.open_deals, 0);
+    assert.equal(model.overview.financial.paid, null);
+    assert.equal(model.overview.financial.outstanding, null);
+    assert.equal(model.overview.financial.open_deals, 1);
     assert.ok(model.warnings.some(item => item.code === "paid_amount_unavailable"));
     assert.ok(model.warnings.some(item => item.code === "outstanding_unavailable"));
 });
 
-test("Open Deals are non-cancelled deals with known Outstanding greater than zero", () => {
+test("Open Deals use the authoritative Unpaid status and do not require amounts", () => {
     const model = buildDashboardReadModel({
         leads: [baseLead()],
         deals: [
@@ -457,10 +463,24 @@ test("Open Deals are non-cancelled deals with known Outstanding greater than zer
         ],
     });
 
-    assert.equal(model.overview.financial.open_deals, 2);
+    assert.equal(model.overview.financial.open_deals, 3);
     assert.equal(model.overview.financial.outstanding, 160);
     assert.equal(model.overview.financial.deal_value, 400);
     assert.equal(model.warnings.some(item => item.code === "outstanding_unavailable"), true);
+});
+
+test("explicit Deal Status overrides payment status for the open-deal count", () => {
+    const model = buildDashboardReadModel({
+        leads: [baseLead()],
+        deals: [
+            baseDeal({ deal_id: "D-OPEN", deal_status: "Open", payment_status: "Paid", full_amount: "", paid_amount: "" }),
+            baseDeal({ deal_id: "D-CLOSED", deal_status: "Closed", payment_status: "Unpaid", full_amount: "", paid_amount: "" }),
+        ],
+    });
+
+    assert.equal(model.overview.financial.open_deals, 1);
+    assert.equal(model.overview.financial.metric_quality.open_deals.status, "VERIFIED");
+    assert.equal(model.overview.financial.metric_quality.deal_value.status, "UNAVAILABLE");
 });
 
 test("exact DEALS projection preserves financial semantics and privacy through the model", async () => {
@@ -547,7 +567,7 @@ test("exact DEALS projection preserves financial semantics and privacy through t
     assert.equal(current.overview.financial.deal_value, 1600);
     assert.equal(current.overview.financial.paid, 900);
     assert.equal(current.overview.financial.outstanding, 750);
-    assert.equal(current.overview.financial.open_deals, 1);
+    assert.equal(current.overview.financial.open_deals, 2);
     assert.equal(current.warnings.find(item => item.code === "paid_exceeds_full_amount").count, 1);
 
     const period = buildDashboardReadModel({
@@ -557,7 +577,7 @@ test("exact DEALS projection preserves financial semantics and privacy through t
     assert.equal(period.overview.financial.deal_value, 1600);
     assert.equal(period.overview.financial.paid, 250);
     assert.equal(period.overview.financial.outstanding, 750);
-    assert.equal(period.overview.financial.open_deals, 1);
+    assert.equal(period.overview.financial.open_deals, 2);
     assert.ok(period.warnings.some(item => item.code === "deal_value_period_filter_unsupported"));
     assert.ok(period.warnings.some(item => item.code === "outstanding_period_filter_unsupported"));
     assert.ok(period.warnings.some(item => item.code === "open_deals_period_filter_unsupported"));
@@ -581,10 +601,11 @@ test("missing Paid Amount header, even with Price present, makes DEALS metrics u
     const model = buildDashboardReadModel(sheets);
 
     assert.deepEqual(sheets.deals, []);
-    assert.equal(model.overview.financial.deal_value, 0);
-    assert.equal(model.overview.financial.paid, 0);
-    assert.equal(model.overview.financial.outstanding, 0);
-    assert.equal(model.overview.financial.open_deals, 0);
+    assert.equal(model.overview.financial.deal_value, null);
+    assert.equal(model.overview.financial.paid, null);
+    assert.equal(model.overview.financial.outstanding, null);
+    assert.equal(model.overview.financial.open_deals, null);
+    assert.equal(model.overview.financial.metric_quality.open_deals.status, "UNAVAILABLE");
     const warning = model.warnings.find(item => item.code === "dashboard_deals_projection_unavailable");
     assert.ok(warning);
     assert.match(warning.message, /Paid Amount/);

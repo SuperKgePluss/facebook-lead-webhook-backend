@@ -25,11 +25,27 @@ function copyMap(value) {
     return value && typeof value === "object" ? { ...value } : {};
 }
 
+function shapeMetricQuality(metrics) {
+    if (!metrics || typeof metrics !== "object") return {};
+    return Object.fromEntries(Object.entries(metrics).map(([key, metric]) => [key, {
+        value: metric?.status === "UNAVAILABLE" ? null : metric?.value ?? null,
+        status: ["VERIFIED", "PARTIAL", "UNAVAILABLE"].includes(metric?.status) ? metric.status : "UNAVAILABLE",
+        eligibleCount: safeCount(metric?.eligibleCount),
+        excludedCount: safeCount(metric?.excludedCount),
+        totalCount: safeCount(metric?.totalCount),
+        reasonCodes: Array.isArray(metric?.reasonCodes) ? [...new Set(metric.reasonCodes.map(String))] : [],
+        reasonCounts: metric?.reasonCounts && typeof metric.reasonCounts === "object"
+            ? Object.fromEntries(Object.entries(metric.reasonCounts).map(([code, count]) => [String(code), safeCount(count)]))
+            : {},
+        sourceAsOf: typeof metric?.sourceAsOf === "string" && Number.isFinite(Date.parse(metric.sourceAsOf)) ? metric.sourceAsOf : null,
+    }]));
+}
+
 function shapeDashboardResponse(model) {
     const overview = model?.overview || {};
     const leads = overview.leads || {};
     const financial = overview.financial || {};
-    const financialComplete = model?.crm4_source_capabilities?.financial_complete !== false;
+    const financialComplete = model?.crm4_source_capabilities?.financial_complete === true;
     const installations = overview.installations || {};
 
     return {
@@ -67,12 +83,18 @@ function shapeDashboardResponse(model) {
                 by_sales_follow_up_status: copyMap(leads.by_sales_follow_up_status),
             },
             financial: {
-                deal_value: financialComplete ? Number(financial.deal_value) || 0 : null,
-                paid: financialComplete ? Number(financial.paid) || 0 : null,
-                outstanding: financialComplete ? Number(financial.outstanding) || 0 : null,
-                open_deals: financialComplete ? Number(financial.open_deals) || 0 : null,
-                payment_status_counts: financialComplete ? copyMap(financial.payment_status_counts) : {},
-                deals_in_scope: financialComplete ? Number(financial.deals_in_scope) || 0 : null,
+                deal_value: typeof financial.deal_value === "number" && Number.isFinite(financial.deal_value) ? financial.deal_value : null,
+                paid: typeof financial.paid === "number" && Number.isFinite(financial.paid) ? financial.paid : null,
+                outstanding: typeof financial.outstanding === "number" && Number.isFinite(financial.outstanding) ? financial.outstanding : null,
+                open_deals: typeof financial.open_deals === "number" && Number.isFinite(financial.open_deals) ? financial.open_deals : null,
+                payment_status_counts: copyMap(financial.payment_status_counts),
+                deals_in_scope: safeCount(financial.deals_in_scope),
+                source_records_total: safeCount(financial.source_records_total),
+                unique_verified_deal_count: safeCount(financial.unique_verified_deal_count),
+                conflicting_identity_groups: safeCount(financial.conflicting_identity_groups),
+                duplicate_identity_groups: safeCount(financial.duplicate_identity_groups),
+                duplicate_rows_collapsed: safeCount(financial.duplicate_rows_collapsed),
+                metric_quality: shapeMetricQuality(financial.metric_quality),
             },
             installations: {
                 by_status: copyMap(installations.by_status),

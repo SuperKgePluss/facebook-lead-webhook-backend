@@ -23,6 +23,7 @@ const FIELD_ALIASES = Object.freeze({
     full_amount: ["Full Amount", "ยอดเต็ม"],
     paid_amount: ["Paid Amount", "ยอดที่ชำระแล้ว"],
     payment_status: ["Payment Status", "สถานะการชำระเงิน"],
+    deal_status: ["Deal Status", "สถานะดีล"],
     payment_date: ["Payment Date", "วันที่ยืนยันการชำระเงิน"],
     open_installation: ["Open Installation", "เปิดงานติดตั้ง"],
     install_id: ["Install ID", "Installation ID", "รหัสติดตั้ง"],
@@ -180,6 +181,7 @@ function mapDeal(record) {
         full_amount: record.full_amount,
         paid_amount: record.paid_amount,
         payment_status: record.payment_status,
+        deal_status: record.deal_status,
         payment_date: record.payment_date,
         open_installation: record.open_installation,
     };
@@ -202,6 +204,8 @@ function reconcileDealRows(records) {
     }
     return {
         deals: [...byId].filter(([id]) => !conflicted.has(id)).map(([, deal]) => deal),
+        sourceDeals: records.map(mapDeal),
+        conflictingDealIds: [...conflicted],
         identicalDuplicates,
         conflictingIds: conflicted.size,
     };
@@ -264,6 +268,11 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(),
         deals: dealReconciliation.deals,
         installations: parsed.INSTALLATIONS.map(mapInstallation),
         activities: parsed.ACTIVITY_LOG.map(mapActivity),
+        financial_source: {
+            sourceDeals: dealReconciliation.sourceDeals,
+            conflictingDealIds: dealReconciliation.conflictingDealIds,
+            sourceAsOf: asOf,
+        },
         filters,
         operational_lead_pagination: pagination,
         asOf,
@@ -277,7 +286,7 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(),
             ...(dealReconciliation.conflictingIds ? [{
                 code: "crm4_conflicting_deal_ids_excluded",
                 count: dealReconciliation.conflictingIds,
-                message: "Conflicting Deal IDs were excluded; financial totals are unavailable until source reconciliation.",
+                message: "Conflicting Deal IDs were excluded from unique financial metrics; source record counts remain visible.",
             }] : []),
             ...(!sourceCapabilities.sales_follow_up_status ? [{
                 code: "crm4_sales_follow_up_status_column_missing",
@@ -297,20 +306,8 @@ function buildCrm4DashboardModel(sheets, filters, pagination, asOf = new Date(),
         ],
     });
     model.crm4_reconciliation = { main_only_lead_count: mainOnlyLeadCount };
-    const financialIntegrityWarningCodes = new Set([
-        "dashboard_deals_projection_unavailable",
-        "full_amount_unavailable",
-        "paid_amount_unavailable",
-        "invalid_full_amount",
-        "invalid_paid_amount",
-        "negative_full_amount",
-        "negative_paid_amount",
-        "paid_exceeds_full_amount",
-        "outstanding_unavailable",
-        "payment_date_unavailable",
-    ]);
-    const financialComplete = dealReconciliation.conflictingIds === 0
-        && !model.warnings.some(warning => financialIntegrityWarningCodes.has(warning.code));
+    const financialComplete = Object.values(model.overview.financial.metric_quality || {})
+        .every(metric => metric.status === "VERIFIED");
     model.crm4_source_capabilities = { ...sourceCapabilities, financial_complete: financialComplete };
     return model;
 }
